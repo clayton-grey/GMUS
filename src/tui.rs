@@ -103,18 +103,9 @@ impl PlayTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TreeEntry {
     Compilation,
-    CompilationAlbum {
-        album: String,
-        library_root: Option<String>,
-    },
-    Artist {
-        artist: String,
-    },
-    Album {
-        artist: String,
-        album: String,
-        library_root: Option<String>,
-    },
+    CompilationAlbum { album: String },
+    Artist { artist: String },
+    Album { artist: String, album: String },
 }
 
 impl TreeEntry {
@@ -130,7 +121,6 @@ impl TreeEntry {
 enum TrackRow {
     AlbumHeader {
         album: String,
-        root_label: Option<String>,
         album_year: Option<i64>,
         duration_ms: i64,
     },
@@ -1038,12 +1028,10 @@ impl App {
                 for index in compilation_indices {
                     let track = &self.tracks[index];
                     let album = track.tree_album().to_string();
-                    let library_root = track.library_root.clone();
-                    if seen_compilation_albums.insert((album.clone(), library_root.clone())) {
-                        self.view.tree_entries.push(TreeEntry::CompilationAlbum {
-                            album,
-                            library_root,
-                        });
+                    if seen_compilation_albums.insert(album.clone()) {
+                        self.view
+                            .tree_entries
+                            .push(TreeEntry::CompilationAlbum { album });
                     }
                 }
             }
@@ -1061,13 +1049,10 @@ impl App {
             }
             if self.expanded_artists.contains(&artist) {
                 let album = track.tree_album().to_string();
-                let library_root = track.library_root.clone();
-                if seen_albums.insert((artist.clone(), album.clone(), library_root.clone())) {
-                    self.view.tree_entries.push(TreeEntry::Album {
-                        artist,
-                        album,
-                        library_root,
-                    });
+                if seen_albums.insert((artist.clone(), album.clone())) {
+                    self.view
+                        .tree_entries
+                        .push(TreeEntry::Album { artist, album });
                 }
             }
         }
@@ -1081,21 +1066,15 @@ impl App {
         let mut album_durations = HashMap::new();
         let mut album_years = HashMap::new();
         let mut album_discs = HashMap::new();
-        let mut album_roots: HashMap<String, HashSet<String>> = HashMap::new();
         for track in &self.tracks {
             if tree_entry_matches_track(&entry, track) {
                 let album_key = track_album_key(track);
-                let album = track.tree_album().to_string();
                 *album_durations.entry(album_key.clone()).or_insert(0) +=
                     track.duration_ms.unwrap_or(0);
                 let album_year = album_years.entry(album_key.clone()).or_insert(None);
                 if album_year.is_none() {
                     *album_year = track.album_year;
                 }
-                album_roots
-                    .entry(album)
-                    .or_default()
-                    .insert(track_root_label(track).unwrap_or_default());
                 if let Some(disc_number) = track.disc_number {
                     album_discs
                         .entry(album_key)
@@ -1112,17 +1091,11 @@ impl App {
             let album_key = track_album_key(track);
             let album = track.tree_album().to_string();
             if current_album.as_deref() != Some(album_key.as_str()) {
-                let root_label = album_roots
-                    .get(&album)
-                    .is_some_and(|roots| roots.len() > 1)
-                    .then(|| track_root_label(track))
-                    .flatten();
                 current_album = Some(album_key.clone());
                 current_disc = None;
                 self.view.track_rows.push(TrackRow::AlbumHeader {
                     album_year: album_years.get(&album_key).copied().flatten(),
                     duration_ms: album_durations.get(&album_key).copied().unwrap_or_default(),
-                    root_label,
                     album,
                 });
             }
@@ -1160,26 +1133,15 @@ impl App {
         let current_album = current.track.tree_album();
         match entry {
             TreeEntry::Compilation => current.track.compilation && !self.compilations_expanded,
-            TreeEntry::CompilationAlbum {
-                album,
-                library_root,
-            } => {
-                current.track.compilation
-                    && current_album == album
-                    && current.track.library_root == *library_root
-                    && self.compilations_expanded
+            TreeEntry::CompilationAlbum { album } => {
+                current.track.compilation && current_album == album && self.compilations_expanded
             }
             TreeEntry::Artist { artist } => {
                 artist == current_artist && !self.expanded_artists.contains(artist)
             }
-            TreeEntry::Album {
-                artist,
-                album,
-                library_root,
-            } => {
+            TreeEntry::Album { artist, album } => {
                 artist == current_artist
                     && album == current_album
-                    && current.track.library_root == *library_root
                     && self.expanded_artists.contains(artist)
             }
         }
@@ -1479,28 +1441,21 @@ impl App {
         if let Some(track) = self.tracks.get(index) {
             let artist = track.tree_artist().to_string();
             let album = track.tree_album().to_string();
-            let library_root = track.library_root.clone();
             let is_compilation = track.compilation;
             let current_entry_matches = self
                 .selected_tree_entry()
                 .map(|entry| match entry {
                     TreeEntry::Compilation => is_compilation,
-                    TreeEntry::CompilationAlbum {
-                        album: entry_album,
-                        library_root: entry_root,
-                    } => is_compilation && entry_album == &album && *entry_root == library_root,
+                    TreeEntry::CompilationAlbum { album: entry_album } => {
+                        is_compilation && entry_album == &album
+                    }
                     TreeEntry::Artist {
                         artist: entry_artist,
                     } => entry_artist == &artist,
                     TreeEntry::Album {
                         artist: entry_artist,
                         album: entry_album,
-                        library_root: entry_root,
-                    } => {
-                        entry_artist == &artist
-                            && entry_album == &album
-                            && *entry_root == library_root
-                    }
+                    } => entry_artist == &artist && entry_album == &album,
                 })
                 .unwrap_or(false);
 
@@ -1516,8 +1471,7 @@ impl App {
                             entry,
                             TreeEntry::CompilationAlbum {
                                 album: entry_album,
-                                library_root: entry_root,
-                            } if entry_album == &album && *entry_root == library_root
+                            } if entry_album == &album
                         )
                     }) {
                         self.selected_tree = position;
@@ -1529,10 +1483,8 @@ impl App {
                         TreeEntry::Album {
                             artist: entry_artist,
                             album: entry_album,
-                            library_root: entry_root,
                         } if entry_artist == &artist
                             && entry_album == &album
-                            && *entry_root == library_root
                     )
                 }) {
                     self.selected_tree = position;
@@ -2427,45 +2379,25 @@ fn optional_text_matches(value: Option<&str>, needle: &str) -> bool {
 fn tree_entry_matches_track(entry: &TreeEntry, track: &LibraryTrack) -> bool {
     match entry {
         TreeEntry::Compilation => track.compilation,
-        TreeEntry::CompilationAlbum {
-            album,
-            library_root,
-        } => {
-            track.compilation && track.tree_album() == album && track.library_root == *library_root
-        }
+        TreeEntry::CompilationAlbum { album } => track.compilation && track.tree_album() == album,
         TreeEntry::Artist { artist } => track.tree_artist() == artist,
-        TreeEntry::Album {
-            artist,
-            album,
-            library_root,
-        } => {
-            track.tree_artist() == artist
-                && track.tree_album() == album
-                && track.library_root == *library_root
+        TreeEntry::Album { artist, album } => {
+            track.tree_artist() == artist && track.tree_album() == album
         }
     }
 }
 
 fn track_album_key(track: &LibraryTrack) -> String {
-    format!(
-        "{}\u{0}{}",
-        track.library_root.as_deref().unwrap_or_default(),
-        track.tree_album()
-    )
+    track.tree_album().to_string()
 }
 
 fn compare_compilation_tracks(left: &LibraryTrack, right: &LibraryTrack) -> Ordering {
-    compare_optional_text(left.library_root.as_deref(), right.library_root.as_deref())
-        .then_with(|| compare_optional_i64(left.album_year, right.album_year))
+    compare_optional_i64(left.album_year, right.album_year)
         .then_with(|| compare_text(left.tree_album(), right.tree_album()))
         .then_with(|| compare_optional_i64(left.disc_number, right.disc_number))
         .then_with(|| compare_optional_i64(left.track_number, right.track_number))
         .then_with(|| compare_text(left.display_title(), right.display_title()))
         .then_with(|| left.path.cmp(&right.path))
-}
-
-fn compare_optional_text(left: Option<&str>, right: Option<&str>) -> Ordering {
-    compare_text(left.unwrap_or_default(), right.unwrap_or_default())
 }
 
 fn compare_text(left: &str, right: &str) -> Ordering {
@@ -3230,29 +3162,18 @@ fn tree_item_line(app: &App, entry: &TreeEntry) -> Line<'static> {
                 ),
             ])
         }
-        TreeEntry::CompilationAlbum {
-            album,
-            library_root,
-        } => {
-            let title = library_root
-                .as_ref()
-                .and_then(|root| Path::new(root).file_name())
-                .and_then(|name| name.to_str())
-                .map(|root| format!("{album} [{root}]"))
-                .unwrap_or_else(|| album.clone());
-            Line::from(vec![
-                Span::raw("    "),
-                Span::styled(
-                    if app.tree_entry_is_current(entry) {
-                        "> "
-                    } else {
-                        ""
-                    },
-                    Style::default().fg(Color::LightGreen),
-                ),
-                Span::styled(title, Style::default().fg(Color::Cyan)),
-            ])
-        }
+        TreeEntry::CompilationAlbum { album } => Line::from(vec![
+            Span::raw("    "),
+            Span::styled(
+                if app.tree_entry_is_current(entry) {
+                    "> "
+                } else {
+                    ""
+                },
+                Style::default().fg(Color::LightGreen),
+            ),
+            Span::styled(album.clone(), Style::default().fg(Color::Cyan)),
+        ]),
         TreeEntry::Artist { artist } => {
             let expanded = app.expanded_artists.contains(artist);
             let marker = if expanded { "[-]" } else { "[+]" };
@@ -3296,16 +3217,9 @@ fn track_items(app: &App, width: usize) -> Vec<ListItem<'static>> {
         .map(|row| match row {
             TrackRow::AlbumHeader {
                 album,
-                root_label,
                 album_year,
                 duration_ms,
-            } => ListItem::new(album_header_line(
-                album,
-                root_label.as_deref(),
-                *album_year,
-                *duration_ms,
-                width,
-            )),
+            } => ListItem::new(album_header_line(album, *album_year, *duration_ms, width)),
             TrackRow::DiscDivider { disc_number } => {
                 ListItem::new(disc_divider_line(*disc_number, width))
             }
@@ -3319,7 +3233,6 @@ fn track_items(app: &App, width: usize) -> Vec<ListItem<'static>> {
 
 fn album_header_line(
     album: &str,
-    root_label: Option<&str>,
     album_year: Option<i64>,
     duration_ms: i64,
     width: usize,
@@ -3329,11 +3242,8 @@ fn album_header_line(
         Some(year) => format!("{year} {duration}"),
         None => duration,
     };
-    let title_text = root_label
-        .map(|root| format!("{album} [{root}]"))
-        .unwrap_or_else(|| album.to_string());
     let title_width = width.saturating_sub(display_width(&right) + 1);
-    let title = truncate_to_width(&title_text, title_width);
+    let title = truncate_to_width(album, title_width);
     let divider_width = width.saturating_sub(display_width(&title) + display_width(&right));
     Line::from(vec![
         Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
@@ -4741,7 +4651,7 @@ mod tests {
 
     #[test]
     fn album_header_shows_year_and_right_aligned_duration() {
-        let line = album_header_line("Album", None, Some(2018), 100_000, 24);
+        let line = album_header_line("Album", Some(2018), 100_000, 24);
         let text = line_text(&line);
 
         assert_eq!(display_width(&text), 24);
@@ -5329,7 +5239,7 @@ mod tests {
     }
 
     #[test]
-    fn compilation_view_keeps_same_album_separate_across_roots() {
+    fn compilation_view_merges_same_album_across_roots() {
         let mut vocal = test_track(1, "esper vocal");
         vocal.compilation = true;
         vocal.album = Some("Blade Runner Esper Edition".to_string());
@@ -5342,30 +5252,64 @@ mod tests {
 
         let app = test_app(vec![vocal, instrumental]);
 
-        let album_headers: Vec<(String, Option<String>)> = app
+        let album_headers: Vec<String> = app
             .track_rows()
             .iter()
             .filter_map(|row| match row {
-                TrackRow::AlbumHeader {
-                    album, root_label, ..
-                } => Some((album.clone(), root_label.clone())),
+                TrackRow::AlbumHeader { album, .. } => Some(album.clone()),
+                _ => None,
+            })
+            .collect();
+        let track_indices: Vec<usize> = app
+            .track_rows()
+            .iter()
+            .filter_map(|row| match row {
+                TrackRow::Track { track_index, .. } => Some(*track_index),
                 _ => None,
             })
             .collect();
 
-        assert_eq!(
-            album_headers,
-            vec![
-                (
-                    "Blade Runner Esper Edition".to_string(),
-                    Some("Instrumental".to_string())
-                ),
-                (
-                    "Blade Runner Esper Edition".to_string(),
-                    Some("Vocal".to_string())
-                )
-            ]
-        );
+        assert_eq!(album_headers, vec!["Blade Runner Esper Edition"]);
+        assert_eq!(track_indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn expanded_artist_merges_same_album_across_roots() {
+        let mut vocal = test_track(1, "first side");
+        vocal.artist = Some("Moby".to_string());
+        vocal.album_artist = Some("Moby".to_string());
+        vocal.album = Some("All Visible Objects".to_string());
+        vocal.library_root = Some("/tmp/Vocal".to_string());
+
+        let mut instrumental = test_track(2, "second side");
+        instrumental.artist = Some("Moby".to_string());
+        instrumental.album_artist = Some("Moby".to_string());
+        instrumental.album = Some("All Visible Objects".to_string());
+        instrumental.library_root = Some("/tmp/Instrumental".to_string());
+
+        let mut app = test_app(vec![vocal, instrumental]);
+        app.expanded_artists.insert("Moby".to_string());
+        app.sync_selection();
+
+        let album_entries: Vec<String> = app
+            .tree_entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                TreeEntry::Album { album, .. } => Some(album.clone()),
+                _ => None,
+            })
+            .collect();
+        let album_headers: Vec<String> = app
+            .track_rows()
+            .iter()
+            .filter_map(|row| match row {
+                TrackRow::AlbumHeader { album, .. } => Some(album.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(album_entries, vec!["All Visible Objects"]);
+        assert_eq!(album_headers, vec!["All Visible Objects"]);
     }
 
     #[test]
