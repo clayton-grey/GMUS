@@ -15,6 +15,8 @@ pub struct ScanReport {
     pub tracks_stored: usize,
     pub art_cached: usize,
     pub files_skipped: usize,
+    pub files_marked_missing: usize,
+    pub duplicate_tracks_merged: usize,
     pub errors: Vec<String>,
 }
 
@@ -22,6 +24,17 @@ pub fn scan_path(conn: &Connection, paths: &AppPaths, root: &Path) -> Result<Sca
     let root = canonical_root(root)?;
     let mut report = ScanReport::default();
     scan_inner(conn, paths, &root, &mut report)?;
+    Ok(report)
+}
+
+pub fn rescan_path(conn: &Connection, paths: &AppPaths, root: &Path) -> Result<ScanReport> {
+    let root = canonical_root(root)?;
+    let mut report = ScanReport {
+        files_marked_missing: db::mark_locations_missing_under_root(conn, &root)?,
+        ..ScanReport::default()
+    };
+    scan_inner(conn, paths, &root, &mut report)?;
+    report.duplicate_tracks_merged = db::merge_similar_media_items(conn)?;
     Ok(report)
 }
 

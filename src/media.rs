@@ -25,11 +25,15 @@ pub struct TrackMetadata {
     pub album: Option<String>,
     pub album_artist: Option<String>,
     pub album_year: Option<i64>,
+    pub release_date: Option<String>,
     pub composer: Option<String>,
     pub genre: Option<String>,
     pub track_number: Option<i64>,
+    pub track_total: Option<i64>,
     pub disc_number: Option<i64>,
+    pub disc_total: Option<i64>,
     pub duration_ms: Option<i64>,
+    pub compilation: bool,
     pub embedded_art: Option<EmbeddedArt>,
 }
 
@@ -97,11 +101,15 @@ pub fn read_track(path: &Path) -> Result<TrackMetadata> {
             .and_then(|tag| tag.get_string(ItemKey::AlbumArtist))
             .map(ToOwned::to_owned),
         album_year: tag_album_year(tag),
+        release_date: tag_release_date(tag),
         composer: tag_text(tag, ItemKey::Composer),
         genre: tag_text(tag, ItemKey::Genre),
         track_number: tag.and_then(|tag| tag.track().map(i64::from)),
+        track_total: tag.and_then(|tag| tag.track_total().map(i64::from)),
         disc_number: tag.and_then(|tag| tag.disk().map(i64::from)),
+        disc_total: tag.and_then(|tag| tag.disk_total().map(i64::from)),
         duration_ms: Some(properties.duration().as_millis() as i64).filter(|value| *value > 0),
+        compilation: tag_bool(tag, ItemKey::FlagCompilation),
         embedded_art,
     })
 }
@@ -157,11 +165,34 @@ fn tag_year_from_key(tag: &Tag, key: ItemKey) -> Option<i64> {
     tag.get_string(key).and_then(parse_year)
 }
 
+fn tag_release_date(tag: Option<&Tag>) -> Option<String> {
+    let tag = tag?;
+    tag_text(Some(tag), ItemKey::OriginalReleaseDate)
+        .or_else(|| tag_text(Some(tag), ItemKey::ReleaseDate))
+        .or_else(|| tag.date().map(|date| date.to_string()))
+        .map(normalize_release_date)
+        .filter(|value| !value.is_empty())
+}
+
 fn tag_text(tag: Option<&Tag>, key: ItemKey) -> Option<String> {
     tag.and_then(|tag| tag.get_string(key))
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn tag_bool(tag: Option<&Tag>, key: ItemKey) -> bool {
+    let Some(value) = tag_text(tag, key) else {
+        return false;
+    };
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "y"
+    )
+}
+
+fn normalize_release_date(value: String) -> String {
+    value.trim().replace('/', "-")
 }
 
 fn parse_year(value: &str) -> Option<i64> {
