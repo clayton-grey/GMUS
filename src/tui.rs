@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
@@ -101,13 +102,25 @@ impl PlayTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TreeEntry {
-    Artist { artist: String },
-    Album { artist: String, album: String },
+    Compilation,
+    CompilationAlbum {
+        album: String,
+        library_root: Option<String>,
+    },
+    Artist {
+        artist: String,
+    },
+    Album {
+        artist: String,
+        album: String,
+        library_root: Option<String>,
+    },
 }
 
 impl TreeEntry {
     fn artist(&self) -> &str {
         match self {
+            Self::Compilation | Self::CompilationAlbum { .. } => "Compilations",
             Self::Artist { artist } | Self::Album { artist, .. } => artist,
         }
     }
@@ -117,6 +130,7 @@ impl TreeEntry {
 enum TrackRow {
     AlbumHeader {
         album: String,
+        root_label: Option<String>,
         album_year: Option<i64>,
         duration_ms: i64,
     },
@@ -146,6 +160,7 @@ struct App {
     selected_tree: usize,
     selected_track_row: usize,
     expanded_artists: HashSet<String>,
+    compilations_expanded: bool,
     focus: FocusPane,
     filter: String,
     filter_mode: bool,
@@ -156,6 +171,7 @@ struct App {
     command_roots: Vec<db::LibraryRoot>,
     command_selected: usize,
     command_focus: bool,
+    pending_command: Option<String>,
     info_panel_visible: bool,
     play_target: PlayTarget,
     continuous: bool,
@@ -215,6 +231,7 @@ impl App {
             selected_tree: 0,
             selected_track_row: 0,
             expanded_artists: HashSet::new(),
+            compilations_expanded: false,
             focus: FocusPane::Tree,
             filter: String::new(),
             filter_mode: false,
@@ -225,6 +242,7 @@ impl App {
             command_roots: Vec::new(),
             command_selected: 0,
             command_focus: false,
+            pending_command: None,
             info_panel_visible: true,
             play_target: PlayTarget::Library,
             continuous: true,
@@ -403,6 +421,18 @@ impl App {
         let Some(entry) = self.selected_tree_entry() else {
             return;
         };
+        if matches!(
+            entry,
+            TreeEntry::Compilation | TreeEntry::CompilationAlbum { .. }
+        ) {
+            self.compilations_expanded = !self.compilations_expanded;
+            self.message = if self.compilations_expanded {
+                String::from("expanded Compilations")
+            } else {
+                String::from("collapsed Compilations")
+            };
+            return;
+        }
         let artist = entry.artist().to_string();
         if self.expanded_artists.remove(&artist) {
             self.message = format!("collapsed {artist}");
@@ -632,7 +662,7 @@ impl App {
                         self.clear_filter();
                     }
                 }
-                KeyCode::Enter => self.execute_command(conn),
+                KeyCode::Enter => self.submit_command(conn),
                 KeyCode::Tab => self.complete_command(conn)?,
                 KeyCode::Backspace => {
                     self.command.pop();
@@ -963,23 +993,62 @@ impl App {
 
     fn rebuild_filtered_indices(&mut self) {
         self.view.filtered_indices.clear();
-        let filter = self.filter.trim().to_ascii_lowercase();
-        if filter.is_empty() {
+        let query = FilterQuery::parse(&self.filter);
+        if query.is_empty() {
             self.view.filtered_indices.extend(0..self.tracks.len());
             return;
         }
 
-        self.view.filtered_indices.extend(
-            self.view
-                .search_texts
-                .iter()
-                .enumerate()
-                .filter_map(|(index, haystack)| haystack.contains(&filter).then_some(index)),
-        );
+        self.view
+            .filtered_indices
+            .extend(
+                self.view
+                    .search_texts
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, haystack)| {
+                        query
+                            .matches(&self.tracks[index], haystack)
+                            .then_some(index)
+                    }),
+            );
     }
 
     fn rebuild_tree_entries(&mut self) {
         self.view.tree_entries.clear();
+        if self
+            .view
+            .filtered_indices
+            .iter()
+            .any(|index| self.tracks[*index].compilation)
+        {
+            self.view.tree_entries.push(TreeEntry::Compilation);
+            if self.compilations_expanded {
+                let mut seen_compilation_albums = HashSet::new();
+                let mut compilation_indices: Vec<usize> = self
+                    .view
+                    .filtered_indices
+                    .iter()
+                    .copied()
+                    .filter(|index| self.tracks[*index].compilation)
+                    .collect();
+                compilation_indices.sort_by(|left, right| {
+                    compare_compilation_tracks(&self.tracks[*left], &self.tracks[*right])
+                });
+                for index in compilation_indices {
+                    let track = &self.tracks[index];
+                    let album = track.tree_album().to_string();
+                    let library_root = track.library_root.clone();
+                    if seen_compilation_albums.insert((album.clone(), library_root.clone())) {
+                        self.view.tree_entries.push(TreeEntry::CompilationAlbum {
+                            album,
+                            library_root,
+                        });
+                    }
+                }
+            }
+        }
+
         let mut seen_artists = HashSet::new();
         let mut seen_albums = HashSet::new();
         for &index in &self.view.filtered_indices {
@@ -992,10 +1061,13 @@ impl App {
             }
             if self.expanded_artists.contains(&artist) {
                 let album = track.tree_album().to_string();
-                if seen_albums.insert((artist.clone(), album.clone())) {
-                    self.view
-                        .tree_entries
-                        .push(TreeEntry::Album { artist, album });
+                let library_root = track.library_root.clone();
+                if seen_albums.insert((artist.clone(), album.clone(), library_root.clone())) {
+                    self.view.tree_entries.push(TreeEntry::Album {
+                        artist,
+                        album,
+                        library_root,
+                    });
                 }
             }
         }
@@ -1006,22 +1078,27 @@ impl App {
         let Some(entry) = self.selected_tree_entry().cloned() else {
             return;
         };
-        let selected_artist = entry.artist().to_string();
         let mut album_durations = HashMap::new();
         let mut album_years = HashMap::new();
         let mut album_discs = HashMap::new();
+        let mut album_roots: HashMap<String, HashSet<String>> = HashMap::new();
         for track in &self.tracks {
-            if track.tree_artist() == selected_artist {
+            if tree_entry_matches_track(&entry, track) {
+                let album_key = track_album_key(track);
                 let album = track.tree_album().to_string();
-                *album_durations.entry(album.clone()).or_insert(0) +=
+                *album_durations.entry(album_key.clone()).or_insert(0) +=
                     track.duration_ms.unwrap_or(0);
-                let album_year = album_years.entry(album).or_insert(None);
+                let album_year = album_years.entry(album_key.clone()).or_insert(None);
                 if album_year.is_none() {
                     *album_year = track.album_year;
                 }
+                album_roots
+                    .entry(album)
+                    .or_default()
+                    .insert(track_root_label(track).unwrap_or_default());
                 if let Some(disc_number) = track.disc_number {
                     album_discs
-                        .entry(track.tree_album().to_string())
+                        .entry(album_key)
                         .or_insert_with(HashSet::new)
                         .insert(disc_number);
                 }
@@ -1030,30 +1107,27 @@ impl App {
 
         let mut current_album: Option<String> = None;
         let mut current_disc: Option<i64> = None;
-        for &index in &self.view.filtered_indices {
+        for index in self.track_indices_for_entry(&entry) {
             let track = &self.tracks[index];
-            let matches = match &entry {
-                TreeEntry::Artist { artist } => track.tree_artist() == artist,
-                TreeEntry::Album { artist, album } => {
-                    track.tree_artist() == artist && track.tree_album() == album
-                }
-            };
-            if !matches {
-                continue;
-            }
-
+            let album_key = track_album_key(track);
             let album = track.tree_album().to_string();
-            if current_album.as_deref() != Some(album.as_str()) {
-                current_album = Some(album.clone());
+            if current_album.as_deref() != Some(album_key.as_str()) {
+                let root_label = album_roots
+                    .get(&album)
+                    .is_some_and(|roots| roots.len() > 1)
+                    .then(|| track_root_label(track))
+                    .flatten();
+                current_album = Some(album_key.clone());
                 current_disc = None;
                 self.view.track_rows.push(TrackRow::AlbumHeader {
-                    album_year: album_years.get(&album).copied().flatten(),
-                    duration_ms: album_durations.get(&album).copied().unwrap_or_default(),
+                    album_year: album_years.get(&album_key).copied().flatten(),
+                    duration_ms: album_durations.get(&album_key).copied().unwrap_or_default(),
+                    root_label,
                     album,
                 });
             }
             let show_disc_number = album_discs
-                .get(track.tree_album())
+                .get(&album_key)
                 .map(|discs| discs.len() > 1)
                 .unwrap_or(false);
             if show_disc_number && current_disc.is_some() && current_disc != track.disc_number {
@@ -1085,12 +1159,27 @@ impl App {
         let current_artist = current.track.tree_artist();
         let current_album = current.track.tree_album();
         match entry {
+            TreeEntry::Compilation => current.track.compilation && !self.compilations_expanded,
+            TreeEntry::CompilationAlbum {
+                album,
+                library_root,
+            } => {
+                current.track.compilation
+                    && current_album == album
+                    && current.track.library_root == *library_root
+                    && self.compilations_expanded
+            }
             TreeEntry::Artist { artist } => {
                 artist == current_artist && !self.expanded_artists.contains(artist)
             }
-            TreeEntry::Album { artist, album } => {
+            TreeEntry::Album {
+                artist,
+                album,
+                library_root,
+            } => {
                 artist == current_artist
                     && album == current_album
+                    && current.track.library_root == *library_root
                     && self.expanded_artists.contains(artist)
             }
         }
@@ -1104,21 +1193,29 @@ impl App {
         let Some(entry) = self.selected_tree_entry() else {
             return Vec::new();
         };
-        self.view
+        self.track_indices_for_entry(entry)
+            .into_iter()
+            .map(|index| (index, &self.tracks[index]))
+            .collect()
+    }
+
+    fn track_indices_for_entry(&self, entry: &TreeEntry) -> Vec<usize> {
+        let mut indices: Vec<usize> = self
+            .view
             .filtered_indices
             .iter()
             .copied()
-            .filter_map(|index| {
-                let track = &self.tracks[index];
-                let matches = match entry {
-                    TreeEntry::Artist { artist } => track.tree_artist() == artist,
-                    TreeEntry::Album { artist, album } => {
-                        track.tree_artist() == artist && track.tree_album() == album
-                    }
-                };
-                matches.then_some((index, track))
-            })
-            .collect()
+            .filter(|index| tree_entry_matches_track(entry, &self.tracks[*index]))
+            .collect();
+        if matches!(
+            entry,
+            TreeEntry::Compilation | TreeEntry::CompilationAlbum { .. }
+        ) {
+            indices.sort_by(|left, right| {
+                compare_compilation_tracks(&self.tracks[*left], &self.tracks[*right])
+            });
+        }
+        indices
     }
 
     fn selected_playable_track_index(&self) -> Option<usize> {
@@ -1382,28 +1479,60 @@ impl App {
         if let Some(track) = self.tracks.get(index) {
             let artist = track.tree_artist().to_string();
             let album = track.tree_album().to_string();
+            let library_root = track.library_root.clone();
+            let is_compilation = track.compilation;
             let current_entry_matches = self
                 .selected_tree_entry()
                 .map(|entry| match entry {
+                    TreeEntry::Compilation => is_compilation,
+                    TreeEntry::CompilationAlbum {
+                        album: entry_album,
+                        library_root: entry_root,
+                    } => is_compilation && entry_album == &album && *entry_root == library_root,
                     TreeEntry::Artist {
                         artist: entry_artist,
                     } => entry_artist == &artist,
                     TreeEntry::Album {
                         artist: entry_artist,
                         album: entry_album,
-                    } => entry_artist == &artist && entry_album == &album,
+                        library_root: entry_root,
+                    } => {
+                        entry_artist == &artist
+                            && entry_album == &album
+                            && *entry_root == library_root
+                    }
                 })
                 .unwrap_or(false);
 
             if !current_entry_matches {
                 let mut tree_changed = false;
-                if let Some(position) = self.tree_entries().iter().position(|entry| {
+                if is_compilation {
+                    self.compilations_expanded = true;
+                    self.sync_selection();
+                }
+                if is_compilation {
+                    if let Some(position) = self.tree_entries().iter().position(|entry| {
+                        matches!(
+                            entry,
+                            TreeEntry::CompilationAlbum {
+                                album: entry_album,
+                                library_root: entry_root,
+                            } if entry_album == &album && *entry_root == library_root
+                        )
+                    }) {
+                        self.selected_tree = position;
+                        tree_changed = true;
+                    }
+                } else if let Some(position) = self.tree_entries().iter().position(|entry| {
                     matches!(
                         entry,
                         TreeEntry::Album {
                             artist: entry_artist,
-                            album: entry_album
-                        } if entry_artist == &artist && entry_album == &album
+                            album: entry_album,
+                            library_root: entry_root,
+                        } if entry_artist == &artist
+                            && entry_album == &album
+                            && *entry_root == library_root
                     )
                 }) {
                     self.selected_tree = position;
@@ -1448,13 +1577,16 @@ impl App {
     }
 
     fn confirm_filter(&mut self) {
+        let warning = FilterQuery::parse(&self.filter)
+            .warning()
+            .map(str::to_string);
         self.filter_mode = false;
         self.focus = FocusPane::Tree;
         self.selected_tree = 0;
         self.selected_track_row = 0;
         self.reset_shuffle_order();
         self.sync_selection();
-        self.message = format!("filter: {}", self.filter_display());
+        self.message = warning.unwrap_or_else(|| format!("filter: {}", self.filter_display()));
     }
 
     fn clear_filter(&mut self) {
@@ -1547,10 +1679,41 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     fn execute_command(&mut self, conn: &Connection) {
         self.command_mode = false;
         let command = std::mem::take(&mut self.command);
         let result = self.run_command(conn, command.trim());
+        self.finish_command_result(result);
+    }
+
+    fn submit_command(&mut self, conn: &Connection) {
+        self.command_mode = false;
+        let command = std::mem::take(&mut self.command);
+        if command_needs_busy(command.trim()) {
+            self.pending_command = Some(command.clone());
+            self.show_command_output(vec![
+                format!("working: {}", display_command(&command)),
+                String::from("scanning files recursively..."),
+            ]);
+            self.message = format!("working: {}", display_command(&command));
+            self.show_transient_status(self.message.clone());
+        } else {
+            let result = self.run_command(conn, command.trim());
+            self.finish_command_result(result);
+        }
+    }
+
+    fn execute_pending_command(&mut self, conn: &Connection) -> bool {
+        let Some(command) = self.pending_command.take() else {
+            return false;
+        };
+        let result = self.run_command(conn, command.trim());
+        self.finish_command_result(result);
+        true
+    }
+
+    fn finish_command_result(&mut self, result: Result<String>) {
         self.message = match result {
             Ok(message) => message,
             Err(error) => format!("command failed: {error:#}"),
@@ -1644,7 +1807,7 @@ impl App {
     fn command_update(&mut self, conn: &Connection, raw_path: &str) -> Result<String> {
         if let Some(path) = command_path(raw_path) {
             let root = scanner::canonical_root(&path)?;
-            let report = scanner::scan_path(conn, &self.paths, &root)?;
+            let report = scanner::rescan_path(conn, &self.paths, &root)?;
             db::upsert_library_root(conn, &root)?;
             db::mark_library_root_scanned(conn, &root)?;
             self.refresh(conn)?;
@@ -1660,15 +1823,19 @@ impl App {
         let mut tracks_stored = 0;
         let mut art_cached = 0;
         let mut files_skipped = 0;
+        let mut files_marked_missing = 0;
+        let mut duplicate_tracks_merged = 0;
         let mut errors = 0;
         for root in &roots {
             let path = PathBuf::from(&root.path);
-            match scanner::scan_path(conn, &self.paths, &path) {
+            match scanner::rescan_path(conn, &self.paths, &path) {
                 Ok(report) => {
                     files_seen += report.files_seen;
                     tracks_stored += report.tracks_stored;
                     art_cached += report.art_cached;
                     files_skipped += report.files_skipped;
+                    files_marked_missing += report.files_marked_missing;
+                    duplicate_tracks_merged += report.duplicate_tracks_merged;
                     errors += report.errors.len();
                     db::mark_library_root_scanned(conn, &path)?;
                 }
@@ -1677,12 +1844,14 @@ impl App {
         }
         self.refresh(conn)?;
         Ok(format!(
-            "updated {} roots, scanned {} files, stored {} tracks, cached {} covers, skipped {}, errors {}",
+            "updated {} roots, scanned {} files, stored {} tracks, cached {} covers, skipped {}, missing {}, merged {}, errors {}",
             roots.len(),
             files_seen,
             tracks_stored,
             art_cached,
             files_skipped,
+            files_marked_missing,
+            duplicate_tracks_merged,
             errors
         ))
     }
@@ -1751,7 +1920,10 @@ impl App {
     }
 
     fn info_area_visible(&self) -> bool {
-        self.info_panel_visible || self.command_mode || self.command_output_visible()
+        self.info_panel_visible
+            || self.command_mode
+            || self.command_output_visible()
+            || self.filter_mode
     }
 
     fn command_output_height(&self) -> u16 {
@@ -1850,15 +2022,471 @@ impl App {
 
 fn track_search_text(track: &LibraryTrack) -> String {
     format!(
-        "{} {} {} {} {} {}",
+        "{} {} {} {} {} {} {} {} {} {} {} {}",
         track.display_title(),
         track.display_artist(),
         track.display_album(),
+        track.album_artist.as_deref().unwrap_or_default(),
+        track
+            .album_year
+            .map(|year| year.to_string())
+            .unwrap_or_default(),
+        track.release_date.as_deref().unwrap_or_default(),
         track.composer.as_deref().unwrap_or_default(),
         track.genre.as_deref().unwrap_or_default(),
+        track_root_label(track).unwrap_or_default(),
+        if track.compilation { "compilation" } else { "" },
+        track.play_count,
         track.path
     )
     .to_ascii_lowercase()
+}
+
+#[derive(Debug, Default)]
+struct FilterQuery {
+    terms: Vec<FilterTerm>,
+    warnings: Vec<String>,
+}
+
+impl FilterQuery {
+    fn parse(input: &str) -> Self {
+        let mut query = Self::default();
+        for token in split_filter_tokens(input) {
+            match FilterTerm::parse(&token) {
+                Ok(Some(term)) => query.terms.push(term),
+                Ok(None) => {}
+                Err(warning) => {
+                    query.warnings.push(warning);
+                    query.terms.push(FilterTerm::Invalid);
+                }
+            }
+        }
+        query
+    }
+
+    fn is_empty(&self) -> bool {
+        self.terms.is_empty()
+    }
+
+    fn matches(&self, track: &LibraryTrack, haystack: &str) -> bool {
+        self.terms.iter().all(|term| term.matches(track, haystack))
+    }
+
+    fn warning(&self) -> Option<&str> {
+        self.warnings.first().map(String::as_str)
+    }
+}
+
+#[derive(Debug)]
+enum FilterTerm {
+    Bare {
+        needle: String,
+        negated: bool,
+    },
+    Field {
+        field: FilterField,
+        matcher: FilterMatcher,
+        negated: bool,
+    },
+    Invalid,
+}
+
+impl FilterTerm {
+    fn parse(token: &str) -> std::result::Result<Option<Self>, String> {
+        let token = token.trim();
+        if token.is_empty() {
+            return Ok(None);
+        }
+
+        let (negated, body) = token
+            .strip_prefix('-')
+            .map(|body| (true, body.trim()))
+            .unwrap_or((false, token));
+        if body.is_empty() {
+            return Ok(None);
+        }
+
+        let Some((field_name, value)) = body.split_once(':') else {
+            return Ok(Some(Self::Bare {
+                needle: body.to_ascii_lowercase(),
+                negated,
+            }));
+        };
+
+        let Some(field) = FilterField::parse(field_name) else {
+            return Err(format!("unknown filter field: {field_name}"));
+        };
+
+        let value = value.trim();
+        if value.is_empty() {
+            return Ok(None);
+        }
+
+        let matcher = field.matcher(value)?;
+        Ok(Some(Self::Field {
+            field,
+            matcher,
+            negated,
+        }))
+    }
+
+    fn matches(&self, track: &LibraryTrack, haystack: &str) -> bool {
+        match self {
+            Self::Bare { needle, negated } => apply_negation(haystack.contains(needle), *negated),
+            Self::Field {
+                field,
+                matcher,
+                negated,
+            } => apply_negation(field.matches(track, matcher), *negated),
+            Self::Invalid => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FilterField {
+    Title,
+    Artist,
+    Album,
+    AlbumArtist,
+    Year,
+    ReleaseDate,
+    Genre,
+    Composer,
+    Root,
+    Path,
+    Compilation,
+    Plays,
+    TrackNumber,
+    DiscNumber,
+}
+
+impl FilterField {
+    fn parse(field: &str) -> Option<Self> {
+        match field.trim().to_ascii_lowercase().as_str() {
+            "title" | "track" | "name" => Some(Self::Title),
+            "artist" => Some(Self::Artist),
+            "album" => Some(Self::Album),
+            "albumartist" | "album_artist" | "album-artist" | "aa" => Some(Self::AlbumArtist),
+            "year" => Some(Self::Year),
+            "date" | "released" | "release" => Some(Self::ReleaseDate),
+            "genre" => Some(Self::Genre),
+            "composer" => Some(Self::Composer),
+            "root" | "library" | "library_root" | "library-root" => Some(Self::Root),
+            "path" | "file" => Some(Self::Path),
+            "comp" | "compilation" => Some(Self::Compilation),
+            "plays" | "playcount" | "play_count" | "play-count" => Some(Self::Plays),
+            "trackno" | "track_no" | "track_number" | "track-number" | "number" => {
+                Some(Self::TrackNumber)
+            }
+            "disc" | "discno" | "disc_no" | "disc_number" | "disc-number" => Some(Self::DiscNumber),
+            _ => None,
+        }
+    }
+
+    fn matcher(self, value: &str) -> std::result::Result<FilterMatcher, String> {
+        match self {
+            Self::Year | Self::Plays | Self::TrackNumber | Self::DiscNumber => {
+                parse_number_matcher(value)
+                    .map(FilterMatcher::Number)
+                    .ok_or_else(|| format!("expected a number for {}", self.name()))
+            }
+            Self::Compilation => parse_bool(value)
+                .map(FilterMatcher::Bool)
+                .ok_or_else(|| String::from("compilation expects true or false")),
+            Self::ReleaseDate => parse_number_matcher(value)
+                .map(FilterMatcher::Number)
+                .or_else(|| Some(FilterMatcher::Text(value.to_ascii_lowercase())))
+                .ok_or_else(|| String::from("expected a date or year")),
+            _ => Ok(FilterMatcher::Text(value.to_ascii_lowercase())),
+        }
+    }
+
+    fn matches(self, track: &LibraryTrack, matcher: &FilterMatcher) -> bool {
+        match (self, matcher) {
+            (Self::Title, FilterMatcher::Text(needle)) => {
+                text_matches(track.display_title(), needle)
+            }
+            (Self::Artist, FilterMatcher::Text(needle)) => {
+                text_matches(track.display_artist(), needle)
+            }
+            (Self::Album, FilterMatcher::Text(needle)) => {
+                text_matches(track.display_album(), needle)
+            }
+            (Self::AlbumArtist, FilterMatcher::Text(needle)) => {
+                optional_text_matches(track.album_artist.as_deref(), needle)
+            }
+            (Self::Genre, FilterMatcher::Text(needle)) => {
+                optional_text_matches(track.genre.as_deref(), needle)
+            }
+            (Self::Composer, FilterMatcher::Text(needle)) => {
+                optional_text_matches(track.composer.as_deref(), needle)
+            }
+            (Self::Root, FilterMatcher::Text(needle)) => {
+                optional_text_matches(track.library_root.as_deref(), needle)
+                    || track_root_label(track).is_some_and(|root| text_matches(&root, needle))
+            }
+            (Self::Path, FilterMatcher::Text(needle)) => text_matches(&track.path, needle),
+            (Self::ReleaseDate, FilterMatcher::Text(needle)) => {
+                optional_text_matches(track.release_date.as_deref(), needle)
+                    || track
+                        .album_year
+                        .is_some_and(|year| text_matches(&year.to_string(), needle))
+            }
+            (Self::Year, FilterMatcher::Number(matcher)) => matcher.matches(track_year(track)),
+            (Self::ReleaseDate, FilterMatcher::Number(matcher)) => {
+                matcher.matches(track_year(track))
+            }
+            (Self::Plays, FilterMatcher::Number(matcher)) => {
+                matcher.matches(Some(track.play_count))
+            }
+            (Self::TrackNumber, FilterMatcher::Number(matcher)) => {
+                matcher.matches(track.track_number)
+            }
+            (Self::DiscNumber, FilterMatcher::Number(matcher)) => {
+                matcher.matches(track.disc_number)
+            }
+            (Self::Compilation, FilterMatcher::Bool(value)) => track.compilation == *value,
+            _ => false,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Title => "title",
+            Self::Artist => "artist",
+            Self::Album => "album",
+            Self::AlbumArtist => "albumartist",
+            Self::Year => "year",
+            Self::ReleaseDate => "date",
+            Self::Genre => "genre",
+            Self::Composer => "composer",
+            Self::Root => "root",
+            Self::Path => "path",
+            Self::Compilation => "compilation",
+            Self::Plays => "plays",
+            Self::TrackNumber => "trackno",
+            Self::DiscNumber => "disc",
+        }
+    }
+}
+
+#[derive(Debug)]
+enum FilterMatcher {
+    Text(String),
+    Bool(bool),
+    Number(NumberMatcher),
+}
+
+#[derive(Debug)]
+enum NumberMatcher {
+    Equal(i64),
+    Greater(i64),
+    GreaterEqual(i64),
+    Less(i64),
+    LessEqual(i64),
+    Range(Option<i64>, Option<i64>),
+}
+
+impl NumberMatcher {
+    fn matches(&self, value: Option<i64>) -> bool {
+        let Some(value) = value else {
+            return false;
+        };
+        match self {
+            Self::Equal(target) => value == *target,
+            Self::Greater(target) => value > *target,
+            Self::GreaterEqual(target) => value >= *target,
+            Self::Less(target) => value < *target,
+            Self::LessEqual(target) => value <= *target,
+            Self::Range(start, end) => {
+                start.is_none_or(|start| value >= start) && end.is_none_or(|end| value <= end)
+            }
+        }
+    }
+}
+
+fn split_filter_tokens(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for character in input.chars() {
+        if escaped {
+            token.push(character);
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(quote_char) = quote {
+            if character == quote_char {
+                quote = None;
+            } else {
+                token.push(character);
+            }
+            continue;
+        }
+        match character {
+            '"' | '\'' => quote = Some(character),
+            character if character.is_whitespace() => {
+                if !token.is_empty() {
+                    tokens.push(std::mem::take(&mut token));
+                }
+            }
+            character => token.push(character),
+        }
+    }
+
+    if escaped {
+        token.push('\\');
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    tokens
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "y" | "on" => Some(true),
+        "0" | "false" | "no" | "n" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_number_matcher(value: &str) -> Option<NumberMatcher> {
+    let value = value.trim();
+    for (prefix, matcher) in [
+        (
+            ">=",
+            NumberMatcher::GreaterEqual as fn(i64) -> NumberMatcher,
+        ),
+        ("<=", NumberMatcher::LessEqual as fn(i64) -> NumberMatcher),
+        (">", NumberMatcher::Greater as fn(i64) -> NumberMatcher),
+        ("<", NumberMatcher::Less as fn(i64) -> NumberMatcher),
+    ] {
+        if let Some(rest) = value.strip_prefix(prefix) {
+            return parse_filter_i64(rest).map(matcher);
+        }
+    }
+
+    if let Some((start, end)) = value.split_once("..") {
+        let start = (!start.trim().is_empty())
+            .then(|| parse_filter_i64(start))
+            .flatten();
+        let end = (!end.trim().is_empty())
+            .then(|| parse_filter_i64(end))
+            .flatten();
+        return (start.is_some() || end.is_some()).then_some(NumberMatcher::Range(start, end));
+    }
+
+    parse_filter_i64(value).map(NumberMatcher::Equal)
+}
+
+fn parse_filter_i64(value: &str) -> Option<i64> {
+    value.trim().parse().ok()
+}
+
+fn track_year(track: &LibraryTrack) -> Option<i64> {
+    track.album_year.or_else(|| {
+        track
+            .release_date
+            .as_deref()
+            .and_then(|date| date.as_bytes().windows(4).find_map(parse_year_window))
+    })
+}
+
+fn parse_year_window(window: &[u8]) -> Option<i64> {
+    window
+        .iter()
+        .all(u8::is_ascii_digit)
+        .then(|| std::str::from_utf8(window).ok()?.parse().ok())
+        .flatten()
+}
+
+fn apply_negation(value: bool, negated: bool) -> bool {
+    if negated {
+        !value
+    } else {
+        value
+    }
+}
+
+fn text_matches(value: &str, needle: &str) -> bool {
+    value.to_ascii_lowercase().contains(needle)
+}
+
+fn optional_text_matches(value: Option<&str>, needle: &str) -> bool {
+    value.is_some_and(|value| text_matches(value, needle))
+}
+
+fn tree_entry_matches_track(entry: &TreeEntry, track: &LibraryTrack) -> bool {
+    match entry {
+        TreeEntry::Compilation => track.compilation,
+        TreeEntry::CompilationAlbum {
+            album,
+            library_root,
+        } => {
+            track.compilation && track.tree_album() == album && track.library_root == *library_root
+        }
+        TreeEntry::Artist { artist } => track.tree_artist() == artist,
+        TreeEntry::Album {
+            artist,
+            album,
+            library_root,
+        } => {
+            track.tree_artist() == artist
+                && track.tree_album() == album
+                && track.library_root == *library_root
+        }
+    }
+}
+
+fn track_album_key(track: &LibraryTrack) -> String {
+    format!(
+        "{}\u{0}{}",
+        track.library_root.as_deref().unwrap_or_default(),
+        track.tree_album()
+    )
+}
+
+fn compare_compilation_tracks(left: &LibraryTrack, right: &LibraryTrack) -> Ordering {
+    compare_optional_text(left.library_root.as_deref(), right.library_root.as_deref())
+        .then_with(|| compare_optional_i64(left.album_year, right.album_year))
+        .then_with(|| compare_text(left.tree_album(), right.tree_album()))
+        .then_with(|| compare_optional_i64(left.disc_number, right.disc_number))
+        .then_with(|| compare_optional_i64(left.track_number, right.track_number))
+        .then_with(|| compare_text(left.display_title(), right.display_title()))
+        .then_with(|| left.path.cmp(&right.path))
+}
+
+fn compare_optional_text(left: Option<&str>, right: Option<&str>) -> Ordering {
+    compare_text(left.unwrap_or_default(), right.unwrap_or_default())
+}
+
+fn compare_text(left: &str, right: &str) -> Ordering {
+    left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase())
+}
+
+fn compare_optional_i64(left: Option<i64>, right: Option<i64>) -> Ordering {
+    left.unwrap_or(i64::MAX).cmp(&right.unwrap_or(i64::MAX))
+}
+
+fn track_root_label(track: &LibraryTrack) -> Option<String> {
+    track.library_root.as_deref().map(root_label)
+}
+
+fn root_label(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path)
+        .to_string()
 }
 
 struct CompletionResult {
@@ -2128,6 +2756,26 @@ fn matches_notice(matches: &[String]) -> String {
     }
 }
 
+fn command_needs_busy(input: &str) -> bool {
+    let input = input.strip_prefix(':').unwrap_or(input).trim();
+    let Some(command) = input.split_whitespace().next() else {
+        return false;
+    };
+    matches!(
+        command.to_ascii_lowercase().as_str(),
+        "add" | "update" | "u"
+    )
+}
+
+fn display_command(input: &str) -> String {
+    let command = input.trim();
+    if command.starts_with(':') {
+        command.to_string()
+    } else {
+        format!(":{command}")
+    }
+}
+
 fn command_path(raw_path: &str) -> Option<PathBuf> {
     let raw_path = unquote_command_arg(raw_path.trim());
     if raw_path.is_empty() {
@@ -2176,6 +2824,12 @@ fn scan_status(action: &str, root: &Path, report: &scanner::ScanReport) -> Strin
     if !report.errors.is_empty() {
         status.push_str(&format!(", errors {}", report.errors.len()));
     }
+    if report.files_marked_missing > 0 {
+        status.push_str(&format!(", missing {}", report.files_marked_missing));
+    }
+    if report.duplicate_tracks_merged > 0 {
+        status.push_str(&format!(", merged {}", report.duplicate_tracks_merged));
+    }
     status
 }
 
@@ -2215,6 +2869,12 @@ fn run_loop(
                 .as_ref()
                 .map(|_| app.current_position_ms() / 1000);
             needs_draw = false;
+        }
+
+        if app.execute_pending_command(conn) {
+            needs_draw = true;
+            next_tick = Instant::now();
+            continue;
         }
 
         let input_wait = next_tick
@@ -2403,10 +3063,13 @@ fn render_tracks_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
 fn render_info_pane(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let command_info = app.command_mode || app.command_output_visible();
+    let filter_info = !command_info && app.filter_mode;
     let info_inner_width = usize::from(area.width.saturating_sub(2));
     let info_inner_height = area.height.saturating_sub(2);
     let info_lines = if command_info {
         command_info_lines(app, info_inner_width, info_inner_height)
+    } else if filter_info {
+        filter_info_lines(app, info_inner_width, info_inner_height)
     } else {
         metadata_lines(app, info_inner_width)
     };
@@ -2416,6 +3079,8 @@ fn render_info_pane(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(if command_info {
             command_border_style(app)
+        } else if filter_info {
+            pane_border_style(true)
         } else {
             pane_border_style(false)
         });
@@ -2441,6 +3106,8 @@ fn render_input_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
 fn command_info_title(app: &App) -> &'static str {
     if app.command_output_kind == CommandOutputKind::LibraryRoots {
         "Library"
+    } else if app.filter_mode && !app.command_output_visible() {
+        "Filter"
     } else if app.command_mode || app.command_output_visible() {
         "Command"
     } else {
@@ -2536,26 +3203,44 @@ fn tree_items(app: &App) -> Vec<ListItem<'static>> {
 
     entries
         .iter()
-        .map(|entry| match entry {
-            TreeEntry::Artist { artist } => {
-                let expanded = app.expanded_artists.contains(artist);
-                let marker = if expanded { "[-]" } else { "[+]" };
-                let current_prefix = if app.tree_entry_is_current(entry) {
-                    "> "
-                } else {
-                    ""
-                };
-                ListItem::new(Line::from(vec![
-                    Span::styled(marker, Style::default().fg(Color::DarkGray)),
-                    Span::raw(" "),
-                    Span::styled(current_prefix, Style::default().fg(Color::LightGreen)),
-                    Span::styled(
-                        artist.clone(),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
-                ]))
-            }
-            TreeEntry::Album { album, .. } => ListItem::new(Line::from(vec![
+        .map(|entry| ListItem::new(tree_item_line(app, entry)))
+        .collect()
+}
+
+fn tree_item_line(app: &App, entry: &TreeEntry) -> Line<'static> {
+    match entry {
+        TreeEntry::Compilation => {
+            let marker = if app.compilations_expanded {
+                "[-]"
+            } else {
+                "[+]"
+            };
+            let current_prefix = if app.tree_entry_is_current(entry) {
+                "> "
+            } else {
+                ""
+            };
+            Line::from(vec![
+                Span::styled(marker, Style::default().fg(Color::DarkGray)),
+                Span::raw(" "),
+                Span::styled(current_prefix, Style::default().fg(Color::LightGreen)),
+                Span::styled(
+                    "Compilations",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+            ])
+        }
+        TreeEntry::CompilationAlbum {
+            album,
+            library_root,
+        } => {
+            let title = library_root
+                .as_ref()
+                .and_then(|root| Path::new(root).file_name())
+                .and_then(|name| name.to_str())
+                .map(|root| format!("{album} [{root}]"))
+                .unwrap_or_else(|| album.clone());
+            Line::from(vec![
                 Span::raw("    "),
                 Span::styled(
                     if app.tree_entry_is_current(entry) {
@@ -2565,10 +3250,40 @@ fn tree_items(app: &App) -> Vec<ListItem<'static>> {
                     },
                     Style::default().fg(Color::LightGreen),
                 ),
-                Span::styled(album.clone(), Style::default().fg(Color::Cyan)),
-            ])),
-        })
-        .collect()
+                Span::styled(title, Style::default().fg(Color::Cyan)),
+            ])
+        }
+        TreeEntry::Artist { artist } => {
+            let expanded = app.expanded_artists.contains(artist);
+            let marker = if expanded { "[-]" } else { "[+]" };
+            let current_prefix = if app.tree_entry_is_current(entry) {
+                "> "
+            } else {
+                ""
+            };
+            Line::from(vec![
+                Span::styled(marker, Style::default().fg(Color::DarkGray)),
+                Span::raw(" "),
+                Span::styled(current_prefix, Style::default().fg(Color::LightGreen)),
+                Span::styled(
+                    artist.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+            ])
+        }
+        TreeEntry::Album { album, .. } => Line::from(vec![
+            Span::raw("    "),
+            Span::styled(
+                if app.tree_entry_is_current(entry) {
+                    "> "
+                } else {
+                    ""
+                },
+                Style::default().fg(Color::LightGreen),
+            ),
+            Span::styled(album.clone(), Style::default().fg(Color::Cyan)),
+        ]),
+    }
 }
 
 fn track_items(app: &App, width: usize) -> Vec<ListItem<'static>> {
@@ -2581,9 +3296,16 @@ fn track_items(app: &App, width: usize) -> Vec<ListItem<'static>> {
         .map(|row| match row {
             TrackRow::AlbumHeader {
                 album,
+                root_label,
                 album_year,
                 duration_ms,
-            } => ListItem::new(album_header_line(album, *album_year, *duration_ms, width)),
+            } => ListItem::new(album_header_line(
+                album,
+                root_label.as_deref(),
+                *album_year,
+                *duration_ms,
+                width,
+            )),
             TrackRow::DiscDivider { disc_number } => {
                 ListItem::new(disc_divider_line(*disc_number, width))
             }
@@ -2597,6 +3319,7 @@ fn track_items(app: &App, width: usize) -> Vec<ListItem<'static>> {
 
 fn album_header_line(
     album: &str,
+    root_label: Option<&str>,
     album_year: Option<i64>,
     duration_ms: i64,
     width: usize,
@@ -2606,8 +3329,11 @@ fn album_header_line(
         Some(year) => format!("{year} {duration}"),
         None => duration,
     };
+    let title_text = root_label
+        .map(|root| format!("{album} [{root}]"))
+        .unwrap_or_else(|| album.to_string());
     let title_width = width.saturating_sub(display_width(&right) + 1);
-    let title = truncate_to_width(album, title_width);
+    let title = truncate_to_width(&title_text, title_width);
     let divider_width = width.saturating_sub(display_width(&title) + display_width(&right));
     Line::from(vec![
         Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
@@ -2737,8 +3463,12 @@ fn fit_to_width(text: &str, width: usize) -> String {
 
 fn selected_scope_title(app: &App) -> String {
     match app.selected_tree_entry() {
+        Some(TreeEntry::Compilation) => "Compilations".to_string(),
+        Some(TreeEntry::CompilationAlbum { album, .. }) => {
+            format!("Compilations - {album}")
+        }
         Some(TreeEntry::Artist { artist }) => artist.clone(),
-        Some(TreeEntry::Album { artist, album }) => format!("{artist} - {album}"),
+        Some(TreeEntry::Album { artist, album, .. }) => format!("{artist} - {album}"),
         None => "Tracks".to_string(),
     }
 }
@@ -2911,6 +3641,44 @@ fn command_help_lines(width: usize, style: Style) -> Vec<Line<'static>> {
     lines
 }
 
+fn filter_info_lines(app: &App, width: usize, height: u16) -> Vec<Line<'static>> {
+    let height = usize::from(height);
+    if height == 0 {
+        return Vec::new();
+    }
+
+    let query = FilterQuery::parse(&app.filter);
+    let mut lines = vec![Line::from(Span::styled(
+        " filter syntax",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ))];
+
+    if let Some(warning) = query.warning() {
+        lines.push(Line::from(Span::styled(
+            truncate_to_width(&format!(" {warning}"), width),
+            Style::default().fg(Color::LightRed),
+        )));
+    }
+
+    for text in [
+        "bare text searches title, artist, album, genre, composer, root, date, and path",
+        "field:value narrows a field; prefix - to exclude a term",
+        "fields: title artist album albumartist year date genre composer root path compilation plays trackno disc",
+        "examples: genre:ambient year:2010..2020",
+        "          root:Instrumental -compilation:true plays:>5",
+    ] {
+        lines.push(Line::from(Span::styled(
+            truncate_to_width(&format!(" {text}"), width),
+            Style::default().fg(Color::Gray),
+        )));
+    }
+
+    lines.truncate(height);
+    lines
+}
+
 fn command_list_lines(width: usize, style: Style) -> Vec<Line<'static>> {
     let prefix = " commands: ";
     let indent = " ".repeat(display_width(prefix));
@@ -2969,27 +3737,58 @@ fn metadata_lines(app: &App, width: usize) -> Vec<Line<'static>> {
             width,
         ),
         metadata_pair("genre", fallback_optional(track.genre.as_deref()), width),
-        metadata_pair(
-            "year",
-            track
-                .album_year
-                .map(|year| year.to_string())
-                .unwrap_or_else(|| "--".to_string()),
-            width,
-        ),
-        metadata_pair("track", track_position_text(track), width),
+        metadata_pair("released", release_date_text(track), width),
+        metadata_track_position_pair(track, width),
         metadata_pair("length", db::format_duration(track.duration_ms), width),
         metadata_pair("plays", track.play_count.to_string(), width),
     ]
 }
 
-fn track_position_text(track: &LibraryTrack) -> String {
-    match (track.track_number, track.disc_number) {
-        (Some(track), Some(disc)) => format!("{track} / disc {disc}"),
-        (Some(track), None) => track.to_string(),
-        (None, Some(disc)) => format!("disc {disc}"),
-        (None, None) => "--".to_string(),
+fn release_date_text(track: &LibraryTrack) -> String {
+    track
+        .release_date
+        .clone()
+        .or_else(|| track.album_year.map(|year| year.to_string()))
+        .unwrap_or_else(|| "--".to_string())
+}
+
+fn metadata_track_position_pair(track: &LibraryTrack, width: usize) -> Line<'static> {
+    let label = format!(" {:<9}", "track");
+    let mut remaining = width.saturating_sub(display_width(&label));
+    let mut spans = vec![Span::styled(label, Style::default().fg(Color::DarkGray))];
+    let value_style = Style::default().fg(Color::White);
+    let label_style = Style::default().fg(Color::DarkGray);
+
+    if let Some(track_text) = track_number_text(track) {
+        push_limited_span(&mut spans, &mut remaining, &track_text, value_style);
+        if let Some(disc_text) = disc_number_text(track) {
+            push_limited_span(&mut spans, &mut remaining, "  disc ", label_style);
+            push_limited_span(&mut spans, &mut remaining, &disc_text, value_style);
+        }
+    } else if let Some(disc_text) = disc_number_text(track) {
+        push_limited_span(&mut spans, &mut remaining, "disc ", label_style);
+        push_limited_span(&mut spans, &mut remaining, &disc_text, value_style);
+    } else {
+        push_limited_span(&mut spans, &mut remaining, "--", value_style);
     }
+
+    Line::from(spans)
+}
+
+fn track_number_text(track: &LibraryTrack) -> Option<String> {
+    let track_number = track.track_number?;
+    Some(match track.track_total {
+        Some(track_total) => format!("{track_number}/{track_total}"),
+        None => track_number.to_string(),
+    })
+}
+
+fn disc_number_text(track: &LibraryTrack) -> Option<String> {
+    let disc_number = track.disc_number?;
+    Some(match track.disc_total {
+        Some(disc_total) => format!("{disc_number}/{disc_total}"),
+        None => disc_number.to_string(),
+    })
 }
 
 fn metadata_pair(label: &str, value: impl AsRef<str>, width: usize) -> Line<'static> {
@@ -3002,6 +3801,20 @@ fn metadata_pair(label: &str, value: impl AsRef<str>, width: usize) -> Line<'sta
             Style::default().fg(Color::White),
         ),
     ])
+}
+
+fn push_limited_span(
+    spans: &mut Vec<Span<'static>>,
+    remaining: &mut usize,
+    text: &str,
+    style: Style,
+) {
+    if *remaining == 0 {
+        return;
+    }
+    let text = truncate_to_width(text, *remaining);
+    *remaining = (*remaining).saturating_sub(display_width(&text));
+    spans.push(Span::styled(text, style));
 }
 
 fn fallback_text(value: &str) -> &str {
@@ -3673,9 +4486,14 @@ mod tests {
         let mut track = test_track(1, "first track");
         track.composer = Some("Someone Quiet".to_string());
         track.genre = Some("Ambient".to_string());
+        track.track_total = Some(12);
+        track.disc_number = Some(1);
+        track.disc_total = Some(2);
         let app = test_app(vec![track]);
 
-        let text = lines_text(&metadata_lines(&app, 80));
+        let lines = metadata_lines(&app, 80);
+        let text = lines_text(&lines);
+        let track_line = &lines[7];
 
         assert!(text.contains("selected track"));
         assert!(text.contains("title    first track"));
@@ -3683,9 +4501,36 @@ mod tests {
         assert!(text.contains("album    Album"));
         assert!(text.contains("composer Someone Quiet"));
         assert!(text.contains("genre    Ambient"));
-        assert!(text.contains("track    1"));
+        assert!(text.contains("released 2018-05-11"));
+        assert!(text.contains("track    1/12  disc 1/2"));
         assert!(text.contains("plays    0"));
         assert!(!text.contains("/tmp/first track.flac"));
+        assert_eq!(
+            track_line.spans[0].style,
+            Style::default().fg(Color::DarkGray)
+        );
+        assert_eq!(track_line.spans[1].style, Style::default().fg(Color::White));
+        assert_eq!(
+            track_line.spans[2].style,
+            Style::default().fg(Color::DarkGray)
+        );
+        assert_eq!(track_line.spans[3].style, Style::default().fg(Color::White));
+    }
+
+    #[test]
+    fn scan_commands_queue_busy_output_before_running() {
+        let mut app = test_app(vec![test_track(1, "first track")]);
+        let conn = Connection::open_in_memory().unwrap();
+        app.command_mode = true;
+        app.command = String::from("update");
+
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(!app.command_mode);
+        assert_eq!(app.pending_command.as_deref(), Some("update"));
+        assert!(app.command_output[0].contains("working: :update"));
+        assert!(app.command_output[1].contains("scanning files"));
     }
 
     #[test]
@@ -3827,8 +4672,76 @@ mod tests {
     }
 
     #[test]
+    fn fielded_filter_matches_metadata_ranges_and_roots() {
+        let mut ambient = test_track(1, "quiet one");
+        ambient.genre = Some("Ambient".to_string());
+        ambient.album_year = Some(2018);
+        ambient.release_date = Some("2018-05-11".to_string());
+        ambient.library_root = Some("/tmp/Instrumental".to_string());
+
+        let mut rock = test_track(2, "loud one");
+        rock.genre = Some("Rock".to_string());
+        rock.album_year = Some(2024);
+        rock.library_root = Some("/tmp/Vocal".to_string());
+
+        let mut app = test_app(vec![ambient, rock]);
+        app.filter = "genre:ambient year:2010..2020 root:instrumental".to_string();
+        app.sync_selection();
+
+        assert_eq!(app.playback_sequence_indices(), vec![0]);
+    }
+
+    #[test]
+    fn fielded_filter_supports_quoted_values_negation_booleans_and_counts() {
+        let mut wanted = test_track(1, "wanted track");
+        wanted.artist = Some("Other Artist".to_string());
+        wanted.genre = Some("Ambient".to_string());
+        wanted.play_count = 6;
+        wanted.compilation = false;
+
+        let mut skipped = test_track(2, "skipped track");
+        skipped.artist = Some("Other Artist".to_string());
+        skipped.genre = Some("Podcast".to_string());
+        skipped.play_count = 10;
+        skipped.compilation = true;
+
+        let mut app = test_app(vec![wanted, skipped]);
+        app.filter =
+            "artist:\"Other Artist\" -genre:podcast compilation:false plays:>5".to_string();
+        app.sync_selection();
+
+        assert_eq!(app.playback_sequence_indices(), vec![0]);
+    }
+
+    #[test]
+    fn unknown_filter_field_shows_hint_and_matches_nothing() {
+        let mut app = test_app(vec![test_track(1, "first track")]);
+        app.filter = "mood:blue".to_string();
+        app.sync_selection();
+
+        let query = FilterQuery::parse(&app.filter);
+
+        assert_eq!(app.playback_sequence_indices(), Vec::<usize>::new());
+        assert_eq!(query.warning(), Some("unknown filter field: mood"));
+    }
+
+    #[test]
+    fn filter_info_pane_hints_fields_while_typing() {
+        let mut app = test_app(vec![test_track(1, "first track")]);
+        app.filter_mode = true;
+        app.filter = "genre:ambient".to_string();
+
+        let text = lines_text(&filter_info_lines(&app, 80, 8));
+
+        assert!(app.info_area_visible());
+        assert_eq!(command_info_title(&app), "Filter");
+        assert!(text.contains("fields: title artist album"));
+        assert!(text.contains("examples: genre:ambient year:2010..2020"));
+    }
+
+    #[test]
     fn album_header_shows_year_and_right_aligned_duration() {
-        let line = album_header_line("Album", Some(2018), 100_000, 24);
+        let line = album_header_line("Album", None, Some(2018), 100_000, 24);
         let text = line_text(&line);
 
         assert_eq!(display_width(&text), 24);
@@ -4247,6 +5160,215 @@ mod tests {
     }
 
     #[test]
+    fn compilations_artist_appears_first_and_preserves_normal_artist() {
+        let mut compilation = test_track(1, "compilation track");
+        compilation.compilation = true;
+        compilation.artist = Some("Contributing Artist".to_string());
+        compilation.album_artist = Some("Contributing Artist".to_string());
+        let mut app = test_app(vec![compilation]);
+
+        assert!(matches!(
+            app.tree_entries().first(),
+            Some(TreeEntry::Compilation)
+        ));
+        assert!(app.tree_entries().iter().any(|entry| {
+            matches!(
+                entry,
+                TreeEntry::Artist { artist } if artist == "Contributing Artist"
+            )
+        }));
+
+        let artist_position = app
+            .tree_entries()
+            .iter()
+            .position(|entry| {
+                matches!(
+                    entry,
+                    TreeEntry::Artist { artist } if artist == "Contributing Artist"
+                )
+            })
+            .unwrap();
+        app.selected_tree = artist_position;
+        app.sync_selection();
+
+        assert_eq!(app.selected_scope_tracks().len(), 1);
+    }
+
+    #[test]
+    fn compilations_entry_expands_to_albums() {
+        let mut first = test_track(1, "first compilation track");
+        first.compilation = true;
+        first.album = Some("First Collection".to_string());
+        let mut second = test_track(2, "second compilation track");
+        second.compilation = true;
+        second.album = Some("Second Collection".to_string());
+        let mut app = test_app(vec![first, second]);
+
+        assert!(matches!(
+            app.tree_entries().first(),
+            Some(TreeEntry::Compilation)
+        ));
+        assert!(!app
+            .tree_entries()
+            .iter()
+            .any(|entry| { matches!(entry, TreeEntry::CompilationAlbum { .. }) }));
+        assert!(
+            line_text(&tree_item_line(&app, &app.tree_entries()[0])).contains("[+] Compilations")
+        );
+
+        app.space_action();
+
+        assert!(app.compilations_expanded);
+        assert!(app.tree_entries().iter().any(|entry| {
+            matches!(
+                entry,
+                TreeEntry::CompilationAlbum { album, .. } if album == "First Collection"
+            )
+        }));
+        assert!(app.tree_entries().iter().any(|entry| {
+            matches!(
+                entry,
+                TreeEntry::CompilationAlbum { album, .. } if album == "Second Collection"
+            )
+        }));
+        assert!(
+            line_text(&tree_item_line(&app, &app.tree_entries()[0])).contains("[-] Compilations")
+        );
+    }
+
+    #[test]
+    fn expanded_compilation_marks_current_album() {
+        let mut first = test_track(1, "first compilation track");
+        first.compilation = true;
+        first.album = Some("First Collection".to_string());
+        let mut second = test_track(2, "second compilation track");
+        second.compilation = true;
+        second.album = Some("Second Collection".to_string());
+        let mut app = test_app(vec![first, second]);
+        app.current = Some(PlayingTrack {
+            index: 1,
+            track: app.tracks[1].clone(),
+            last_position_ms: 0,
+            listened_ms: 0,
+        });
+
+        assert!(app.tree_entry_is_current(&app.tree_entries()[0]));
+        app.space_action();
+
+        assert!(!app.tree_entry_is_current(&app.tree_entries()[0]));
+        assert!(app.tree_entries().iter().any(|entry| {
+            matches!(
+                entry,
+                TreeEntry::CompilationAlbum { album, .. }
+                    if album == "Second Collection" && app.tree_entry_is_current(entry)
+            )
+        }));
+    }
+
+    #[test]
+    fn enter_on_compilations_plays_first_compilation_track() {
+        let mut compilation = test_track(2, "compilation track");
+        compilation.compilation = true;
+        let mut app = test_app(vec![test_track(1, "regular track"), compilation]);
+        let conn = Connection::open_in_memory().unwrap();
+
+        app.activate(&conn).unwrap();
+
+        assert!(matches!(
+            app.tree_entries().first(),
+            Some(TreeEntry::Compilation)
+        ));
+        assert_eq!(app.current.as_ref().map(|current| current.index), Some(1));
+    }
+
+    #[test]
+    fn compilation_view_groups_albums_across_contributing_artists() {
+        let mut first = test_track(1, "esper one");
+        first.compilation = true;
+        first.artist = Some("Vangelis".to_string());
+        first.album = Some("Blade Runner Esper Edition".to_string());
+        first.album_artist = Some("Vangelis".to_string());
+
+        let mut other_album = test_track(2, "elsewhere");
+        other_album.compilation = true;
+        other_album.artist = Some("Another Artist".to_string());
+        other_album.album = Some("Other Album".to_string());
+        other_album.album_artist = Some("Another Artist".to_string());
+
+        let mut second = test_track(3, "esper two");
+        second.compilation = true;
+        second.artist = Some("Dialog".to_string());
+        second.album = Some("Blade Runner Esper Edition".to_string());
+        second.album_artist = Some("Dialog".to_string());
+        second.track_number = Some(2);
+
+        let app = test_app(vec![first, other_album, second]);
+
+        let album_headers: Vec<String> = app
+            .track_rows()
+            .iter()
+            .filter_map(|row| match row {
+                TrackRow::AlbumHeader { album, .. } => Some(album.clone()),
+                _ => None,
+            })
+            .collect();
+        let track_indices: Vec<usize> = app
+            .track_rows()
+            .iter()
+            .filter_map(|row| match row {
+                TrackRow::Track { track_index, .. } => Some(*track_index),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            album_headers,
+            vec!["Blade Runner Esper Edition", "Other Album"]
+        );
+        assert_eq!(track_indices, vec![0, 2, 1]);
+    }
+
+    #[test]
+    fn compilation_view_keeps_same_album_separate_across_roots() {
+        let mut vocal = test_track(1, "esper vocal");
+        vocal.compilation = true;
+        vocal.album = Some("Blade Runner Esper Edition".to_string());
+        vocal.library_root = Some("/tmp/Vocal".to_string());
+
+        let mut instrumental = test_track(2, "esper instrumental");
+        instrumental.compilation = true;
+        instrumental.album = Some("Blade Runner Esper Edition".to_string());
+        instrumental.library_root = Some("/tmp/Instrumental".to_string());
+
+        let app = test_app(vec![vocal, instrumental]);
+
+        let album_headers: Vec<(String, Option<String>)> = app
+            .track_rows()
+            .iter()
+            .filter_map(|row| match row {
+                TrackRow::AlbumHeader {
+                    album, root_label, ..
+                } => Some((album.clone(), root_label.clone())),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            album_headers,
+            vec![
+                (
+                    "Blade Runner Esper Edition".to_string(),
+                    Some("Instrumental".to_string())
+                ),
+                (
+                    "Blade Runner Esper Edition".to_string(),
+                    Some("Vocal".to_string())
+                )
+            ]
+        );
+    }
+
+    #[test]
     fn enter_on_artist_plays_first_listed_track() {
         let mut app = test_app(vec![
             test_track(1, "first track"),
@@ -4394,6 +5516,7 @@ mod tests {
             selected_tree: 0,
             selected_track_row: 0,
             expanded_artists: HashSet::new(),
+            compilations_expanded: false,
             focus: FocusPane::Tree,
             filter: String::new(),
             filter_mode: false,
@@ -4404,6 +5527,7 @@ mod tests {
             command_roots: Vec::new(),
             command_selected: 0,
             command_focus: false,
+            pending_command: None,
             info_panel_visible: true,
             play_target: PlayTarget::Library,
             continuous: true,
@@ -4439,17 +5563,22 @@ mod tests {
             media_item_id: id,
             location_id: id,
             path: format!("/tmp/{title}.flac"),
+            library_root: None,
             title: Some(title.to_string()),
             artist: Some("Artist".to_string()),
             album: Some("Album".to_string()),
             album_artist: None,
             album_year: Some(2018),
+            release_date: Some("2018-05-11".to_string()),
             composer: None,
             genre: None,
             cover_path: None,
             track_number: Some(id),
+            track_total: Some(10),
             disc_number: None,
+            disc_total: None,
             duration_ms: Some(100_000),
+            compilation: false,
             play_count: 0,
         }
     }
