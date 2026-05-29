@@ -727,8 +727,7 @@ pub fn library_tracks(conn: &Connection) -> Result<Vec<LibraryTrack>> {
         ORDER BY
             artist_sort,
             MIN(COALESCE(album_year, 9223372036854775807))
-                OVER (PARTITION BY artist_sort, COALESCE(library_root, ''), album_sort),
-            COALESCE(library_root, ''),
+                OVER (PARTITION BY artist_sort, album_sort),
             album_sort,
             COALESCE(disc_number, 0),
             COALESCE(track_number, 0),
