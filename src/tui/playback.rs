@@ -84,13 +84,6 @@ impl PlaybackEntry {
 }
 
 impl PlayingTrack {
-    fn playback_entry(&self) -> PlaybackEntry {
-        PlaybackEntry {
-            track_index: self.index,
-            source: self.source,
-        }
-    }
-
     pub(super) fn tick_position(&mut self, position: Duration, state: PlaybackState) {
         let position_ms = position.as_millis() as i64;
         if state == PlaybackState::Playing {
@@ -439,6 +432,11 @@ impl App {
             .map(|entry| entry.track_index)
     }
 
+    pub(super) fn selected_playable_media_item_id(&self) -> Option<i64> {
+        let index = self.selected_playable_track_index()?;
+        self.tracks.get(index).map(|track| track.media_item_id)
+    }
+
     pub(super) fn selected_playback_entry(&self) -> Option<PlaybackEntry> {
         let rows = self.track_rows();
         if let Some(entry) = rows
@@ -655,8 +653,51 @@ impl App {
     fn playback_anchor_entry(&self) -> Option<PlaybackEntry> {
         self.current
             .as_ref()
-            .map(PlayingTrack::playback_entry)
+            .and_then(|current| self.playback_entry_for_current(current))
             .or_else(|| self.selected_playback_entry())
+    }
+
+    fn playback_entry_for_current(&self, current: &PlayingTrack) -> Option<PlaybackEntry> {
+        let track_index = self.track_index_for_media_item_id(current.track.media_item_id)?;
+        match current.source {
+            Some(PlaybackSource::PlaylistTrack {
+                playlist_id,
+                playlist_track_id,
+            }) => self
+                .playlist_track_entry_ids
+                .get(&playlist_id)
+                .and_then(|entry_ids| {
+                    entry_ids
+                        .iter()
+                        .position(|entry_id| *entry_id == playlist_track_id)
+                })
+                .and_then(|position| {
+                    self.playlist_track_indices
+                        .get(&playlist_id)
+                        .and_then(|indices| indices.get(position))
+                        .copied()
+                })
+                .map(|track_index| {
+                    PlaybackEntry::playlist_track(playlist_id, playlist_track_id, track_index)
+                })
+                .or_else(|| Some(PlaybackEntry::library(track_index))),
+            None => Some(PlaybackEntry::library(track_index)),
+        }
+    }
+
+    pub(super) fn sync_current_track_index(&mut self) {
+        let Some(index) = self
+            .current
+            .as_ref()
+            .and_then(|current| self.track_index_for_media_item_id(current.track.media_item_id))
+        else {
+            return;
+        };
+        let track = self.tracks[index].clone();
+        if let Some(current) = &mut self.current {
+            current.index = index;
+            current.track = track;
+        }
     }
 
     fn library_playback_entries(&self) -> Vec<PlaybackEntry> {

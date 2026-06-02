@@ -166,12 +166,18 @@ impl App {
     }
 
     fn refresh(&mut self, conn: &Connection) -> Result<()> {
+        let selected_tree_entry = self.selected_tree_entry().cloned();
+        let selected_media_item_id = self.selected_playable_media_item_id();
         self.tracks = db::library_tracks(conn)?;
         self.playlists = db::playlists(conn)?;
         self.refresh_playlist_tracks(conn)?;
         self.rebuild_search_cache();
         self.reset_shuffle_order();
-        self.sync_selection();
+        self.sync_current_track_index();
+        self.sync_selection_preserving_browser_anchors(
+            selected_tree_entry.as_ref(),
+            selected_media_item_id,
+        );
         self.message = format!("loaded {} tracks", self.tracks.len());
         Ok(())
     }

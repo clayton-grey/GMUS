@@ -286,6 +286,17 @@ impl App {
         &self.view.track_rows
     }
 
+    pub(super) fn track_index_for_media_item_id(&self, media_item_id: i64) -> Option<usize> {
+        self.tracks
+            .iter()
+            .position(|track| track.media_item_id == media_item_id)
+    }
+
+    pub(super) fn track_row_media_item_id(&self, row: &TrackRow) -> Option<i64> {
+        let index = row.track_index()?;
+        self.tracks.get(index).map(|track| track.media_item_id)
+    }
+
     pub(super) fn tree_entry_is_current(&self, entry: &TreeEntry) -> bool {
         let Some(current) = &self.current else {
             return false;
@@ -445,7 +456,11 @@ impl App {
     }
 
     pub(super) fn select_current_track(&mut self) {
-        if let Some(index) = self.current.as_ref().map(|current| current.index) {
+        let index = self
+            .current
+            .as_ref()
+            .and_then(|current| self.track_index_for_media_item_id(current.track.media_item_id));
+        if let Some(index) = index {
             self.select_track_index(index);
             self.message = String::from("selected current track");
         } else {

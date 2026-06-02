@@ -432,34 +432,15 @@ impl App {
 
     pub(super) fn clear_filter(&mut self) {
         let selected_tree_entry = self.selected_tree_entry().cloned();
-        let selected_track_index = self.selected_playable_track_index();
+        let selected_media_item_id = self.selected_playable_media_item_id();
 
         self.filter_mode = false;
         self.filter.clear();
         self.reset_shuffle_order();
-        self.rebuild_filtered_indices();
-        self.rebuild_tree_entries();
-        if let Some(position) = selected_tree_entry.as_ref().and_then(|entry| {
-            self.tree_entries()
-                .iter()
-                .position(|candidate| candidate == entry)
-        }) {
-            self.selected_tree = position;
-        } else {
-            self.clamp_tree_selection();
-        }
-
-        self.rebuild_track_rows();
-        if let Some(position) = selected_track_index.and_then(|index| {
-            self.track_rows()
-                .iter()
-                .position(|row| row.track_index() == Some(index))
-        }) {
-            self.selected_track_row = position;
-        } else {
-            self.clamp_track_selection();
-        }
-        self.apply_selection_state();
+        self.sync_selection_preserving_browser_anchors(
+            selected_tree_entry.as_ref(),
+            selected_media_item_id,
+        );
         self.message = String::from("filter cleared");
     }
 

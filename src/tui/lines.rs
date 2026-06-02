@@ -294,7 +294,9 @@ pub(super) fn track_line(
     let is_current = app
         .current
         .as_ref()
-        .map(|current| current.source.is_none() && current.index == track_index)
+        .map(|current| {
+            current.source.is_none() && current.track.media_item_id == track.media_item_id
+        })
         .unwrap_or(false);
     let marker = if is_current { ">" } else { " " };
     let number = match (show_disc_number, track.disc_number, track.track_number) {

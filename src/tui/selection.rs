@@ -1,4 +1,4 @@
-use super::App;
+use super::{App, TreeEntry};
 
 impl App {
     pub(super) fn sync_selection(&mut self) {
@@ -14,11 +14,22 @@ impl App {
 
     pub(super) fn sync_selection_preserving_browser_selection(&mut self) {
         let selected_tree_entry = self.selected_tree_entry().cloned();
-        let selected_track_index = self.selected_playable_track_index();
+        let selected_media_item_id = self.selected_playable_media_item_id();
 
+        self.sync_selection_preserving_browser_anchors(
+            selected_tree_entry.as_ref(),
+            selected_media_item_id,
+        );
+    }
+
+    pub(super) fn sync_selection_preserving_browser_anchors(
+        &mut self,
+        selected_tree_entry: Option<&TreeEntry>,
+        selected_media_item_id: Option<i64>,
+    ) {
         self.rebuild_filtered_indices();
         self.rebuild_tree_entries();
-        if let Some(position) = selected_tree_entry.as_ref().and_then(|entry| {
+        if let Some(position) = selected_tree_entry.and_then(|entry| {
             self.tree_entries()
                 .iter()
                 .position(|candidate| candidate == entry)
@@ -29,10 +40,10 @@ impl App {
         }
 
         self.rebuild_track_rows();
-        if let Some(position) = selected_track_index.and_then(|index| {
+        if let Some(position) = selected_media_item_id.and_then(|media_item_id| {
             self.track_rows()
                 .iter()
-                .position(|row| row.track_index() == Some(index))
+                .position(|row| self.track_row_media_item_id(row) == Some(media_item_id))
         }) {
             self.selected_track_row = position;
         } else {

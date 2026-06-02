@@ -2452,6 +2452,70 @@ fn user_can_select_current_track_explicitly() {
 }
 
 #[test]
+fn current_track_selection_uses_media_item_id_after_reorder() {
+    let first = test_track(1, "first track");
+    let second = test_track(2, "second track");
+    let mut app = test_app(vec![first.clone(), second.clone()]);
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: first.clone(),
+        last_position_ms: 0,
+        listened_ms: 0,
+    });
+    app.tracks = vec![second, first];
+    app.rebuild_search_cache();
+    app.sync_selection();
+
+    app.select_current_track();
+
+    assert_eq!(app.selected_playable_media_item_id(), Some(1));
+    assert_eq!(app.selected_track_row, 2);
+}
+
+#[test]
+fn preserving_browser_selection_uses_media_item_id_after_reorder() {
+    let first = test_track(1, "first track");
+    let second = test_track(2, "second track");
+    let mut app = test_app(vec![first.clone(), second.clone()]);
+    app.focus = FocusPane::Tracks;
+    app.selected_track_row = 2;
+    app.apply_selection_state();
+    let selected_tree_entry = app.selected_tree_entry().cloned();
+    let selected_media_item_id = app.selected_playable_media_item_id();
+
+    app.tracks = vec![second, first];
+    app.rebuild_search_cache();
+    app.sync_selection_preserving_browser_anchors(
+        selected_tree_entry.as_ref(),
+        selected_media_item_id,
+    );
+
+    assert_eq!(app.selected_playable_media_item_id(), Some(2));
+    assert_eq!(app.selected_track_row, 1);
+}
+
+#[test]
+fn playback_anchor_uses_media_item_id_after_reorder() {
+    let first = test_track(1, "first track");
+    let second = test_track(2, "second track");
+    let mut app = test_app(vec![first.clone(), second.clone()]);
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: first.clone(),
+        last_position_ms: 0,
+        listened_ms: 0,
+    });
+    app.tracks = vec![second, first];
+    app.rebuild_search_cache();
+    app.sync_selection();
+
+    assert_eq!(app.next_playback_index(1), None);
+    assert_eq!(app.next_playback_index(-1), Some(0));
+}
+
+#[test]
 fn uppercase_i_selects_current_track_after_lowercase_i_toggles_info() {
     let mut other_artist = test_track(2, "other artist track");
     other_artist.artist = Some("Other Artist".to_string());
