@@ -198,8 +198,18 @@ impl App {
         let path = current.track.path.clone();
         self.player.load_and_play(Path::new(&path))?;
         if position_ms > 0 {
-            self.player
-                .seek(Duration::from_millis(position_ms.max(0) as u64))?;
+            if let Err(error) = self
+                .player
+                .seek(Duration::from_millis(position_ms.max(0) as u64))
+            {
+                let _ = self.player.stop();
+                if let Some(current) = &mut self.current {
+                    current.align_position(position_ms);
+                }
+                self.message = format!("seek failed: {error:#}");
+                self.sync_media_playback(true);
+                return Ok(());
+            }
         }
         self.suspended_position_ms = None;
         if let Some(current) = &mut self.current {

@@ -2568,6 +2568,28 @@ fn pause_suspends_player_until_resume() {
 }
 
 #[test]
+fn failed_seek_during_resume_keeps_app_paused() {
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    app.player = Box::new(FailingSeekPlayer);
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: app.tracks[0].clone(),
+        last_position_ms: 50_000,
+        listened_ms: 50_000,
+    });
+    app.suspended_position_ms = Some(50_000);
+
+    app.resume_current().unwrap();
+
+    assert_eq!(app.logical_state(), PlaybackState::Paused);
+    assert_eq!(app.suspended_position_ms, Some(50_000));
+    assert_eq!(app.current.as_ref().unwrap().last_position_ms, 50_000);
+    assert!(app.message.contains("seek failed"));
+    assert!(app.message.contains("decoder refused seek"));
+}
+
+#[test]
 fn play_entry_starts_player_backend() {
     let conn = Connection::open_in_memory().unwrap();
     let mut app = test_app(vec![test_track(1, "first track")]);
