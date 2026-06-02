@@ -11,7 +11,40 @@ The initial implementation focuses on the foundation:
 - A small Ratatui shell that gives the application a real terminal surface.
 - Thin traits for playback and OS media-session integrations.
 
-## Current Commands
+## Install And Build
+
+GMUS is built with stable Rust:
+
+```sh
+cargo build
+cargo install --path .
+```
+
+The default build enables Rodio playback and macOS media-session integration
+when compiling on macOS. Other useful build modes:
+
+```sh
+cargo build --no-default-features
+cargo build --features bundled-sqlite
+cargo build --all-features
+```
+
+On Linux, the Rodio/CPAL stack may require system audio development packages
+such as ALSA headers. The CI workflow installs `libasound2-dev` and
+`pkg-config` for this.
+
+## Development Checks
+
+```sh
+cargo fmt --check
+cargo test --all-targets
+cargo check --no-default-features --all-targets
+cargo check --all-targets --features bundled-sqlite
+cargo check --all-targets --all-features
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+## CLI Commands
 
 ```sh
 gmus
@@ -57,7 +90,7 @@ The TUI is moving toward the cmus library view:
 
 Keyboard control:
 
-- `Tab`: switch between artist tree and track pane
+- `Tab`: switch between artist tree, track pane, and playlist pane when open
 - `Up` / `Down` or `j` / `k`: move selection
 - `Enter`: play the first listed track for the selected tree item, or play the selected track
 - `Space`: expand/collapse in the tree
@@ -65,7 +98,10 @@ Keyboard control:
 - `Left` / `Right` or `h` / `l`: seek -5/+5 seconds
 - `,` / `.`: seek -1/+1 minute
 - `x`: play
-- `c` or `p`: pause/resume
+- `c`: pause/resume
+- `p`: open or focus the playlist pane
+- `+` / `=`: add the selected track, artist, album, or playlist entry to the active playlist
+- `-`: remove the selected track or playlist entry from the active playlist
 - `v`: stop
 - `b` / `z`: next or previous
 - `C`: toggle continuous auto-advance
@@ -90,9 +126,15 @@ Library commands:
 - `:update`: rescan active library roots
 - `:update PATH`: scan or rescan one path and keep it active
 - `:library`: show active and inactive library roots in the info pane
+- `:playlist NAME`: create/select a playlist and open the playlist pane
+- `:playlist-clear NAME`: remove all tracks from a playlist
+- `:playlist-delete NAME`: delete a playlist
 - `:filter TEXT`: apply a filter from command mode
 - `:clear`: clear the active filter
 - `:clear-output`, `:close`, or `:hide`: close command output and return the info pane to metadata
+
+Most playlist commands also have short aliases in the TUI command bar: `:pl`,
+`:pl-clear`, `:pl-delete`, `:playlist-rm`, and `:pl-rm`.
 
 `Esc` closes command output before falling through to filter clearing. Normal
 navigation/actions also return the info pane to selected-track metadata.
