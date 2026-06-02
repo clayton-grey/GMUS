@@ -50,6 +50,9 @@ const COMMAND_NAMES: &[&str] = &[
     "remove",
     "update",
     "library",
+    "playlist",
+    "playlist-clear",
+    "playlist-delete",
     "filter",
     "clear",
     "clear-output",
@@ -67,6 +70,7 @@ pub fn run(conn: &Connection, paths: &AppPaths) -> Result<()> {
 enum FocusPane {
     Tree,
     Tracks,
+    Playlist,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -102,6 +106,8 @@ impl PlayTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TreeEntry {
+    Playlists,
+    Playlist { playlist_id: i64, name: String },
     Compilation,
     CompilationAlbum { album: String },
     Artist { artist: String },
@@ -111,10 +117,25 @@ enum TreeEntry {
 impl TreeEntry {
     fn artist(&self) -> &str {
         match self {
+            Self::Playlists | Self::Playlist { .. } => "Playlists",
             Self::Compilation | Self::CompilationAlbum { .. } => "Compilations",
             Self::Artist { artist } | Self::Album { artist, .. } => artist,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+enum PlaylistPanelEntry {
+    Playlist {
+        playlist_id: i64,
+        name: String,
+    },
+    Track {
+        playlist_id: i64,
+        playlist_track_id: i64,
+        position: usize,
+        track_index: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +152,29 @@ enum TrackRow {
         track_index: usize,
         show_disc_number: bool,
     },
+    PlaylistHeader {
+        name: String,
+        duration_ms: i64,
+    },
+    PlaylistTrack {
+        playlist_id: i64,
+        playlist_track_id: i64,
+        position: usize,
+        track_index: usize,
+    },
+}
+
+impl TrackRow {
+    fn track_index(&self) -> Option<usize> {
+        match self {
+            Self::Track { track_index, .. } | Self::PlaylistTrack { track_index, .. } => {
+                Some(*track_index)
+            }
+            Self::AlbumHeader { .. } | Self::DiscDivider { .. } | Self::PlaylistHeader { .. } => {
+                None
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -139,18 +183,29 @@ struct ViewCache {
     filtered_indices: Vec<usize>,
     tree_entries: Vec<TreeEntry>,
     track_rows: Vec<TrackRow>,
+    playlist_entries: Vec<PlaylistPanelEntry>,
 }
 
 struct App {
     paths: AppPaths,
     tracks: Vec<LibraryTrack>,
+    playlists: Vec<db::Playlist>,
+    playlist_track_ids: HashMap<i64, Vec<i64>>,
+    playlist_track_entry_ids: HashMap<i64, Vec<i64>>,
+    playlist_track_indices: HashMap<i64, Vec<usize>>,
     view: ViewCache,
     tree_state: ListState,
     track_state: ListState,
+    playlist_state: ListState,
     selected_tree: usize,
     selected_track_row: usize,
+    selected_playlist_row: usize,
     expanded_artists: HashSet<String>,
     compilations_expanded: bool,
+    playlists_expanded: bool,
+    expanded_playlists: HashSet<i64>,
+    active_playlist_id: Option<i64>,
+    playlist_panel_open: bool,
     focus: FocusPane,
     filter: String,
     filter_mode: bool,
@@ -168,8 +223,8 @@ struct App {
     repeat: bool,
     shuffle: bool,
     shuffle_seed: u64,
-    shuffle_scope: Vec<usize>,
-    shuffle_order: Vec<usize>,
+    shuffle_scope: Vec<PlaybackEntry>,
+    shuffle_order: Vec<PlaybackEntry>,
     player: Box<dyn PlayerBackend>,
     media_session: Box<dyn MediaSession>,
     current: Option<PlayingTrack>,
@@ -188,12 +243,53 @@ struct TransientStatus {
 #[derive(Debug, Clone)]
 struct PlayingTrack {
     index: usize,
+    source: Option<PlaybackSource>,
     track: LibraryTrack,
     last_position_ms: i64,
     listened_ms: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaybackSource {
+    PlaylistTrack {
+        playlist_id: i64,
+        playlist_track_id: i64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlaybackEntry {
+    track_index: usize,
+    source: Option<PlaybackSource>,
+}
+
+impl PlaybackEntry {
+    fn library(track_index: usize) -> Self {
+        Self {
+            track_index,
+            source: None,
+        }
+    }
+
+    fn playlist_track(playlist_id: i64, playlist_track_id: i64, track_index: usize) -> Self {
+        Self {
+            track_index,
+            source: Some(PlaybackSource::PlaylistTrack {
+                playlist_id,
+                playlist_track_id,
+            }),
+        }
+    }
+}
+
 impl PlayingTrack {
+    fn playback_entry(&self) -> PlaybackEntry {
+        PlaybackEntry {
+            track_index: self.index,
+            source: self.source,
+        }
+    }
+
     fn tick_position(&mut self, position: Duration, state: PlaybackState) {
         let position_ms = position.as_millis() as i64;
         if state == PlaybackState::Playing {
@@ -215,13 +311,23 @@ impl App {
         let mut app = Self {
             paths: paths.clone(),
             tracks: db::library_tracks(conn)?,
+            playlists: db::playlists(conn)?,
+            playlist_track_ids: HashMap::new(),
+            playlist_track_entry_ids: HashMap::new(),
+            playlist_track_indices: HashMap::new(),
             view: ViewCache::default(),
             tree_state: ListState::default(),
             track_state: ListState::default(),
+            playlist_state: ListState::default(),
             selected_tree: 0,
             selected_track_row: 0,
+            selected_playlist_row: 0,
             expanded_artists: HashSet::new(),
             compilations_expanded: false,
+            playlists_expanded: false,
+            expanded_playlists: HashSet::new(),
+            active_playlist_id: None,
+            playlist_panel_open: false,
             focus: FocusPane::Tree,
             filter: String::new(),
             filter_mode: false,
@@ -249,9 +355,10 @@ impl App {
             last_media_position_s: None,
             transient_status: None,
             message: String::from(
-                "Tab pane  Enter select/play  x play  p pause  v stop  b/z next/prev",
+                "Tab pane  Enter select/play  x play  c pause  p playlists  v stop  b/z next/prev",
             ),
         };
+        app.refresh_playlist_tracks(conn)?;
         app.rebuild_search_cache();
         app.sync_selection();
         Ok(app)
@@ -259,10 +366,51 @@ impl App {
 
     fn refresh(&mut self, conn: &Connection) -> Result<()> {
         self.tracks = db::library_tracks(conn)?;
+        self.playlists = db::playlists(conn)?;
+        self.refresh_playlist_tracks(conn)?;
         self.rebuild_search_cache();
         self.reset_shuffle_order();
         self.sync_selection();
         self.message = format!("loaded {} tracks", self.tracks.len());
+        Ok(())
+    }
+
+    fn refresh_playlist_tracks(&mut self, conn: &Connection) -> Result<()> {
+        self.playlist_track_ids.clear();
+        self.playlist_track_entry_ids.clear();
+        self.playlist_track_indices.clear();
+        let media_index: HashMap<i64, usize> = self
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| (track.media_item_id, index))
+            .collect();
+
+        for playlist in &self.playlists {
+            let entries = db::playlist_tracks(conn, playlist.id)?;
+            let ids = entries
+                .iter()
+                .map(|entry| entry.media_item_id)
+                .collect::<Vec<_>>();
+            let mut entry_ids = Vec::new();
+            let mut indices = Vec::new();
+            for entry in &entries {
+                if let Some(index) = media_index.get(&entry.media_item_id).copied() {
+                    entry_ids.push(entry.id);
+                    indices.push(index);
+                }
+            }
+            self.playlist_track_ids.insert(playlist.id, ids);
+            self.playlist_track_entry_ids.insert(playlist.id, entry_ids);
+            self.playlist_track_indices.insert(playlist.id, indices);
+        }
+
+        if self
+            .active_playlist_id
+            .is_none_or(|id| !self.playlists.iter().any(|playlist| playlist.id == id))
+        {
+            self.active_playlist_id = self.playlists.first().map(|playlist| playlist.id);
+        }
         Ok(())
     }
 
@@ -272,6 +420,40 @@ impl App {
         self.clamp_tree_selection();
         self.rebuild_track_rows();
         self.clamp_track_selection();
+        self.rebuild_playlist_entries();
+        self.clamp_playlist_selection();
+        self.apply_selection_state();
+    }
+
+    fn sync_selection_preserving_browser_selection(&mut self) {
+        let selected_tree_entry = self.selected_tree_entry().cloned();
+        let selected_track_index = self.selected_playable_track_index();
+
+        self.rebuild_filtered_indices();
+        self.rebuild_tree_entries();
+        if let Some(position) = selected_tree_entry.as_ref().and_then(|entry| {
+            self.tree_entries()
+                .iter()
+                .position(|candidate| candidate == entry)
+        }) {
+            self.selected_tree = position;
+        } else {
+            self.clamp_tree_selection();
+        }
+
+        self.rebuild_track_rows();
+        if let Some(position) = selected_track_index.and_then(|index| {
+            self.track_rows()
+                .iter()
+                .position(|row| row.track_index() == Some(index))
+        }) {
+            self.selected_track_row = position;
+        } else {
+            self.clamp_track_selection();
+        }
+
+        self.rebuild_playlist_entries();
+        self.clamp_playlist_selection();
         self.apply_selection_state();
     }
 
@@ -288,6 +470,13 @@ impl App {
             self.track_state.select(None);
         } else {
             self.track_state.select(Some(self.selected_track_row));
+        }
+
+        let playlist_len = self.view.playlist_entries.len();
+        if playlist_len == 0 || !self.playlist_panel_open {
+            self.playlist_state.select(None);
+        } else {
+            self.playlist_state.select(Some(self.selected_playlist_row));
         }
     }
 
@@ -311,6 +500,52 @@ impl App {
             self.selected_track_row = self
                 .nearest_track_row(self.selected_track_row)
                 .unwrap_or(self.selected_track_row);
+        }
+    }
+
+    fn clamp_playlist_selection(&mut self) {
+        let row_len = self.view.playlist_entries.len();
+        self.selected_playlist_row = if row_len == 0 {
+            0
+        } else {
+            self.selected_playlist_row.min(row_len - 1)
+        };
+        if let Some(playlist_id) = self.selected_playlist_entry_playlist_id() {
+            self.active_playlist_id = Some(playlist_id);
+        }
+    }
+
+    fn rebuild_playlist_entries(&mut self) {
+        self.view.playlist_entries.clear();
+        for playlist in &self.playlists {
+            self.view
+                .playlist_entries
+                .push(PlaylistPanelEntry::Playlist {
+                    playlist_id: playlist.id,
+                    name: playlist.name.clone(),
+                });
+            if self.expanded_playlists.contains(&playlist.id) {
+                if let (Some(entry_ids), Some(indices)) = (
+                    self.playlist_track_entry_ids.get(&playlist.id),
+                    self.playlist_track_indices.get(&playlist.id),
+                ) {
+                    self.view.playlist_entries.extend(
+                        entry_ids
+                            .iter()
+                            .copied()
+                            .zip(indices.iter().copied())
+                            .enumerate()
+                            .map(|(position, (playlist_track_id, track_index))| {
+                                PlaylistPanelEntry::Track {
+                                    playlist_id: playlist.id,
+                                    playlist_track_id,
+                                    position: position + 1,
+                                    track_index,
+                                }
+                            }),
+                    );
+                }
+            }
         }
     }
 
@@ -344,6 +579,32 @@ impl App {
         }
     }
 
+    fn selected_playlist_entry_playlist_id(&self) -> Option<i64> {
+        match self.view.playlist_entries.get(self.selected_playlist_row) {
+            Some(PlaylistPanelEntry::Playlist { playlist_id, .. })
+            | Some(PlaylistPanelEntry::Track { playlist_id, .. }) => Some(*playlist_id),
+            None => self.active_playlist_id,
+        }
+    }
+
+    fn move_playlist_selection(&mut self, direction: i32, amount: usize) {
+        if self.view.playlist_entries.is_empty() {
+            self.selected_playlist_row = 0;
+            return;
+        }
+
+        if direction >= 0 {
+            self.selected_playlist_row =
+                (self.selected_playlist_row + amount).min(self.view.playlist_entries.len() - 1);
+        } else {
+            self.selected_playlist_row = self.selected_playlist_row.saturating_sub(amount);
+        }
+        if let Some(playlist_id) = self.selected_playlist_entry_playlist_id() {
+            self.active_playlist_id = Some(playlist_id);
+        }
+        self.apply_selection_state();
+    }
+
     fn move_pane_selection(&mut self, pane: FocusPane, direction: i32, amount: usize) {
         match pane {
             FocusPane::Tree => {
@@ -367,6 +628,7 @@ impl App {
                     }
                 }
             }
+            FocusPane::Playlist => self.move_playlist_selection(direction, amount),
         }
         self.sync_selection();
     }
@@ -374,7 +636,8 @@ impl App {
     fn toggle_focus(&mut self) {
         self.focus = match self.focus {
             FocusPane::Tree => FocusPane::Tracks,
-            FocusPane::Tracks => FocusPane::Tree,
+            FocusPane::Tracks if self.playlist_panel_open => FocusPane::Playlist,
+            FocusPane::Tracks | FocusPane::Playlist => FocusPane::Tree,
         };
     }
 
@@ -382,13 +645,14 @@ impl App {
         let focus = self.focus;
         match self.focus {
             FocusPane::Tree => {
-                if let Some((index, _track)) = self.selected_scope_tracks().first() {
-                    self.play_index(conn, *index)?;
+                if let Some(entry) = self.first_selected_tree_playback_entry() {
+                    self.play_entry(conn, entry)?;
                 } else {
                     self.message = String::from("no tracks in this selection");
                 }
             }
             FocusPane::Tracks => self.play_selected_row(conn)?,
+            FocusPane::Playlist => self.activate_playlist_selection(conn)?,
         }
         self.focus = focus;
         self.sync_selection();
@@ -404,18 +668,68 @@ impl App {
             FocusPane::Tracks => {
                 self.message = String::from("space is tree expand; use x/c/v/b/z for playback");
             }
+            FocusPane::Playlist => {
+                self.toggle_selected_playlist_expansion();
+                self.sync_selection();
+            }
         }
     }
 
+    fn activate_playlist_selection(&mut self, conn: &Connection) -> Result<()> {
+        match self.view.playlist_entries.get(self.selected_playlist_row) {
+            Some(PlaylistPanelEntry::Playlist { .. }) => {
+                self.toggle_selected_playlist_expansion();
+            }
+            Some(PlaylistPanelEntry::Track {
+                playlist_id,
+                playlist_track_id,
+                track_index,
+                ..
+            }) => {
+                self.play_entry(
+                    conn,
+                    PlaybackEntry::playlist_track(*playlist_id, *playlist_track_id, *track_index),
+                )?;
+            }
+            None => self.message = String::from("no playlist selection"),
+        }
+        Ok(())
+    }
+
     fn toggle_artist_expansion(&mut self) {
-        let Some(entry) = self.selected_tree_entry() else {
+        let Some(entry) = self.selected_tree_entry().cloned() else {
             return;
         };
+        if matches!(entry, TreeEntry::Playlists | TreeEntry::Playlist { .. }) {
+            let collapsed = self.playlists_expanded;
+            self.playlists_expanded = !self.playlists_expanded;
+            if collapsed {
+                self.selected_tree = self
+                    .tree_entries()
+                    .iter()
+                    .position(|entry| matches!(entry, TreeEntry::Playlists))
+                    .unwrap_or(self.selected_tree);
+            }
+            self.message = if self.playlists_expanded {
+                String::from("expanded Playlists")
+            } else {
+                String::from("collapsed Playlists")
+            };
+            return;
+        }
         if matches!(
             entry,
             TreeEntry::Compilation | TreeEntry::CompilationAlbum { .. }
         ) {
+            let collapsed = self.compilations_expanded;
             self.compilations_expanded = !self.compilations_expanded;
+            if collapsed {
+                self.selected_tree = self
+                    .tree_entries()
+                    .iter()
+                    .position(|entry| matches!(entry, TreeEntry::Compilation))
+                    .unwrap_or(self.selected_tree);
+            }
             self.message = if self.compilations_expanded {
                 String::from("expanded Compilations")
             } else {
@@ -425,6 +739,11 @@ impl App {
         }
         let artist = entry.artist().to_string();
         if self.expanded_artists.remove(&artist) {
+            self.selected_tree = self
+                .tree_entries()
+                .iter()
+                .position(|entry| matches!(entry, TreeEntry::Artist { artist: entry_artist } if entry_artist == &artist))
+                .unwrap_or(self.selected_tree);
             self.message = format!("collapsed {artist}");
         } else {
             self.expanded_artists.insert(artist.clone());
@@ -433,15 +752,15 @@ impl App {
     }
 
     fn play_selected_row(&mut self, conn: &Connection) -> Result<()> {
-        if let Some(index) = self.selected_playable_track_index() {
-            self.play_index(conn, index)?;
+        if let Some(entry) = self.selected_playback_entry() {
+            self.play_entry(conn, entry)?;
         }
         Ok(())
     }
 
     fn play_next(&mut self, conn: &Connection) -> Result<()> {
-        if let Some(index) = self.next_playback_index(1) {
-            self.play_index(conn, index)?;
+        if let Some(entry) = self.next_playback_entry(1) {
+            self.play_entry(conn, entry)?;
         } else {
             self.message = String::from("end of filtered playback view");
         }
@@ -449,8 +768,8 @@ impl App {
     }
 
     fn play_previous(&mut self, conn: &Connection) -> Result<()> {
-        if let Some(index) = self.next_playback_index(-1) {
-            self.play_index(conn, index)?;
+        if let Some(entry) = self.next_playback_entry(-1) {
+            self.play_entry(conn, entry)?;
         } else {
             self.message = String::from("start of filtered playback view");
         }
@@ -479,19 +798,25 @@ impl App {
         Ok(())
     }
 
+    #[cfg(test)]
     fn play_index(&mut self, conn: &Connection, index: usize) -> Result<()> {
-        if index >= self.tracks.len() {
+        self.play_entry(conn, PlaybackEntry::library(index))
+    }
+
+    fn play_entry(&mut self, conn: &Connection, entry: PlaybackEntry) -> Result<()> {
+        if entry.track_index >= self.tracks.len() {
             return Ok(());
         }
 
         self.finish_current(conn, false)?;
-        let track = self.tracks[index].clone();
+        let track = self.tracks[entry.track_index].clone();
         match self.player.load(Path::new(&track.path)) {
             Ok(()) => {
                 self.suspended_position_ms = None;
                 self.message = format!("playing {}", track.display_title());
                 self.current = Some(PlayingTrack {
-                    index,
+                    index: entry.track_index,
+                    source: entry.source,
                     track,
                     last_position_ms: 0,
                     listened_ms: 0,
@@ -577,10 +902,10 @@ impl App {
         let mut changed = false;
 
         if self.current.is_some() && self.player.is_finished() {
-            let next_index = self.next_auto_advance_index();
+            let next_entry = self.next_auto_advance_entry();
             self.finish_current(conn, true)?;
-            if let Some(index) = next_index {
-                self.play_index(conn, index)?;
+            if let Some(entry) = next_entry {
+                self.play_entry(conn, entry)?;
             } else {
                 self.player.stop()?;
             }
@@ -711,8 +1036,15 @@ impl App {
                 self.toggle_artist_expansion();
                 self.sync_selection();
             }
-            KeyCode::Char('c') | KeyCode::Char('p') => {
+            KeyCode::Char('c') => {
                 self.toggle_pause_current()?;
+            }
+            KeyCode::Char('p') => self.open_playlist_panel(conn)?,
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                self.add_selected_tracks_to_active_playlist(conn)?;
+            }
+            KeyCode::Char('-') => {
+                self.remove_selected_tracks_from_active_playlist(conn)?;
             }
             KeyCode::Char('C') => self.toggle_continuous(),
             KeyCode::Char('x') => self.play_from_controls(conn)?,
@@ -722,7 +1054,13 @@ impl App {
             KeyCode::Char('L') => self.toggle_play_target(),
             KeyCode::Char('R') => self.toggle_repeat(),
             KeyCode::Char('S') => self.toggle_shuffle(),
-            KeyCode::Char('i') => self.toggle_info_panel(),
+            KeyCode::Char('i') => {
+                if self.playlist_panel_open {
+                    self.show_track_info_panel();
+                } else {
+                    self.toggle_info_panel();
+                }
+            }
             KeyCode::Char('I') => self.select_current_track(),
             KeyCode::Char(':') => {
                 self.filter_mode = false;
@@ -806,6 +1144,7 @@ impl App {
             self.reserved_bottom_rows(),
             self.info_area_visible(),
             self.input_bar_visible(),
+            self.playlist_panel_open,
         ) else {
             return false;
         };
@@ -1006,6 +1345,17 @@ impl App {
 
     fn rebuild_tree_entries(&mut self) {
         self.view.tree_entries.clear();
+        if !self.playlists.is_empty() {
+            self.view.tree_entries.push(TreeEntry::Playlists);
+            if self.playlists_expanded {
+                self.view
+                    .tree_entries
+                    .extend(self.playlists.iter().map(|playlist| TreeEntry::Playlist {
+                        playlist_id: playlist.id,
+                        name: playlist.name.clone(),
+                    }));
+            }
+        }
         if self
             .view
             .filtered_indices
@@ -1063,6 +1413,33 @@ impl App {
         let Some(entry) = self.selected_tree_entry().cloned() else {
             return;
         };
+        if matches!(entry, TreeEntry::Playlists) {
+            self.rebuild_playlist_group_track_rows();
+            return;
+        }
+        if let TreeEntry::Playlist { playlist_id, .. } = entry {
+            for (position, playback) in self
+                .playlist_playback_entries(playlist_id)
+                .into_iter()
+                .enumerate()
+            {
+                let Some(PlaybackSource::PlaylistTrack {
+                    playlist_id,
+                    playlist_track_id,
+                }) = playback.source
+                else {
+                    continue;
+                };
+                self.view.track_rows.push(TrackRow::PlaylistTrack {
+                    playlist_id,
+                    playlist_track_id,
+                    position: position + 1,
+                    track_index: playback.track_index,
+                });
+            }
+            return;
+        }
+
         let mut album_durations = HashMap::new();
         let mut album_years = HashMap::new();
         let mut album_discs = HashMap::new();
@@ -1116,6 +1493,39 @@ impl App {
         }
     }
 
+    fn rebuild_playlist_group_track_rows(&mut self) {
+        for playlist in &self.playlists {
+            let entries = self.playlist_playback_entries(playlist.id);
+            if entries.is_empty() {
+                continue;
+            }
+
+            let duration_ms = entries
+                .iter()
+                .filter_map(|entry| self.tracks.get(entry.track_index)?.duration_ms)
+                .sum();
+            self.view.track_rows.push(TrackRow::PlaylistHeader {
+                name: playlist.name.clone(),
+                duration_ms,
+            });
+            for (position, playback) in entries.into_iter().enumerate() {
+                let Some(PlaybackSource::PlaylistTrack {
+                    playlist_id,
+                    playlist_track_id,
+                }) = playback.source
+                else {
+                    continue;
+                };
+                self.view.track_rows.push(TrackRow::PlaylistTrack {
+                    playlist_id,
+                    playlist_track_id,
+                    position: position + 1,
+                    track_index: playback.track_index,
+                });
+            }
+        }
+    }
+
     fn tree_entries(&self) -> &[TreeEntry] {
         &self.view.tree_entries
     }
@@ -1129,9 +1539,24 @@ impl App {
             return false;
         };
 
+        if let Some(PlaybackSource::PlaylistTrack { playlist_id, .. }) = current.source {
+            return match entry {
+                TreeEntry::Playlists => !self.playlists_expanded,
+                TreeEntry::Playlist {
+                    playlist_id: entry_playlist_id,
+                    ..
+                } => self.playlists_expanded && *entry_playlist_id == playlist_id,
+                TreeEntry::Compilation
+                | TreeEntry::CompilationAlbum { .. }
+                | TreeEntry::Artist { .. }
+                | TreeEntry::Album { .. } => false,
+            };
+        }
+
         let current_artist = current.track.tree_artist();
         let current_album = current.track.tree_album();
         match entry {
+            TreeEntry::Playlists | TreeEntry::Playlist { .. } => false,
             TreeEntry::Compilation => current.track.compilation && !self.compilations_expanded,
             TreeEntry::CompilationAlbum { album } => {
                 current.track.compilation && current_album == album && self.compilations_expanded
@@ -1162,6 +1587,29 @@ impl App {
     }
 
     fn track_indices_for_entry(&self, entry: &TreeEntry) -> Vec<usize> {
+        if matches!(entry, TreeEntry::Playlists) {
+            let filtered: HashSet<usize> = self.view.filtered_indices.iter().copied().collect();
+            let mut seen = HashSet::new();
+            return self
+                .playlists
+                .iter()
+                .filter_map(|playlist| self.playlist_track_indices.get(&playlist.id))
+                .flat_map(|indices| indices.iter().copied())
+                .filter(|index| filtered.contains(index) && seen.insert(*index))
+                .collect();
+        }
+        if let TreeEntry::Playlist { playlist_id, .. } = entry {
+            let filtered: HashSet<usize> = self.view.filtered_indices.iter().copied().collect();
+            return self
+                .playlist_track_indices
+                .get(playlist_id)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|index| filtered.contains(index))
+                .collect();
+        }
+
         let mut indices: Vec<usize> = self
             .view
             .filtered_indices
@@ -1180,42 +1628,87 @@ impl App {
         indices
     }
 
+    fn playlist_playback_entries(&self, playlist_id: i64) -> Vec<PlaybackEntry> {
+        let filtered: HashSet<usize> = self.view.filtered_indices.iter().copied().collect();
+        let Some(entry_ids) = self.playlist_track_entry_ids.get(&playlist_id) else {
+            return Vec::new();
+        };
+        let Some(indices) = self.playlist_track_indices.get(&playlist_id) else {
+            return Vec::new();
+        };
+
+        entry_ids
+            .iter()
+            .copied()
+            .zip(indices.iter().copied())
+            .filter(|(_entry_id, track_index)| filtered.contains(track_index))
+            .map(|(playlist_track_id, track_index)| {
+                PlaybackEntry::playlist_track(playlist_id, playlist_track_id, track_index)
+            })
+            .collect()
+    }
+
+    fn track_in_any_playlist(&self, track_index: usize) -> bool {
+        self.playlist_track_indices
+            .values()
+            .any(|indices| indices.contains(&track_index))
+    }
+
+    fn track_in_playlist(&self, track_index: usize, playlist_id: i64) -> bool {
+        self.playlist_track_indices
+            .get(&playlist_id)
+            .is_some_and(|indices| indices.contains(&track_index))
+    }
+
     fn selected_playable_track_index(&self) -> Option<usize> {
+        self.selected_playback_entry()
+            .map(|entry| entry.track_index)
+    }
+
+    fn selected_playback_entry(&self) -> Option<PlaybackEntry> {
         let rows = self.track_rows();
-        if let Some(TrackRow::Track { track_index, .. }) = rows.get(self.selected_track_row) {
-            return Some(*track_index);
+        if let Some(entry) = rows
+            .get(self.selected_track_row)
+            .and_then(track_row_playback_entry)
+        {
+            return Some(entry);
         }
 
         rows.iter()
             .skip(self.selected_track_row)
-            .find_map(|row| match row {
-                TrackRow::Track { track_index, .. } => Some(*track_index),
-                TrackRow::AlbumHeader { .. } | TrackRow::DiscDivider { .. } => None,
-            })
-            .or_else(|| {
-                rows.iter().rev().find_map(|row| match row {
-                    TrackRow::Track { track_index, .. } => Some(*track_index),
-                    TrackRow::AlbumHeader { .. } | TrackRow::DiscDivider { .. } => None,
-                })
-            })
+            .find_map(track_row_playback_entry)
+            .or_else(|| rows.iter().rev().find_map(track_row_playback_entry))
+    }
+
+    fn first_selected_tree_playback_entry(&self) -> Option<PlaybackEntry> {
+        let entry = self.selected_tree_entry()?;
+        if matches!(entry, TreeEntry::Playlists | TreeEntry::Playlist { .. }) {
+            return self
+                .playback_entries_for_tree_entry(entry)
+                .into_iter()
+                .next();
+        }
+        self.selected_scope_tracks()
+            .first()
+            .map(|(index, _track)| PlaybackEntry::library(*index))
     }
 
     fn nearest_track_row(&self, from: usize) -> Option<usize> {
         let rows = self.track_rows();
-        if matches!(rows.get(from), Some(TrackRow::Track { .. })) {
+        if rows.get(from).and_then(TrackRow::track_index).is_some() {
             return Some(from);
         }
 
         rows.iter()
             .enumerate()
             .skip(from)
-            .find_map(|(row, entry)| matches!(entry, TrackRow::Track { .. }).then_some(row))
+            .find_map(|(row, entry)| entry.track_index().is_some().then_some(row))
             .or_else(|| {
                 rows.iter()
                     .enumerate()
                     .take(from)
                     .rev()
-                    .find_map(|(row, entry)| matches!(entry, TrackRow::Track { .. }).then_some(row))
+                    .find_map(|(row, entry)| entry.track_index().is_some().then_some(row))
             })
     }
 
@@ -1230,29 +1723,41 @@ impl App {
             rows.iter()
                 .enumerate()
                 .skip(current + 1)
-                .find_map(|(row, entry)| matches!(entry, TrackRow::Track { .. }).then_some(row))
+                .find_map(|(row, entry)| entry.track_index().is_some().then_some(row))
                 .or_else(|| {
-                    matches!(rows.get(current), Some(TrackRow::Track { .. })).then_some(current)
+                    rows.get(current)
+                        .and_then(TrackRow::track_index)
+                        .is_some()
+                        .then_some(current)
                 })
         } else {
             rows.iter()
                 .enumerate()
                 .take(current)
                 .rev()
-                .find_map(|(row, entry)| matches!(entry, TrackRow::Track { .. }).then_some(row))
+                .find_map(|(row, entry)| entry.track_index().is_some().then_some(row))
                 .or_else(|| {
-                    matches!(rows.get(current), Some(TrackRow::Track { .. })).then_some(current)
+                    rows.get(current)
+                        .and_then(TrackRow::track_index)
+                        .is_some()
+                        .then_some(current)
                 })
         }
     }
 
+    #[cfg(test)]
     fn next_playback_index(&mut self, direction: i32) -> Option<usize> {
-        let sequence = self.playback_sequence_indices();
+        self.next_playback_entry(direction)
+            .map(|entry| entry.track_index)
+    }
+
+    fn next_playback_entry(&mut self, direction: i32) -> Option<PlaybackEntry> {
+        let sequence = self.playback_sequence_entries();
         if sequence.is_empty() {
             return None;
         }
 
-        let anchor = self.playback_anchor_index();
+        let anchor = self.playback_anchor_entry();
         if self.shuffle {
             return self.next_shuffle_playback_index(&sequence, anchor, direction);
         }
@@ -1260,20 +1765,29 @@ impl App {
         self.next_ordered_playback_index(&sequence, anchor, direction)
     }
 
-    fn next_auto_advance_index(&mut self) -> Option<usize> {
+    fn next_auto_advance_entry(&mut self) -> Option<PlaybackEntry> {
         self.continuous
-            .then(|| self.next_playback_index(1))
+            .then(|| self.next_playback_entry(1))
             .flatten()
+    }
+
+    #[cfg(test)]
+    fn next_auto_advance_index(&mut self) -> Option<usize> {
+        self.next_auto_advance_entry()
+            .map(|entry| entry.track_index)
     }
 
     fn next_ordered_playback_index(
         &self,
-        sequence: &[usize],
-        anchor: Option<usize>,
+        sequence: &[PlaybackEntry],
+        anchor: Option<PlaybackEntry>,
         direction: i32,
-    ) -> Option<usize> {
+    ) -> Option<PlaybackEntry> {
         if let Some(anchor) = anchor {
-            if let Some(position) = sequence.iter().position(|index| *index == anchor) {
+            if let Some(position) = sequence
+                .iter()
+                .position(|entry| playback_entries_match(*entry, anchor))
+            {
                 return if direction >= 0 {
                     sequence
                         .get(position + 1)
@@ -1288,8 +1802,8 @@ impl App {
             }
 
             if let Some(selected) = self
-                .selected_playable_track_index()
-                .filter(|selected| sequence.contains(selected))
+                .selected_playback_entry()
+                .filter(|selected| sequence.iter().any(|entry| *entry == *selected))
             {
                 return Some(selected);
             }
@@ -1304,17 +1818,21 @@ impl App {
 
     fn next_shuffle_playback_index(
         &mut self,
-        sequence: &[usize],
-        anchor: Option<usize>,
+        sequence: &[PlaybackEntry],
+        anchor: Option<PlaybackEntry>,
         direction: i32,
-    ) -> Option<usize> {
+    ) -> Option<PlaybackEntry> {
         self.ensure_shuffle_order(sequence);
         if self.shuffle_order.is_empty() {
             return None;
         }
 
         if let Some(anchor) = anchor {
-            if let Some(position) = self.shuffle_order.iter().position(|index| *index == anchor) {
+            if let Some(position) = self
+                .shuffle_order
+                .iter()
+                .position(|entry| playback_entries_match(*entry, anchor))
+            {
                 return if direction >= 0 {
                     self.shuffle_order.get(position + 1).copied().or_else(|| {
                         if self.repeat {
@@ -1339,8 +1857,8 @@ impl App {
             }
 
             if let Some(selected) = self
-                .selected_playable_track_index()
-                .filter(|selected| sequence.contains(selected))
+                .selected_playback_entry()
+                .filter(|selected| sequence.iter().any(|entry| *entry == *selected))
             {
                 return Some(selected);
             }
@@ -1353,16 +1871,33 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     fn playback_sequence_indices(&self) -> Vec<usize> {
-        let Some(anchor) = self.playback_anchor_index() else {
-            return self.view.filtered_indices.clone();
+        self.playback_sequence_entries()
+            .into_iter()
+            .map(|entry| entry.track_index)
+            .collect()
+    }
+
+    fn playback_sequence_entries(&self) -> Vec<PlaybackEntry> {
+        let Some(anchor) = self.playback_anchor_entry() else {
+            return self.library_playback_entries();
         };
-        let Some(anchor_track) = self.tracks.get(anchor) else {
-            return self.view.filtered_indices.clone();
+        let Some(anchor_track) = self.tracks.get(anchor.track_index) else {
+            return self.library_playback_entries();
         };
 
+        if let Some(entry) = self.selected_tree_entry() {
+            if matches!(entry, TreeEntry::Playlists | TreeEntry::Playlist { .. }) {
+                let scope = self.playback_entries_for_tree_entry(entry);
+                if playback_sequence_contains_anchor(&scope, anchor) {
+                    return scope;
+                }
+            }
+        }
+
         match self.play_target {
-            PlayTarget::Library => self.view.filtered_indices.clone(),
+            PlayTarget::Library => self.library_playback_entries(),
             PlayTarget::Artist => self
                 .view
                 .filtered_indices
@@ -1374,6 +1909,7 @@ impl App {
                         .map(|track| track.tree_artist() == anchor_track.tree_artist())
                         .unwrap_or(false)
                 })
+                .map(PlaybackEntry::library)
                 .collect(),
             PlayTarget::Album => self
                 .view
@@ -1389,24 +1925,50 @@ impl App {
                         })
                         .unwrap_or(false)
                 })
+                .map(PlaybackEntry::library)
                 .collect(),
         }
     }
 
-    fn playback_anchor_index(&self) -> Option<usize> {
+    fn playback_anchor_entry(&self) -> Option<PlaybackEntry> {
         self.current
             .as_ref()
-            .map(|current| current.index)
-            .or_else(|| self.selected_playable_track_index())
+            .map(PlayingTrack::playback_entry)
+            .or_else(|| self.selected_playback_entry())
     }
 
-    fn ensure_shuffle_order(&mut self, sequence: &[usize]) {
+    fn library_playback_entries(&self) -> Vec<PlaybackEntry> {
+        self.view
+            .filtered_indices
+            .iter()
+            .copied()
+            .map(PlaybackEntry::library)
+            .collect()
+    }
+
+    fn playback_entries_for_tree_entry(&self, entry: &TreeEntry) -> Vec<PlaybackEntry> {
+        match entry {
+            TreeEntry::Playlists => self
+                .playlists
+                .iter()
+                .flat_map(|playlist| self.playlist_playback_entries(playlist.id))
+                .collect(),
+            TreeEntry::Playlist { playlist_id, .. } => self.playlist_playback_entries(*playlist_id),
+            _ => self
+                .track_indices_for_entry(entry)
+                .into_iter()
+                .map(PlaybackEntry::library)
+                .collect(),
+        }
+    }
+
+    fn ensure_shuffle_order(&mut self, sequence: &[PlaybackEntry]) {
         if self.shuffle_scope != sequence {
             self.rebuild_shuffle_order(sequence);
         }
     }
 
-    fn rebuild_shuffle_order(&mut self, sequence: &[usize]) {
+    fn rebuild_shuffle_order(&mut self, sequence: &[PlaybackEntry]) {
         self.shuffle_scope = sequence.to_vec();
         self.shuffle_order = sequence.to_vec();
         for index in (1..self.shuffle_order.len()).rev() {
@@ -1445,6 +2007,10 @@ impl App {
             let current_entry_matches = self
                 .selected_tree_entry()
                 .map(|entry| match entry {
+                    TreeEntry::Playlists => self.track_in_any_playlist(index),
+                    TreeEntry::Playlist { playlist_id, .. } => {
+                        self.track_in_playlist(index, *playlist_id)
+                    }
                     TreeEntry::Compilation => is_compilation,
                     TreeEntry::CompilationAlbum { album: entry_album } => {
                         is_compilation && entry_album == &album
@@ -1506,15 +2072,11 @@ impl App {
             }
         }
 
-        if let Some(position) = self.track_rows().iter().position(|row| {
-            matches!(
-                row,
-                TrackRow::Track {
-                    track_index,
-                    ..
-                } if *track_index == index
-            )
-        }) {
+        if let Some(position) = self
+            .track_rows()
+            .iter()
+            .position(|row| row.track_index() == Some(index))
+        {
             self.selected_track_row = position;
         }
         self.apply_selection_state();
@@ -1562,15 +2124,9 @@ impl App {
 
         self.rebuild_track_rows();
         if let Some(position) = selected_track_index.and_then(|index| {
-            self.track_rows().iter().position(|row| {
-                matches!(
-                    row,
-                    TrackRow::Track {
-                        track_index,
-                        ..
-                    } if *track_index == index
-                )
-            })
+            self.track_rows()
+                .iter()
+                .position(|row| row.track_index() == Some(index))
         }) {
             self.selected_track_row = position;
         } else {
@@ -1709,6 +2265,11 @@ impl App {
                 self.command_update(conn, rest)
             }
             "library" | "roots" => self.command_library(conn),
+            "playlist" | "pl" => self.command_playlist(conn, rest),
+            "playlist-clear" | "pl-clear" => self.command_playlist_clear(conn, rest),
+            "playlist-delete" | "pl-delete" | "playlist-rm" | "pl-rm" => {
+                self.command_playlist_delete(conn, rest)
+            }
             "filter" | "f" => {
                 self.clear_command_output();
                 self.filter = rest.to_string();
@@ -1833,6 +2394,84 @@ impl App {
         }
     }
 
+    fn command_playlist(&mut self, conn: &Connection, name: &str) -> Result<String> {
+        self.clear_command_output();
+        let playlist = if name.trim().is_empty() {
+            if let Some(playlist_id) = self.active_playlist_id {
+                self.playlists
+                    .iter()
+                    .find(|playlist| playlist.id == playlist_id)
+                    .cloned()
+                    .or_else(|| self.playlists.first().cloned())
+            } else {
+                self.playlists.first().cloned()
+            }
+            .map(Ok)
+            .unwrap_or_else(|| db::create_playlist(conn, "Default"))?
+        } else {
+            db::create_playlist(conn, name)?
+        };
+
+        self.playlists = db::playlists(conn)?;
+        self.refresh_playlist_tracks(conn)?;
+        self.active_playlist_id = Some(playlist.id);
+        self.expanded_playlists.insert(playlist.id);
+        self.playlist_panel_open = true;
+        self.sync_selection();
+        self.select_playlist_row_for_id(playlist.id);
+        Ok(format!("playlist: {}", playlist.name))
+    }
+
+    fn command_playlist_clear(&mut self, conn: &Connection, name: &str) -> Result<String> {
+        let Some(playlist) = self.command_playlist_target(conn, name)? else {
+            return Ok(String::from("no playlist selected"));
+        };
+        let removed = db::clear_playlist(conn, playlist.id)?;
+        self.playlists = db::playlists(conn)?;
+        self.refresh_playlist_tracks(conn)?;
+        self.active_playlist_id = Some(playlist.id);
+        self.expanded_playlists.insert(playlist.id);
+        self.playlist_panel_open = true;
+        self.sync_selection();
+        self.select_playlist_row_for_id(playlist.id);
+        Ok(format!("cleared {removed} tracks from {}", playlist.name))
+    }
+
+    fn command_playlist_delete(&mut self, conn: &Connection, name: &str) -> Result<String> {
+        let Some(playlist) = self.command_playlist_target(conn, name)? else {
+            return Ok(String::from("no playlist selected"));
+        };
+        if db::delete_playlist(conn, &playlist.name)? {
+            self.playlists = db::playlists(conn)?;
+            self.refresh_playlist_tracks(conn)?;
+            self.expanded_playlists.remove(&playlist.id);
+            self.active_playlist_id = self.playlists.first().map(|playlist| playlist.id);
+            self.sync_selection();
+            Ok(format!("deleted playlist {}", playlist.name))
+        } else {
+            Ok(format!("no playlist: {}", playlist.name))
+        }
+    }
+
+    fn command_playlist_target(
+        &self,
+        conn: &Connection,
+        name: &str,
+    ) -> Result<Option<db::Playlist>> {
+        if !name.trim().is_empty() {
+            return db::playlist_by_name(conn, name);
+        }
+        Ok(self
+            .active_playlist_id
+            .and_then(|playlist_id| {
+                self.playlists
+                    .iter()
+                    .find(|playlist| playlist.id == playlist_id)
+                    .cloned()
+            })
+            .or_else(|| self.playlists.first().cloned()))
+    }
+
     fn toggle_selected_library_root(&mut self, conn: &Connection) -> Result<()> {
         if self.command_output_kind != CommandOutputKind::LibraryRoots {
             return Ok(());
@@ -1859,6 +2498,223 @@ impl App {
         Ok(())
     }
 
+    fn open_playlist_panel(&mut self, conn: &Connection) -> Result<()> {
+        if self.playlists.is_empty() {
+            let playlist = db::create_playlist(conn, "Default")?;
+            self.active_playlist_id = Some(playlist.id);
+            self.expanded_playlists.insert(playlist.id);
+            self.playlists = db::playlists(conn)?;
+            self.refresh_playlist_tracks(conn)?;
+        }
+
+        self.playlist_panel_open = true;
+        if self.active_playlist_id.is_none() {
+            self.active_playlist_id = self.playlists.first().map(|playlist| playlist.id);
+        }
+        if let Some(playlist_id) = self.active_playlist_id {
+            self.expanded_playlists.insert(playlist_id);
+            self.sync_selection_preserving_browser_selection();
+            self.select_playlist_row_for_id(playlist_id);
+        }
+        self.focus = FocusPane::Playlist;
+        self.apply_selection_state();
+        self.message = String::from("playlist panel");
+        Ok(())
+    }
+
+    fn show_track_info_panel(&mut self) {
+        self.playlist_panel_open = false;
+        self.info_panel_visible = true;
+        if self.focus == FocusPane::Playlist {
+            self.focus = FocusPane::Tree;
+        }
+        self.apply_selection_state();
+        self.message = String::from("track info panel");
+    }
+
+    fn select_playlist_row_for_id(&mut self, playlist_id: i64) {
+        if let Some(position) = self.view.playlist_entries.iter().position(|entry| {
+            matches!(
+                entry,
+                PlaylistPanelEntry::Playlist {
+                    playlist_id: entry_id,
+                    ..
+                } if *entry_id == playlist_id
+            )
+        }) {
+            self.selected_playlist_row = position;
+        }
+        self.active_playlist_id = Some(playlist_id);
+    }
+
+    fn toggle_selected_playlist_expansion(&mut self) {
+        let Some(playlist_id) = self.selected_playlist_entry_playlist_id() else {
+            self.message = String::from("no playlist selected");
+            return;
+        };
+        self.active_playlist_id = Some(playlist_id);
+        if self.expanded_playlists.remove(&playlist_id) {
+            self.select_playlist_row_for_id(playlist_id);
+            self.message = format!("collapsed {}", self.playlist_name(playlist_id));
+        } else {
+            self.expanded_playlists.insert(playlist_id);
+            self.message = format!("expanded {}", self.playlist_name(playlist_id));
+        }
+    }
+
+    fn add_selected_tracks_to_active_playlist(&mut self, conn: &Connection) -> Result<()> {
+        if !self.playlist_panel_open {
+            self.message = String::from("open playlist panel with p before editing playlists");
+            self.show_transient_status(self.message.clone());
+            return Ok(());
+        }
+        let playlist_id = self.ensure_active_playlist(conn)?;
+        let media_item_ids = if self.focus == FocusPane::Playlist {
+            self.selected_playlist_track_media_item_id()
+                .map(|id| vec![id])
+                .unwrap_or_else(|| self.selected_source_media_item_ids())
+        } else {
+            self.selected_source_media_item_ids()
+        };
+        if media_item_ids.is_empty() {
+            self.message = String::from("no selected tracks to add");
+            self.show_transient_status(self.message.clone());
+            return Ok(());
+        }
+
+        let added = db::add_tracks_to_playlist(conn, playlist_id, &media_item_ids)?;
+        self.playlists = db::playlists(conn)?;
+        self.refresh_playlist_tracks(conn)?;
+        self.expanded_playlists.insert(playlist_id);
+        self.active_playlist_id = Some(playlist_id);
+        self.sync_selection_preserving_browser_selection();
+        self.select_playlist_row_for_id(playlist_id);
+        self.message = format!(
+            "added {added} tracks to {}",
+            self.playlist_name(playlist_id)
+        );
+        self.show_transient_status(self.message.clone());
+        Ok(())
+    }
+
+    fn remove_selected_tracks_from_active_playlist(&mut self, conn: &Connection) -> Result<()> {
+        if !self.playlist_panel_open {
+            self.message = String::from("open playlist panel with p before editing playlists");
+            self.show_transient_status(self.message.clone());
+            return Ok(());
+        }
+        let Some(playlist_id) = self.active_playlist_id else {
+            self.message = String::from("no active playlist");
+            self.show_transient_status(self.message.clone());
+            return Ok(());
+        };
+
+        let mut target_playlist_id = playlist_id;
+        let removed = match self.focus {
+            FocusPane::Playlist => {
+                if let Some((entry_playlist_id, playlist_track_id, _media_item_id)) =
+                    self.selected_playlist_track()
+                {
+                    target_playlist_id = entry_playlist_id;
+                    db::remove_playlist_track_entries(
+                        conn,
+                        entry_playlist_id,
+                        &[playlist_track_id],
+                    )?
+                } else {
+                    0
+                }
+            }
+            FocusPane::Tracks => {
+                let media_item_ids = self.selected_source_media_item_ids();
+                db::remove_latest_tracks_from_playlist(conn, playlist_id, &media_item_ids)?
+            }
+            FocusPane::Tree => {
+                let media_item_ids = self.selected_source_media_item_ids();
+                db::remove_tracks_from_playlist(conn, playlist_id, &media_item_ids)?
+            }
+        };
+        if removed == 0 {
+            self.message = String::from("no selected tracks to remove");
+            self.show_transient_status(self.message.clone());
+            return Ok(());
+        }
+
+        self.playlists = db::playlists(conn)?;
+        self.refresh_playlist_tracks(conn)?;
+        self.active_playlist_id = Some(target_playlist_id);
+        self.sync_selection_preserving_browser_selection();
+        self.message = format!(
+            "removed {removed} tracks from {}",
+            self.playlist_name(target_playlist_id)
+        );
+        self.show_transient_status(self.message.clone());
+        Ok(())
+    }
+
+    fn ensure_active_playlist(&mut self, conn: &Connection) -> Result<i64> {
+        if let Some(playlist_id) = self.active_playlist_id {
+            return Ok(playlist_id);
+        }
+        let playlist = db::create_playlist(conn, "Default")?;
+        self.playlists = db::playlists(conn)?;
+        self.refresh_playlist_tracks(conn)?;
+        self.active_playlist_id = Some(playlist.id);
+        Ok(playlist.id)
+    }
+
+    fn selected_source_media_item_ids(&self) -> Vec<i64> {
+        let indices: Vec<usize> = match self.focus {
+            FocusPane::Tree => self
+                .selected_scope_tracks()
+                .into_iter()
+                .map(|(index, _track)| index)
+                .collect(),
+            FocusPane::Tracks => self.selected_playable_track_index().into_iter().collect(),
+            FocusPane::Playlist => self
+                .selected_playlist_track()
+                .and_then(|(_playlist_id, _playlist_track_id, media_item_id)| {
+                    self.tracks
+                        .iter()
+                        .position(|track| track.media_item_id == media_item_id)
+                })
+                .into_iter()
+                .collect(),
+        };
+        indices
+            .into_iter()
+            .filter_map(|index| self.tracks.get(index).map(|track| track.media_item_id))
+            .collect()
+    }
+
+    fn selected_playlist_track_media_item_id(&self) -> Option<i64> {
+        self.selected_playlist_track()
+            .map(|(_playlist_id, _playlist_track_id, media_item_id)| media_item_id)
+    }
+
+    fn selected_playlist_track(&self) -> Option<(i64, i64, i64)> {
+        let PlaylistPanelEntry::Track {
+            playlist_id,
+            playlist_track_id,
+            track_index,
+            ..
+        } = self.view.playlist_entries.get(self.selected_playlist_row)?
+        else {
+            return None;
+        };
+        self.tracks
+            .get(*track_index)
+            .map(|track| (*playlist_id, *playlist_track_id, track.media_item_id))
+    }
+
+    fn playlist_name(&self, playlist_id: i64) -> String {
+        self.playlists
+            .iter()
+            .find(|playlist| playlist.id == playlist_id)
+            .map(|playlist| playlist.name.clone())
+            .unwrap_or_else(|| "playlist".to_string())
+    }
+
     fn filter_bar_visible(&self) -> bool {
         self.filter_mode || !self.filter.is_empty()
     }
@@ -1876,6 +2732,7 @@ impl App {
             || self.command_mode
             || self.command_output_visible()
             || self.filter_mode
+            || self.playlist_panel_open
     }
 
     fn command_output_height(&self) -> u16 {
@@ -2378,6 +3235,7 @@ fn optional_text_matches(value: Option<&str>, needle: &str) -> bool {
 
 fn tree_entry_matches_track(entry: &TreeEntry, track: &LibraryTrack) -> bool {
     match entry {
+        TreeEntry::Playlists | TreeEntry::Playlist { .. } => false,
         TreeEntry::Compilation => track.compilation,
         TreeEntry::CompilationAlbum { album } => track.compilation && track.tree_album() == album,
         TreeEntry::Artist { artist } => track.tree_artist() == artist,
@@ -2385,6 +3243,39 @@ fn tree_entry_matches_track(entry: &TreeEntry, track: &LibraryTrack) -> bool {
             track.tree_artist() == artist && track.tree_album() == album
         }
     }
+}
+
+fn track_row_playback_entry(row: &TrackRow) -> Option<PlaybackEntry> {
+    match row {
+        TrackRow::Track { track_index, .. } => Some(PlaybackEntry::library(*track_index)),
+        TrackRow::PlaylistTrack {
+            playlist_id,
+            playlist_track_id,
+            track_index,
+            ..
+        } => Some(PlaybackEntry::playlist_track(
+            *playlist_id,
+            *playlist_track_id,
+            *track_index,
+        )),
+        TrackRow::AlbumHeader { .. }
+        | TrackRow::DiscDivider { .. }
+        | TrackRow::PlaylistHeader { .. } => None,
+    }
+}
+
+fn playback_entries_match(entry: PlaybackEntry, anchor: PlaybackEntry) -> bool {
+    if anchor.source.is_some() {
+        entry == anchor
+    } else {
+        entry.track_index == anchor.track_index
+    }
+}
+
+fn playback_sequence_contains_anchor(sequence: &[PlaybackEntry], anchor: PlaybackEntry) -> bool {
+    sequence
+        .iter()
+        .any(|entry| playback_entries_match(*entry, anchor))
 }
 
 fn track_album_key(track: &LibraryTrack) -> String {
@@ -2845,6 +3736,7 @@ fn mouse_pane(
     reserved_bottom_rows: u16,
     info_visible: bool,
     input_visible: bool,
+    playlist_info_visible: bool,
 ) -> Option<FocusPane> {
     let main_height = terminal_height.saturating_sub(reserved_bottom_rows);
     if terminal_width == 0 || main_height == 0 || row >= main_height {
@@ -2860,6 +3752,9 @@ fn mouse_pane(
         .saturating_sub(info_height)
         .saturating_sub(u16::from(input_visible));
     if browser_height == 0 || row >= browser_height {
+        if playlist_info_visible && info_height > 0 && row < browser_height + info_height {
+            return Some(FocusPane::Playlist);
+        }
         return None;
     }
 
@@ -2993,11 +3888,17 @@ fn render_tracks_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     frame.render_stateful_widget(tracks, area, &mut app.track_state);
 }
 
-fn render_info_pane(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_info_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let command_info = app.command_mode || app.command_output_visible();
     let filter_info = !command_info && app.filter_mode;
+    let playlist_info = !command_info && !filter_info && app.playlist_panel_open;
     let info_inner_width = usize::from(area.width.saturating_sub(2));
     let info_inner_height = area.height.saturating_sub(2);
+    if playlist_info {
+        render_playlist_info_pane(frame, app, area, info_inner_width);
+        return;
+    }
+
     let info_lines = if command_info {
         command_info_lines(app, info_inner_width, info_inner_height)
     } else if filter_info {
@@ -3028,6 +3929,25 @@ fn render_info_pane(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(info, area);
 }
 
+fn render_playlist_info_pane(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    info_inner_width: usize,
+) {
+    let playlist_active = pane_active(app, FocusPane::Playlist);
+    let playlist = List::new(playlist_items(app, info_inner_width))
+        .block(
+            Block::default()
+                .title(command_info_title(app))
+                .borders(Borders::ALL)
+                .border_style(pane_border_style(playlist_active)),
+        )
+        .scroll_padding(LIST_SCROLL_PADDING)
+        .highlight_style(pane_highlight_style(playlist_active));
+    frame.render_stateful_widget(playlist, area, &mut app.playlist_state);
+}
+
 fn render_input_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let input = Paragraph::new(input_line(app, usize::from(area.width)))
         .style(input_bar_style(app))
@@ -3040,6 +3960,8 @@ fn command_info_title(app: &App) -> &'static str {
         "Library"
     } else if app.filter_mode && !app.command_output_visible() {
         "Filter"
+    } else if app.playlist_panel_open && !app.command_mode && !app.command_output_visible() {
+        "Playlists"
     } else if app.command_mode || app.command_output_visible() {
         "Command"
     } else {
@@ -3076,7 +3998,11 @@ fn pane_highlight_style(active: bool) -> Style {
 }
 
 fn pane_active(app: &App, pane: FocusPane) -> bool {
-    !app.command_mode && !app.filter_mode && !app.command_focus && app.focus == pane
+    !app.command_mode
+        && !app.filter_mode
+        && !app.command_focus
+        && app.focus == pane
+        && (pane != FocusPane::Playlist || app.playlist_panel_open)
 }
 
 fn pane_border_style(active: bool) -> Style {
@@ -3141,6 +4067,32 @@ fn tree_items(app: &App) -> Vec<ListItem<'static>> {
 
 fn tree_item_line(app: &App, entry: &TreeEntry) -> Line<'static> {
     match entry {
+        TreeEntry::Playlists => {
+            let marker = if app.playlists_expanded { "[-]" } else { "[+]" };
+            let current_prefix = if app.tree_entry_is_current(entry) {
+                "> "
+            } else {
+                ""
+            };
+            Line::from(vec![
+                Span::styled(marker, Style::default().fg(Color::DarkGray)),
+                Span::raw(" "),
+                Span::styled(current_prefix, Style::default().fg(Color::LightGreen)),
+                Span::styled("Playlists", Style::default().add_modifier(Modifier::BOLD)),
+            ])
+        }
+        TreeEntry::Playlist { name, .. } => Line::from(vec![
+            Span::raw("    "),
+            Span::styled(
+                if app.tree_entry_is_current(entry) {
+                    "> "
+                } else {
+                    ""
+                },
+                Style::default().fg(Color::LightGreen),
+            ),
+            Span::styled(name.clone(), Style::default().fg(Color::Cyan)),
+        ]),
         TreeEntry::Compilation => {
             let marker = if app.compilations_expanded {
                 "[-]"
@@ -3227,6 +4179,22 @@ fn track_items(app: &App, width: usize) -> Vec<ListItem<'static>> {
                 track_index,
                 show_disc_number,
             } => ListItem::new(track_line(app, *track_index, *show_disc_number, width)),
+            TrackRow::PlaylistHeader { name, duration_ms } => {
+                ListItem::new(playlist_header_line(name, *duration_ms, width))
+            }
+            TrackRow::PlaylistTrack {
+                playlist_id,
+                playlist_track_id,
+                position,
+                track_index,
+            } => ListItem::new(playlist_track_line(
+                app,
+                *track_index,
+                *playlist_id,
+                *playlist_track_id,
+                *position,
+                width,
+            )),
         })
         .collect()
 }
@@ -3255,6 +4223,10 @@ fn album_header_line(
     ])
 }
 
+fn playlist_header_line(name: &str, duration_ms: i64, width: usize) -> Line<'static> {
+    album_header_line(name, None, duration_ms, width)
+}
+
 fn disc_divider_line(disc_number: Option<i64>, width: usize) -> Line<'static> {
     let label = disc_number
         .map(|disc| format!(" disc {disc} "))
@@ -3278,7 +4250,7 @@ fn track_line(
     let is_current = app
         .current
         .as_ref()
-        .map(|current| current.index == track_index)
+        .map(|current| current.source.is_none() && current.index == track_index)
         .unwrap_or(false);
     let marker = if is_current { ">" } else { " " };
     let number = match (show_disc_number, track.disc_number, track.track_number) {
@@ -3312,6 +4284,69 @@ fn track_line(
         vec![Span::styled(duration, Style::default().fg(Color::DarkGray))],
         width,
     )
+}
+
+fn playlist_track_line(
+    app: &App,
+    track_index: usize,
+    playlist_id: i64,
+    playlist_track_id: i64,
+    position: usize,
+    width: usize,
+) -> Line<'static> {
+    let track = &app.tracks[track_index];
+    let is_current = playlist_track_is_current(app, track_index, playlist_id, playlist_track_id);
+    let marker = if is_current { ">" } else { " " };
+    let number = format!("{position:02}.");
+    let title_style = if is_current {
+        Style::default().fg(Color::LightYellow)
+    } else {
+        Style::default()
+    };
+    let duration = db::format_duration(track.duration_ms);
+    let separator = " - ";
+    let fixed_left_width = display_width(marker)
+        + 1
+        + display_width(&number)
+        + 1
+        + display_width(track.display_artist())
+        + display_width(separator);
+    let text_width = width.saturating_sub(fixed_left_width + display_width(&duration) + 1);
+
+    right_aligned_line(
+        vec![
+            Span::styled(marker, Style::default().fg(Color::LightGreen)),
+            Span::raw(" "),
+            Span::styled(number, Style::default().fg(Color::DarkGray)),
+            Span::raw(" "),
+            Span::styled(track.display_artist().to_string(), title_style),
+            Span::raw(separator),
+            Span::styled(
+                truncate_to_width(track.display_title(), text_width),
+                title_style,
+            ),
+        ],
+        vec![Span::styled(duration, Style::default().fg(Color::DarkGray))],
+        width,
+    )
+}
+
+fn playlist_track_is_current(
+    app: &App,
+    _track_index: usize,
+    playlist_id: i64,
+    playlist_track_id: i64,
+) -> bool {
+    let Some(current) = &app.current else {
+        return false;
+    };
+    match current.source {
+        Some(PlaybackSource::PlaylistTrack {
+            playlist_id: current_playlist_id,
+            playlist_track_id: current_playlist_track_id,
+        }) => current_playlist_id == playlist_id && current_playlist_track_id == playlist_track_id,
+        None => false,
+    }
 }
 
 fn right_aligned_line(
@@ -3373,6 +4408,8 @@ fn fit_to_width(text: &str, width: usize) -> String {
 
 fn selected_scope_title(app: &App) -> String {
     match app.selected_tree_entry() {
+        Some(TreeEntry::Playlists) => "Playlists".to_string(),
+        Some(TreeEntry::Playlist { name, .. }) => format!("Playlist - {name}"),
         Some(TreeEntry::Compilation) => "Compilations".to_string(),
         Some(TreeEntry::CompilationAlbum { album, .. }) => {
             format!("Compilations - {album}")
@@ -3456,6 +4493,66 @@ fn command_info_lines(app: &App, width: usize, height: u16) -> Vec<Line<'static>
         command_output_lines(app, width, height.min(app.command_output_height()), style)
     } else {
         command_help_lines(width, style)
+    }
+}
+
+fn playlist_items(app: &App, width: usize) -> Vec<ListItem<'static>> {
+    if app.view.playlist_entries.is_empty() {
+        return vec![
+            ListItem::new(Line::from(Span::styled(
+                truncate_to_width(" playlists", width),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            ListItem::new(Line::from(Span::styled(
+                truncate_to_width(" :playlist NAME creates one", width),
+                Style::default().fg(Color::DarkGray),
+            ))),
+        ];
+    }
+
+    app.view
+        .playlist_entries
+        .iter()
+        .map(|entry| ListItem::new(truncate_to_width(&playlist_entry_text(app, entry), width)))
+        .collect()
+}
+
+fn playlist_entry_text(app: &App, entry: &PlaylistPanelEntry) -> String {
+    match entry {
+        PlaylistPanelEntry::Playlist { playlist_id, name } => {
+            let marker = if app.expanded_playlists.contains(playlist_id) {
+                "[-]"
+            } else {
+                "[+]"
+            };
+            let active = if app.active_playlist_id == Some(*playlist_id) {
+                "> "
+            } else {
+                "  "
+            };
+            let count = app
+                .playlist_track_ids
+                .get(playlist_id)
+                .map(Vec::len)
+                .unwrap_or(0);
+            format!(" {marker} {active}{name} ({count})")
+        }
+        PlaylistPanelEntry::Track {
+            position,
+            track_index,
+            ..
+        } => {
+            let Some(track) = app.tracks.get(*track_index) else {
+                return format!("      {position:02}. <missing track>");
+            };
+            format!(
+                "      {position:02}. {} - {}",
+                track.display_artist(),
+                track.display_title()
+            )
+        }
     }
 }
 
@@ -3910,6 +5007,7 @@ mod tests {
         app.sync_selection();
         app.current = Some(PlayingTrack {
             index: 0,
+            source: None,
             track: app.tracks[0].clone(),
             last_position_ms: 0,
             listened_ms: 0,
@@ -3927,6 +5025,7 @@ mod tests {
         ]);
         app.current = Some(PlayingTrack {
             index: 0,
+            source: None,
             track: app.tracks[0].clone(),
             last_position_ms: 0,
             listened_ms: 0,
@@ -3955,6 +5054,7 @@ mod tests {
         ]);
         app.current = Some(PlayingTrack {
             index: 0,
+            source: None,
             track: app.tracks[0].clone(),
             last_position_ms: 0,
             listened_ms: 0,
@@ -3975,6 +5075,7 @@ mod tests {
         ]);
         app.current = Some(PlayingTrack {
             index: 1,
+            source: None,
             track: app.tracks[1].clone(),
             last_position_ms: 0,
             listened_ms: 0,
@@ -3999,9 +5100,21 @@ mod tests {
         let next = app.next_playback_index(1);
 
         assert!(next.is_some());
-        assert_eq!(app.shuffle_scope, vec![0, 1, 2]);
+        assert_eq!(
+            app.shuffle_scope
+                .iter()
+                .map(|entry| entry.track_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
         assert_eq!(app.shuffle_order.len(), 3);
-        assert_ne!(app.shuffle_order, vec![0, 1, 2]);
+        assert_ne!(
+            app.shuffle_order
+                .iter()
+                .map(|entry| entry.track_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
     }
 
     #[test]
@@ -4009,6 +5122,7 @@ mod tests {
         let mut app = test_app(vec![test_track(1, "first track")]);
         app.current = Some(PlayingTrack {
             index: 0,
+            source: None,
             track: app.tracks[0].clone(),
             last_position_ms: 50_000,
             listened_ms: 0,
@@ -4030,6 +5144,7 @@ mod tests {
         let mut app = test_app(vec![test_track(1, "first track")]);
         app.current = Some(PlayingTrack {
             index: 0,
+            source: None,
             track: app.tracks[0].clone(),
             last_position_ms: 50_000,
             listened_ms: 0,
@@ -4066,6 +5181,7 @@ mod tests {
         let mut app = test_app(vec![test_track(1, "first track")]);
         app.current = Some(PlayingTrack {
             index: 0,
+            source: None,
             track: app.tracks[0].clone(),
             last_position_ms: 50_000,
             listened_ms: 0,
@@ -4197,6 +5313,30 @@ mod tests {
     }
 
     #[test]
+    fn command_mode_executes_playlist_commands() {
+        let data_dir = tempdir().unwrap();
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        let mut app = test_app(Vec::new());
+
+        app.command = String::from("playlist Road");
+        app.execute_command(&conn);
+
+        assert!(app.playlist_panel_open);
+        assert_eq!(app.playlists.len(), 1);
+        assert_eq!(app.playlists[0].name, "Road");
+        assert_eq!(app.active_playlist_id, Some(app.playlists[0].id));
+
+        app.command = String::from("playlist-clear Road");
+        app.execute_command(&conn);
+        assert!(app.message.starts_with("cleared 0 tracks from Road"));
+
+        app.command = String::from("playlist-delete Road");
+        app.execute_command(&conn);
+        assert!(app.message.starts_with("deleted playlist Road"));
+        assert!(app.playlists.is_empty());
+    }
+
+    #[test]
     fn library_command_focuses_root_list_and_toggles_roots() {
         let data_dir = tempdir().unwrap();
         let root_a = tempdir().unwrap();
@@ -4301,7 +5441,8 @@ mod tests {
 
         let text = lines_text(&command_info_lines(&app, 120, 10));
 
-        assert!(text.contains("commands: add remove update library filter clear clear-output"));
+        assert!(text.contains("commands: add remove update library playlist"));
+        assert!(text.contains("playlist-clear playlist-delete filter clear clear-output"));
         assert!(!text.contains(":library_"));
         assert_eq!(
             command_info_lines(&app, 120, 10)[0].spans[0].style,
@@ -4352,6 +5493,348 @@ mod tests {
         assert!(app.info_area_visible());
         app.clear_command_output();
         assert!(!app.info_area_visible());
+    }
+
+    #[test]
+    fn playlist_panel_opens_and_adds_selected_track() {
+        let data_dir = tempdir().unwrap();
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        db::upsert_track(
+            &conn,
+            &test_track_metadata("/tmp/first.flac", "first track", 1),
+        )
+        .unwrap();
+        db::upsert_track(
+            &conn,
+            &test_track_metadata("/tmp/second.flac", "second track", 2),
+        )
+        .unwrap();
+        let mut app = test_app(vec![
+            test_track(1, "first track"),
+            test_track(2, "second track"),
+        ]);
+        app.focus = FocusPane::Tracks;
+        app.selected_track_row = 2;
+
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.playlist_panel_open);
+        assert_eq!(app.focus, FocusPane::Playlist);
+        assert!(pane_active(&app, FocusPane::Playlist));
+
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.playlist_panel_open);
+        assert_eq!(app.focus, FocusPane::Tree);
+        assert!(!pane_active(&app, FocusPane::Playlist));
+
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.focus, FocusPane::Tracks);
+
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.selected_playable_track_index(), Some(0));
+
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.selected_playable_track_index(), Some(1));
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE))
+            .unwrap();
+
+        let playlist_id = app.active_playlist_id.unwrap();
+        assert!(app.playlist_panel_open);
+        assert_eq!(db::playlist_track_ids(&conn, playlist_id).unwrap(), vec![2]);
+        assert!(playlist_text(&app).contains("second track"));
+
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.focus, FocusPane::Playlist);
+        assert!(pane_active(&app, FocusPane::Playlist));
+
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.selected_playlist_row, 1);
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.current.as_ref().map(|current| current.index), Some(1));
+
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.playlist_panel_open);
+        assert_eq!(app.focus, FocusPane::Playlist);
+
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(!app.playlist_panel_open);
+        assert!(app.info_panel_visible);
+    }
+
+    #[test]
+    fn playlist_hotkeys_do_not_edit_when_playlist_panel_is_closed() {
+        let data_dir = tempdir().unwrap();
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        db::upsert_track(
+            &conn,
+            &test_track_metadata("/tmp/first.flac", "first track", 1),
+        )
+        .unwrap();
+        let playlist = db::create_playlist(&conn, "Mix").unwrap();
+        db::add_tracks_to_playlist(&conn, playlist.id, &[1]).unwrap();
+        let mut app = test_app(vec![test_track(1, "first track")]);
+        app.playlists = db::playlists(&conn).unwrap();
+        app.refresh_playlist_tracks(&conn).unwrap();
+        app.active_playlist_id = Some(playlist.id);
+        app.focus = FocusPane::Tracks;
+
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(!app.playlist_panel_open);
+        assert_eq!(db::playlist_track_ids(&conn, playlist.id).unwrap(), vec![1]);
+        assert_eq!(
+            app.message,
+            "open playlist panel with p before editing playlists"
+        );
+    }
+
+    #[test]
+    fn playlist_add_hotkey_does_not_create_default_playlist_when_panel_is_closed() {
+        let data_dir = tempdir().unwrap();
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        db::upsert_track(
+            &conn,
+            &test_track_metadata("/tmp/first.flac", "first track", 1),
+        )
+        .unwrap();
+        let mut app = test_app(vec![test_track(1, "first track")]);
+        app.focus = FocusPane::Tracks;
+
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(db::playlists(&conn).unwrap().is_empty());
+        assert_eq!(
+            app.message,
+            "open playlist panel with p before editing playlists"
+        );
+    }
+
+    #[test]
+    fn playlist_panel_removes_selected_playlist_track() {
+        let data_dir = tempdir().unwrap();
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        db::upsert_track(
+            &conn,
+            &test_track_metadata("/tmp/first.flac", "first track", 1),
+        )
+        .unwrap();
+        let playlist = db::create_playlist(&conn, "Mix").unwrap();
+        db::add_tracks_to_playlist(&conn, playlist.id, &[1]).unwrap();
+        let mut app = test_app(vec![test_track(1, "first track")]);
+        app.playlists = db::playlists(&conn).unwrap();
+        app.refresh_playlist_tracks(&conn).unwrap();
+        app.active_playlist_id = Some(playlist.id);
+        app.expanded_playlists.insert(playlist.id);
+        app.playlist_panel_open = true;
+        app.focus = FocusPane::Playlist;
+        app.sync_selection();
+        app.selected_playlist_row = 1;
+
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(db::playlist_track_ids(&conn, playlist.id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn playlist_track_numbers_are_playlist_relative() {
+        let mut first = test_track(1, "first track");
+        first.track_number = Some(7);
+        let mut second = test_track(2, "second track");
+        second.track_number = Some(9);
+        let mut app = test_app(vec![first, second]);
+        app.playlists = vec![db::Playlist {
+            id: 7,
+            name: "Road".to_string(),
+        }];
+        app.playlist_track_ids.insert(7, vec![1, 2]);
+        app.playlist_track_entry_ids.insert(7, vec![11, 12]);
+        app.playlist_track_indices.insert(7, vec![0, 1]);
+        app.active_playlist_id = Some(7);
+        app.expanded_playlists.insert(7);
+        app.playlist_panel_open = true;
+        app.sync_selection();
+
+        let text = playlist_text(&app);
+
+        assert!(text.contains("01. Artist - first track"));
+        assert!(text.contains("02. Artist - second track"));
+        assert!(!text.contains("07. Artist - first track"));
+        assert!(!text.contains("09. Artist - second track"));
+    }
+
+    #[test]
+    fn collapsing_playlist_panel_from_track_selects_playlist_parent() {
+        let mut app = test_app(vec![test_track(1, "first track")]);
+        app.playlists = vec![db::Playlist {
+            id: 7,
+            name: "Road".to_string(),
+        }];
+        app.playlist_track_ids.insert(7, vec![1]);
+        app.playlist_track_entry_ids.insert(7, vec![11]);
+        app.playlist_track_indices.insert(7, vec![0]);
+        app.active_playlist_id = Some(7);
+        app.expanded_playlists.insert(7);
+        app.playlist_panel_open = true;
+        app.focus = FocusPane::Playlist;
+        app.sync_selection();
+        app.selected_playlist_row = 1;
+
+        app.space_action();
+
+        assert!(!app.expanded_playlists.contains(&7));
+        assert_eq!(app.selected_playlist_row, 0);
+        assert!(matches!(
+            app.view.playlist_entries.get(app.selected_playlist_row),
+            Some(PlaylistPanelEntry::Playlist { playlist_id: 7, .. })
+        ));
+    }
+
+    #[test]
+    fn playlist_panel_removes_exact_duplicate_entry() {
+        let data_dir = tempdir().unwrap();
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        db::upsert_track(
+            &conn,
+            &test_track_metadata("/tmp/first.flac", "first track", 1),
+        )
+        .unwrap();
+        db::upsert_track(
+            &conn,
+            &test_track_metadata("/tmp/second.flac", "second track", 2),
+        )
+        .unwrap();
+        let playlist = db::create_playlist(&conn, "Mix").unwrap();
+        db::add_tracks_to_playlist(&conn, playlist.id, &[1, 2, 1]).unwrap();
+        let mut app = test_app(vec![
+            test_track(1, "first track"),
+            test_track(2, "second track"),
+        ]);
+        app.playlists = db::playlists(&conn).unwrap();
+        app.refresh_playlist_tracks(&conn).unwrap();
+        app.active_playlist_id = Some(playlist.id);
+        app.expanded_playlists.insert(playlist.id);
+        app.playlist_panel_open = true;
+        app.focus = FocusPane::Playlist;
+        app.sync_selection();
+        app.selected_playlist_row = 1;
+
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(
+            db::playlist_track_ids(&conn, playlist.id).unwrap(),
+            vec![2, 1]
+        );
+    }
+
+    #[test]
+    fn track_remove_deletes_most_recent_playlist_duplicate() {
+        let data_dir = tempdir().unwrap();
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        db::upsert_track(
+            &conn,
+            &test_track_metadata("/tmp/first.flac", "first track", 1),
+        )
+        .unwrap();
+        db::upsert_track(
+            &conn,
+            &test_track_metadata("/tmp/second.flac", "second track", 2),
+        )
+        .unwrap();
+        let playlist = db::create_playlist(&conn, "Mix").unwrap();
+        db::add_tracks_to_playlist(&conn, playlist.id, &[1, 2, 1]).unwrap();
+        let mut app = test_app(vec![
+            test_track(1, "first track"),
+            test_track(2, "second track"),
+        ]);
+        app.playlists = db::playlists(&conn).unwrap();
+        app.refresh_playlist_tracks(&conn).unwrap();
+        app.active_playlist_id = Some(playlist.id);
+        app.playlist_panel_open = true;
+        app.focus = FocusPane::Tracks;
+        app.sync_selection();
+        app.selected_track_row = 0;
+
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(
+            db::playlist_track_ids(&conn, playlist.id).unwrap(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn artist_add_and_remove_apply_to_all_artist_tracks() {
+        let data_dir = tempdir().unwrap();
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        db::upsert_track(
+            &conn,
+            &test_track_metadata("/tmp/first.flac", "first track", 1),
+        )
+        .unwrap();
+        db::upsert_track(
+            &conn,
+            &test_track_metadata("/tmp/second.flac", "second track", 2),
+        )
+        .unwrap();
+        db::upsert_track(
+            &conn,
+            &test_track_metadata("/tmp/other.flac", "other track", 3),
+        )
+        .unwrap();
+        let playlist = db::create_playlist(&conn, "Mix").unwrap();
+        let mut other_artist = test_track(3, "other track");
+        other_artist.artist = Some("Other Artist".to_string());
+        let mut app = test_app(vec![
+            test_track(1, "first track"),
+            test_track(2, "second track"),
+            other_artist,
+        ]);
+        app.playlists = db::playlists(&conn).unwrap();
+        app.refresh_playlist_tracks(&conn).unwrap();
+        app.active_playlist_id = Some(playlist.id);
+        app.playlist_panel_open = true;
+        app.sync_selection();
+        app.focus = FocusPane::Tree;
+        app.selected_tree = app
+            .tree_entries()
+            .iter()
+            .position(|entry| matches!(entry, TreeEntry::Artist { artist } if artist == "Artist"))
+            .unwrap();
+
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(
+            db::playlist_track_ids(&conn, playlist.id).unwrap(),
+            vec![1, 2, 1, 2]
+        );
+
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(db::playlist_track_ids(&conn, playlist.id)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -4506,10 +5989,24 @@ mod tests {
     }
 
     #[test]
+    fn render_uses_final_row_for_playback_status() {
+        let mut app = test_app(vec![test_track(1, "first track")]);
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        let bottom = buffer_row_text(terminal.backend().buffer(), 11, 80);
+        assert!(bottom.contains("["));
+        assert!(bottom.contains("library"));
+    }
+
+    #[test]
     fn playback_bar_scales_down_with_width() {
         let mut app = test_app(vec![test_track(1, "first track")]);
         app.current = Some(PlayingTrack {
             index: 0,
+            source: None,
             track: app.tracks[0].clone(),
             last_position_ms: 50_000,
             listened_ms: 0,
@@ -4527,6 +6024,7 @@ mod tests {
         app.player = Box::new(FailingSeekPlayer);
         app.current = Some(PlayingTrack {
             index: 0,
+            source: None,
             track: app.tracks[0].clone(),
             last_position_ms: 197_500,
             listened_ms: 0,
@@ -4883,6 +6381,33 @@ mod tests {
     }
 
     #[test]
+    fn mouse_scroll_moves_playlist_pane_without_changing_focus() {
+        let mut app = test_app(
+            (1..=6)
+                .map(|id| test_track(id, &format!("track {id}")))
+                .collect(),
+        );
+        app.playlists = vec![db::Playlist {
+            id: 7,
+            name: "Road".to_string(),
+        }];
+        app.playlist_track_ids.insert(7, (1..=6).collect());
+        app.playlist_track_entry_ids.insert(7, (11..=16).collect());
+        app.playlist_track_indices.insert(7, (0..6).collect());
+        app.active_playlist_id = Some(7);
+        app.expanded_playlists.insert(7);
+        app.playlist_panel_open = true;
+        app.focus = FocusPane::Tracks;
+        app.sync_selection();
+
+        let handled = app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 60, 17), 100, 30);
+
+        assert!(handled);
+        assert_eq!(app.focus, FocusPane::Tracks);
+        assert_eq!(app.selected_playlist_row, 1);
+    }
+
+    #[test]
     fn mouse_scroll_ignores_bottom_status_area_and_filter_mode() {
         let mut app = test_app(vec![test_track(1, "first track")]);
 
@@ -4894,28 +6419,28 @@ mod tests {
     #[test]
     fn narrow_mouse_hit_testing_uses_stacked_panes() {
         assert_eq!(
-            mouse_pane(10, 1, 74, 30, 2, false, false),
+            mouse_pane(10, 1, 74, 30, 2, false, false, false),
             Some(FocusPane::Tree)
         );
         assert_eq!(
-            mouse_pane(10, 20, 74, 30, 2, false, false),
+            mouse_pane(10, 20, 74, 30, 2, false, false, false),
             Some(FocusPane::Tracks)
         );
-        assert_eq!(mouse_pane(10, 28, 74, 30, 2, false, false), None);
+        assert_eq!(mouse_pane(10, 28, 74, 30, 2, false, false, false), None);
     }
 
     #[test]
     fn wide_mouse_hit_testing_uses_split_panes() {
         assert_eq!(
-            mouse_pane(10, 20, 100, 30, 2, false, false),
+            mouse_pane(10, 20, 100, 30, 2, false, false, false),
             Some(FocusPane::Tree)
         );
         assert_eq!(
-            mouse_pane(60, 20, 100, 30, 2, false, false),
+            mouse_pane(60, 20, 100, 30, 2, false, false, false),
             Some(FocusPane::Tracks)
         );
         assert_eq!(
-            mouse_pane(90, 20, 100, 30, 2, false, false),
+            mouse_pane(90, 20, 100, 30, 2, false, false, false),
             Some(FocusPane::Tracks)
         );
     }
@@ -4923,16 +6448,25 @@ mod tests {
     #[test]
     fn mouse_hit_testing_ignores_bottom_info_and_input_rows() {
         assert_eq!(
-            mouse_pane(60, 5, 100, 30, 2, true, true),
+            mouse_pane(60, 5, 100, 30, 2, true, true, false),
             Some(FocusPane::Tracks)
         );
         assert_eq!(
-            mouse_pane(10, 12, 100, 30, 2, true, true),
+            mouse_pane(10, 12, 100, 30, 2, true, true, false),
             Some(FocusPane::Tree)
         );
-        assert_eq!(mouse_pane(60, 15, 100, 30, 2, true, true), None);
-        assert_eq!(mouse_pane(60, 20, 100, 30, 2, true, true), None);
-        assert_eq!(mouse_pane(10, 28, 100, 30, 2, true, true), None);
+        assert_eq!(mouse_pane(60, 15, 100, 30, 2, true, true, false), None);
+        assert_eq!(mouse_pane(60, 20, 100, 30, 2, true, true, false), None);
+        assert_eq!(mouse_pane(10, 28, 100, 30, 2, true, true, false), None);
+    }
+
+    #[test]
+    fn mouse_hit_testing_allows_playlist_info_pane() {
+        assert_eq!(
+            mouse_pane(60, 17, 100, 30, 2, true, false, true),
+            Some(FocusPane::Playlist)
+        );
+        assert_eq!(mouse_pane(60, 17, 100, 30, 2, true, false, false), None);
     }
 
     #[test]
@@ -4957,6 +6491,31 @@ mod tests {
     }
 
     #[test]
+    fn playlist_list_keeps_selection_padded_from_bottom_when_possible() {
+        let mut app = test_app(Vec::new());
+        app.playlists = (0..20)
+            .map(|id| db::Playlist {
+                id,
+                name: format!("List {id:02}"),
+            })
+            .collect();
+        app.playlist_panel_open = true;
+        app.focus = FocusPane::Playlist;
+        app.sync_selection();
+        app.selected_playlist_row = 10;
+        app.apply_selection_state();
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_playlist_info_pane(frame, &mut app, Rect::new(0, 0, 80, 10), 78))
+            .unwrap();
+
+        assert!(app.playlist_state.offset() > 0);
+        assert!(app.selected_playlist_row - app.playlist_state.offset() <= 4);
+    }
+
+    #[test]
     fn inactive_pane_selection_is_visible() {
         assert_eq!(
             pane_highlight_style(true),
@@ -4977,24 +6536,35 @@ mod tests {
 
         assert!(pane_active(&app, FocusPane::Tree));
         assert!(!pane_active(&app, FocusPane::Tracks));
+        assert!(!pane_active(&app, FocusPane::Playlist));
 
         app.command_mode = true;
         assert!(!pane_active(&app, FocusPane::Tree));
         assert!(!pane_active(&app, FocusPane::Tracks));
+        assert!(!pane_active(&app, FocusPane::Playlist));
 
         app.command_mode = false;
         app.focus = FocusPane::Tracks;
         assert!(!pane_active(&app, FocusPane::Tree));
         assert!(pane_active(&app, FocusPane::Tracks));
+        assert!(!pane_active(&app, FocusPane::Playlist));
+
+        app.playlist_panel_open = true;
+        app.focus = FocusPane::Playlist;
+        assert!(!pane_active(&app, FocusPane::Tree));
+        assert!(!pane_active(&app, FocusPane::Tracks));
+        assert!(pane_active(&app, FocusPane::Playlist));
 
         app.filter_mode = true;
         assert!(!pane_active(&app, FocusPane::Tree));
         assert!(!pane_active(&app, FocusPane::Tracks));
+        assert!(!pane_active(&app, FocusPane::Playlist));
 
         app.filter_mode = false;
         app.command_focus = true;
         assert!(!pane_active(&app, FocusPane::Tree));
         assert!(!pane_active(&app, FocusPane::Tracks));
+        assert!(!pane_active(&app, FocusPane::Playlist));
     }
 
     #[test]
@@ -5042,6 +6612,7 @@ mod tests {
         let mut app = test_app(vec![test_track(1, "first track"), second_album]);
         app.current = Some(PlayingTrack {
             index: 1,
+            source: None,
             track: app.tracks[1].clone(),
             last_position_ms: 0,
             listened_ms: 0,
@@ -5057,6 +6628,7 @@ mod tests {
         let mut app = test_app(vec![test_track(1, "first track"), second_album]);
         app.current = Some(PlayingTrack {
             index: 1,
+            source: None,
             track: app.tracks[1].clone(),
             last_position_ms: 0,
             listened_ms: 0,
@@ -5067,6 +6639,30 @@ mod tests {
         assert!(!app.tree_entry_is_current(&app.tree_entries()[0]));
         assert!(!app.tree_entry_is_current(&app.tree_entries()[1]));
         assert!(app.tree_entry_is_current(&app.tree_entries()[2]));
+    }
+
+    #[test]
+    fn collapsing_artist_from_album_selects_artist_parent() {
+        let mut second_album = test_track(2, "second album track");
+        second_album.album = Some("Another Album".to_string());
+        let mut app = test_app(vec![test_track(1, "first track"), second_album]);
+        app.expanded_artists.insert("Artist".to_string());
+        app.sync_selection();
+        app.selected_tree = app
+            .tree_entries()
+            .iter()
+            .position(
+                |entry| matches!(entry, TreeEntry::Album { album, .. } if album == "Another Album"),
+            )
+            .unwrap();
+
+        app.space_action();
+
+        assert!(!app.expanded_artists.contains("Artist"));
+        assert!(matches!(
+            app.selected_tree_entry(),
+            Some(TreeEntry::Artist { artist }) if artist == "Artist"
+        ));
     }
 
     #[test]
@@ -5147,6 +6743,362 @@ mod tests {
     }
 
     #[test]
+    fn playlists_entry_expands_to_playlists_and_plays_tracks() {
+        let mut app = test_app(vec![
+            test_track(1, "first track"),
+            test_track(2, "playlist track"),
+        ]);
+        app.playlists = vec![db::Playlist {
+            id: 7,
+            name: "Road".to_string(),
+        }];
+        app.playlist_track_ids.insert(7, vec![2]);
+        app.playlist_track_entry_ids.insert(7, vec![11]);
+        app.playlist_track_indices.insert(7, vec![1]);
+        app.sync_selection();
+
+        assert!(matches!(
+            app.tree_entries().first(),
+            Some(TreeEntry::Playlists)
+        ));
+        assert!(line_text(&tree_item_line(&app, &app.tree_entries()[0])).contains("[+] Playlists"));
+
+        app.space_action();
+
+        assert!(app.playlists_expanded);
+        assert!(matches!(
+            app.tree_entries().get(1),
+            Some(TreeEntry::Playlist { name, .. }) if name == "Road"
+        ));
+        assert!(line_text(&tree_item_line(&app, &app.tree_entries()[0])).contains("[-] Playlists"));
+
+        app.selected_tree = 1;
+        app.sync_selection();
+        assert_eq!(app.selected_scope_tracks()[0].0, 1);
+        assert_eq!(app.playback_sequence_indices(), vec![1]);
+
+        let conn = Connection::open_in_memory().unwrap();
+        app.activate(&conn).unwrap();
+
+        assert_eq!(app.current.as_ref().map(|current| current.index), Some(1));
+    }
+
+    #[test]
+    fn collapsing_playlists_from_playlist_selects_playlists_parent() {
+        let mut app = test_app(vec![test_track(1, "playlist track")]);
+        app.playlists = vec![db::Playlist {
+            id: 7,
+            name: "Road".to_string(),
+        }];
+        app.playlist_track_ids.insert(7, vec![1]);
+        app.playlist_track_entry_ids.insert(7, vec![11]);
+        app.playlist_track_indices.insert(7, vec![0]);
+        app.playlists_expanded = true;
+        app.sync_selection();
+        app.selected_tree = app
+            .tree_entries()
+            .iter()
+            .position(|entry| matches!(entry, TreeEntry::Playlist { name, .. } if name == "Road"))
+            .unwrap();
+
+        app.space_action();
+
+        assert!(!app.playlists_expanded);
+        assert!(matches!(
+            app.selected_tree_entry(),
+            Some(TreeEntry::Playlists)
+        ));
+    }
+
+    #[test]
+    fn playlist_tree_track_pane_uses_playlist_row_style() {
+        let mut first = test_track(1, "first track");
+        first.track_number = Some(7);
+        let mut second = test_track(2, "second track");
+        second.track_number = Some(9);
+        let mut app = test_app(vec![first, second]);
+        app.playlists = vec![db::Playlist {
+            id: 7,
+            name: "Road".to_string(),
+        }];
+        app.playlist_track_ids.insert(7, vec![1, 2]);
+        app.playlist_track_entry_ids.insert(7, vec![11, 12]);
+        app.playlist_track_indices.insert(7, vec![0, 1]);
+        app.playlists_expanded = true;
+        app.sync_selection();
+        app.selected_tree = app
+            .tree_entries()
+            .iter()
+            .position(|entry| matches!(entry, TreeEntry::Playlist { name, .. } if name == "Road"))
+            .unwrap();
+        app.sync_selection();
+
+        assert!(matches!(
+            app.track_rows().first(),
+            Some(TrackRow::PlaylistTrack {
+                position: 1,
+                track_index: 0,
+                ..
+            })
+        ));
+        let first_line = line_text(&playlist_track_line(&app, 0, 7, 11, 1, 40));
+        let second_line = line_text(&playlist_track_line(&app, 1, 7, 12, 2, 40));
+
+        assert!(first_line.contains("01. Artist - first track"));
+        assert!(second_line.contains("02. Artist - second track"));
+        assert!(first_line.ends_with("1:40"));
+        assert!(!first_line.contains("07."));
+        assert!(!second_line.contains("09."));
+        assert!(!first_line.contains("x0"));
+    }
+
+    #[test]
+    fn duplicate_playlist_entries_mark_only_the_active_occurrence() {
+        let mut app = test_app(vec![test_track(1, "looped track")]);
+        app.playlists = vec![db::Playlist {
+            id: 7,
+            name: "Road".to_string(),
+        }];
+        app.playlist_track_ids.insert(7, vec![1, 1]);
+        app.playlist_track_entry_ids.insert(7, vec![11, 12]);
+        app.playlist_track_indices.insert(7, vec![0, 0]);
+        app.current = Some(PlayingTrack {
+            index: 0,
+            source: Some(PlaybackSource::PlaylistTrack {
+                playlist_id: 7,
+                playlist_track_id: 12,
+            }),
+            track: app.tracks[0].clone(),
+            last_position_ms: 0,
+            listened_ms: 0,
+        });
+
+        let first = line_text(&playlist_track_line(&app, 0, 7, 11, 1, 40));
+        let second = line_text(&playlist_track_line(&app, 0, 7, 12, 2, 40));
+
+        assert!(first.starts_with("  01."));
+        assert!(second.starts_with("> 02."));
+    }
+
+    #[test]
+    fn duplicate_playlist_playback_advances_by_entry_identity() {
+        let mut app = test_app(vec![test_track(1, "looped track")]);
+        app.playlists = vec![db::Playlist {
+            id: 7,
+            name: "Road".to_string(),
+        }];
+        app.playlist_track_ids.insert(7, vec![1, 1]);
+        app.playlist_track_entry_ids.insert(7, vec![11, 12]);
+        app.playlist_track_indices.insert(7, vec![0, 0]);
+        app.playlists_expanded = true;
+        app.sync_selection();
+        app.selected_tree = app
+            .tree_entries()
+            .iter()
+            .position(|entry| matches!(entry, TreeEntry::Playlist { name, .. } if name == "Road"))
+            .unwrap();
+        app.sync_selection();
+        app.current = Some(PlayingTrack {
+            index: 0,
+            source: Some(PlaybackSource::PlaylistTrack {
+                playlist_id: 7,
+                playlist_track_id: 11,
+            }),
+            track: app.tracks[0].clone(),
+            last_position_ms: 0,
+            listened_ms: 0,
+        });
+
+        let next = app.next_playback_entry(1).unwrap();
+
+        assert_eq!(next.track_index, 0);
+        assert_eq!(
+            next.source,
+            Some(PlaybackSource::PlaylistTrack {
+                playlist_id: 7,
+                playlist_track_id: 12
+            })
+        );
+    }
+
+    #[test]
+    fn playlist_playback_does_not_mark_library_track_row_current() {
+        let mut app = test_app(vec![test_track(1, "looped track")]);
+        app.playlists = vec![db::Playlist {
+            id: 7,
+            name: "Road".to_string(),
+        }];
+        app.playlist_track_ids.insert(7, vec![1]);
+        app.playlist_track_entry_ids.insert(7, vec![11]);
+        app.playlist_track_indices.insert(7, vec![0]);
+        app.current = Some(PlayingTrack {
+            index: 0,
+            source: Some(PlaybackSource::PlaylistTrack {
+                playlist_id: 7,
+                playlist_track_id: 11,
+            }),
+            track: app.tracks[0].clone(),
+            last_position_ms: 0,
+            listened_ms: 0,
+        });
+
+        let library_line = line_text(&track_line(&app, 0, false, 40));
+        let playlist_line = line_text(&playlist_track_line(&app, 0, 7, 11, 1, 40));
+
+        assert!(library_line.starts_with("  01."));
+        assert!(playlist_line.starts_with("> 01."));
+    }
+
+    #[test]
+    fn playlist_playback_marks_playlist_tree_not_artist_tree() {
+        let mut app = test_app(vec![test_track(1, "looped track")]);
+        app.playlists = vec![db::Playlist {
+            id: 7,
+            name: "Road".to_string(),
+        }];
+        app.playlist_track_ids.insert(7, vec![1]);
+        app.playlist_track_entry_ids.insert(7, vec![11]);
+        app.playlist_track_indices.insert(7, vec![0]);
+        app.current = Some(PlayingTrack {
+            index: 0,
+            source: Some(PlaybackSource::PlaylistTrack {
+                playlist_id: 7,
+                playlist_track_id: 11,
+            }),
+            track: app.tracks[0].clone(),
+            last_position_ms: 0,
+            listened_ms: 0,
+        });
+        app.sync_selection();
+
+        assert!(matches!(app.tree_entries()[0], TreeEntry::Playlists));
+        assert!(app.tree_entry_is_current(&app.tree_entries()[0]));
+        assert!(app
+            .tree_entries()
+            .iter()
+            .filter(|entry| matches!(entry, TreeEntry::Artist { .. }))
+            .all(|entry| !app.tree_entry_is_current(entry)));
+    }
+
+    #[test]
+    fn library_playback_does_not_mark_playlist_track_row_current() {
+        let mut app = test_app(vec![test_track(1, "looped track")]);
+        app.playlists = vec![db::Playlist {
+            id: 7,
+            name: "Road".to_string(),
+        }];
+        app.playlist_track_ids.insert(7, vec![1]);
+        app.playlist_track_entry_ids.insert(7, vec![11]);
+        app.playlist_track_indices.insert(7, vec![0]);
+        app.current = Some(PlayingTrack {
+            index: 0,
+            source: None,
+            track: app.tracks[0].clone(),
+            last_position_ms: 0,
+            listened_ms: 0,
+        });
+
+        let library_line = line_text(&track_line(&app, 0, false, 40));
+        let playlist_line = line_text(&playlist_track_line(&app, 0, 7, 11, 1, 40));
+
+        assert!(library_line.starts_with("> 01."));
+        assert!(playlist_line.starts_with("  01."));
+    }
+
+    #[test]
+    fn library_playback_marks_artist_tree_not_playlist_tree() {
+        let mut app = test_app(vec![test_track(1, "looped track")]);
+        app.playlists = vec![db::Playlist {
+            id: 7,
+            name: "Road".to_string(),
+        }];
+        app.playlist_track_ids.insert(7, vec![1]);
+        app.playlist_track_entry_ids.insert(7, vec![11]);
+        app.playlist_track_indices.insert(7, vec![0]);
+        app.current = Some(PlayingTrack {
+            index: 0,
+            source: None,
+            track: app.tracks[0].clone(),
+            last_position_ms: 0,
+            listened_ms: 0,
+        });
+        app.sync_selection();
+
+        assert!(matches!(app.tree_entries()[0], TreeEntry::Playlists));
+        assert!(!app.tree_entry_is_current(&app.tree_entries()[0]));
+        assert!(app
+            .tree_entries()
+            .iter()
+            .filter(|entry| matches!(entry, TreeEntry::Artist { .. }))
+            .any(|entry| app.tree_entry_is_current(entry)));
+    }
+
+    #[test]
+    fn top_level_playlists_track_pane_groups_by_playlist() {
+        let mut first = test_track(1, "first track");
+        first.track_number = Some(7);
+        let mut second = test_track(2, "second track");
+        second.track_number = Some(9);
+        let mut third = test_track(3, "third track");
+        third.duration_ms = Some(200_000);
+        let mut app = test_app(vec![first, second, third]);
+        app.playlists = vec![
+            db::Playlist {
+                id: 7,
+                name: "Road".to_string(),
+            },
+            db::Playlist {
+                id: 8,
+                name: "Night".to_string(),
+            },
+        ];
+        app.playlist_track_ids.insert(7, vec![1, 2]);
+        app.playlist_track_entry_ids.insert(7, vec![11, 12]);
+        app.playlist_track_indices.insert(7, vec![0, 1]);
+        app.playlist_track_ids.insert(8, vec![3, 1]);
+        app.playlist_track_entry_ids.insert(8, vec![21, 22]);
+        app.playlist_track_indices.insert(8, vec![2, 0]);
+        app.sync_selection();
+
+        assert!(matches!(
+            app.selected_tree_entry(),
+            Some(TreeEntry::Playlists)
+        ));
+        assert!(matches!(
+            app.track_rows().get(0),
+            Some(TrackRow::PlaylistHeader { name, .. }) if name == "Road"
+        ));
+        assert!(matches!(
+            app.track_rows().get(1),
+            Some(TrackRow::PlaylistTrack {
+                position: 1,
+                track_index: 0,
+                ..
+            })
+        ));
+        assert!(matches!(
+            app.track_rows().get(3),
+            Some(TrackRow::PlaylistHeader { name, duration_ms }) if name == "Night" && *duration_ms == 300_000
+        ));
+        assert!(matches!(
+            app.track_rows().get(4),
+            Some(TrackRow::PlaylistTrack {
+                position: 1,
+                track_index: 2,
+                ..
+            })
+        ));
+
+        let header = line_text(&playlist_header_line("Road", 200_000, 40));
+        let track = line_text(&playlist_track_line(&app, 0, 7, 11, 1, 40));
+
+        assert!(header.starts_with("Road"));
+        assert!(header.ends_with("3:20"));
+        assert!(track.contains("01. Artist - first track"));
+        assert!(!track.contains("07."));
+    }
+
+    #[test]
     fn expanded_compilation_marks_current_album() {
         let mut first = test_track(1, "first compilation track");
         first.compilation = true;
@@ -5157,6 +7109,7 @@ mod tests {
         let mut app = test_app(vec![first, second]);
         app.current = Some(PlayingTrack {
             index: 1,
+            source: None,
             track: app.tracks[1].clone(),
             last_position_ms: 0,
             listened_ms: 0,
@@ -5367,6 +7320,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         app.current = Some(PlayingTrack {
             index: 0,
+            source: None,
             track: app.tracks[0].clone(),
             last_position_ms: 0,
             listened_ms: 0,
@@ -5388,6 +7342,7 @@ mod tests {
         let mut app = test_app(vec![test_track(1, "first track"), other_artist]);
         app.current = Some(PlayingTrack {
             index: 1,
+            source: None,
             track: app.tracks[1].clone(),
             last_position_ms: 0,
             listened_ms: 0,
@@ -5409,6 +7364,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         app.current = Some(PlayingTrack {
             index: 1,
+            source: None,
             track: app.tracks[1].clone(),
             last_position_ms: 0,
             listened_ms: 0,
@@ -5432,6 +7388,7 @@ mod tests {
         let mut app = test_app(vec![test_track(1, "first track")]);
         app.current = Some(PlayingTrack {
             index: 0,
+            source: None,
             track: app.tracks[0].clone(),
             last_position_ms: 0,
             listened_ms: 0,
@@ -5454,13 +7411,23 @@ mod tests {
         let mut app = App {
             paths: test_paths(),
             tracks,
+            playlists: Vec::new(),
+            playlist_track_ids: HashMap::new(),
+            playlist_track_entry_ids: HashMap::new(),
+            playlist_track_indices: HashMap::new(),
             view: ViewCache::default(),
             tree_state: ListState::default(),
             track_state: ListState::default(),
+            playlist_state: ListState::default(),
             selected_tree: 0,
             selected_track_row: 0,
+            selected_playlist_row: 0,
             expanded_artists: HashSet::new(),
             compilations_expanded: false,
+            playlists_expanded: false,
+            expanded_playlists: HashSet::new(),
+            active_playlist_id: None,
+            playlist_panel_open: false,
             focus: FocusPane::Tree,
             filter: String::new(),
             filter_mode: false,
@@ -5527,6 +7494,33 @@ mod tests {
         }
     }
 
+    fn test_track_metadata(
+        path: &str,
+        title: &str,
+        track_number: i64,
+    ) -> crate::media::TrackMetadata {
+        crate::media::TrackMetadata {
+            path: path.into(),
+            file_size: 10,
+            modified_at: Some(1),
+            title: Some(title.to_string()),
+            artist: Some("Artist".to_string()),
+            album: Some("Album".to_string()),
+            album_artist: None,
+            album_year: Some(2018),
+            release_date: Some("2018-05-11".to_string()),
+            composer: None,
+            genre: None,
+            track_number: Some(track_number),
+            track_total: Some(10),
+            disc_number: None,
+            disc_total: None,
+            duration_ms: Some(100_000),
+            compilation: false,
+            embedded_art: None,
+        }
+    }
+
     fn line_text(line: &Line<'_>) -> String {
         line.spans
             .iter()
@@ -5536,6 +7530,21 @@ mod tests {
 
     fn lines_text(lines: &[Line<'_>]) -> String {
         lines.iter().map(line_text).collect::<Vec<_>>().join("\n")
+    }
+
+    fn buffer_row_text(buffer: &ratatui::buffer::Buffer, row: u16, width: u16) -> String {
+        (0..width)
+            .map(|column| buffer[(column, row)].symbol())
+            .collect()
+    }
+
+    fn playlist_text(app: &App) -> String {
+        app.view
+            .playlist_entries
+            .iter()
+            .map(|entry| playlist_entry_text(app, entry))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
