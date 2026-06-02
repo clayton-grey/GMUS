@@ -21,7 +21,6 @@ ratatui = { version = "0.30", default-features = false, features = ["crossterm"]
 rodio = { version = "0.22", default-features = false, features = ["playback", "mp3", "flac", "mp4", "vorbis", "wav", "symphonia-aiff", "symphonia-alac", "symphonia-caf"], optional = true }
 rusqlite = { version = "0.39", default-features = false }
 sha2 = "0.10"
-thiserror = "2.0"
 unicode-width = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]

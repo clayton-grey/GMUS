@@ -18,9 +18,14 @@ gmus
 gmus scan ~/Music
 gmus tui ~/Music
 gmus art ~/Music/Album/track.flac
+gmus play ~/Music/Album/track.flac
 gmus stats
 gmus record-play ~/Music/Album/track.flac --duration-ms 180000
+gmus record-play ~/Music/Album/track.flac --duration-ms 45000 --completed=false
 ```
+
+All commands accept `--db PATH` before the subcommand, for example
+`gmus --db /tmp/gmus.sqlite3 stats`.
 
 By default, GMUS stores data in:
 

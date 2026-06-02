@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::media::TrackMetadata;
+use crate::media::{self, TrackMetadata};
 use anyhow::{Context, Result};
 
 const FOLDER_ART_NAMES: &[&str] = &[
@@ -17,11 +17,11 @@ const FOLDER_ART_NAMES: &[&str] = &[
 ];
 
 pub fn cache_cover_for_track(track: &TrackMetadata, art_dir: &Path) -> Result<Option<PathBuf>> {
-    if let Some(embedded) = &track.embedded_art {
+    if let Some(embedded) = media::read_embedded_art(&track.path)? {
         fs::create_dir_all(art_dir)
             .with_context(|| format!("creating art cache {}", art_dir.display()))?;
         let path = art_dir.join(format!("{}.{}", track.fingerprint(), embedded.extension));
-        fs::write(&path, &embedded.bytes)
+        write_cover_bytes_if_changed(&path, &embedded.bytes)
             .with_context(|| format!("writing embedded cover art to {}", path.display()))?;
         return Ok(Some(path));
     }
@@ -34,7 +34,7 @@ pub fn cache_cover_for_track(track: &TrackMetadata, art_dir: &Path) -> Result<Op
             .and_then(|extension| extension.to_str())
             .unwrap_or("img");
         let path = art_dir.join(format!("{}.{}", track.fingerprint(), extension));
-        fs::copy(&folder_art, &path).with_context(|| {
+        copy_cover_if_changed(&folder_art, &path).with_context(|| {
             format!(
                 "copying folder cover art from {} to {}",
                 folder_art.display(),
@@ -66,4 +66,44 @@ pub fn find_folder_art(audio_path: &Path) -> Option<PathBuf> {
     }
 
     None
+}
+
+fn copy_cover_if_changed(source: &Path, destination: &Path) -> Result<()> {
+    let bytes = fs::read(source)
+        .with_context(|| format!("reading folder cover art {}", source.display()))?;
+    write_cover_bytes_if_changed(destination, &bytes)
+}
+
+fn write_cover_bytes_if_changed(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Ok(existing) = fs::read(path) {
+        if existing == bytes {
+            return Ok(());
+        }
+    }
+
+    fs::write(path, bytes)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{copy_cover_if_changed, write_cover_bytes_if_changed};
+
+    #[test]
+    fn cover_cache_writes_only_when_content_differs() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("cover.jpg");
+        let cached = dir.path().join("cached.jpg");
+
+        std::fs::write(&source, b"first").unwrap();
+        copy_cover_if_changed(&source, &cached).unwrap();
+        assert_eq!(std::fs::read(&cached).unwrap(), b"first");
+
+        write_cover_bytes_if_changed(&cached, b"first").unwrap();
+        assert_eq!(std::fs::read(&cached).unwrap(), b"first");
+
+        std::fs::write(&source, b"second").unwrap();
+        copy_cover_if_changed(&source, &cached).unwrap();
+        assert_eq!(std::fs::read(&cached).unwrap(), b"second");
+    }
 }

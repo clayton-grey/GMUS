@@ -34,7 +34,6 @@ pub struct TrackMetadata {
     pub disc_total: Option<i64>,
     pub duration_ms: Option<i64>,
     pub compilation: bool,
-    pub embedded_art: Option<EmbeddedArt>,
 }
 
 impl TrackMetadata {
@@ -78,18 +77,6 @@ pub fn read_track(path: &Path) -> Result<TrackMetadata> {
     let properties = tagged.properties();
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
 
-    let embedded_art = tag.and_then(|tag| {
-        tag.get_picture_type(PictureType::CoverFront)
-            .or_else(|| tag.pictures().first())
-            .and_then(|picture| {
-                extension_for_mime(picture.mime_type()).map(|extension| (picture, extension))
-            })
-            .map(|(picture, extension)| EmbeddedArt {
-                bytes: picture.data().to_vec(),
-                extension,
-            })
-    });
-
     Ok(TrackMetadata {
         path: path.to_path_buf(),
         file_size: metadata.len() as i64,
@@ -110,8 +97,14 @@ pub fn read_track(path: &Path) -> Result<TrackMetadata> {
         disc_total: tag.and_then(|tag| tag.disk_total().map(i64::from)),
         duration_ms: Some(properties.duration().as_millis() as i64).filter(|value| *value > 0),
         compilation: tag_bool(tag, ItemKey::FlagCompilation),
-        embedded_art,
     })
+}
+
+pub fn read_embedded_art(path: &Path) -> Result<Option<EmbeddedArt>> {
+    let tagged = lofty::read_from_path(path)
+        .with_context(|| format!("reading embedded cover art from {}", path.display()))?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
+    Ok(embedded_art_from_tag(tag))
 }
 
 pub fn is_audio_path(path: &Path) -> bool {
@@ -150,6 +143,20 @@ fn extension_for_mime(mime: Option<&lofty::picture::MimeType>) -> Option<&'stati
     } else {
         None
     }
+}
+
+fn embedded_art_from_tag(tag: Option<&Tag>) -> Option<EmbeddedArt> {
+    tag.and_then(|tag| {
+        tag.get_picture_type(PictureType::CoverFront)
+            .or_else(|| tag.pictures().first())
+            .and_then(|picture| {
+                extension_for_mime(picture.mime_type()).map(|extension| (picture, extension))
+            })
+            .map(|(picture, extension)| EmbeddedArt {
+                bytes: picture.data().to_vec(),
+                extension,
+            })
+    })
 }
 
 fn tag_album_year(tag: Option<&Tag>) -> Option<i64> {

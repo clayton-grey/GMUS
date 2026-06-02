@@ -4,8 +4,9 @@ use std::time::Duration;
 use anyhow::Result;
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub enum PlaybackState {
+    #[default]
     Stopped,
     Playing,
     Paused,
@@ -13,7 +14,7 @@ pub enum PlaybackState {
 
 #[allow(dead_code)]
 pub trait PlayerBackend {
-    fn load(&mut self, path: &Path) -> Result<()>;
+    fn load_and_play(&mut self, path: &Path) -> Result<()>;
     fn play(&mut self) -> Result<()>;
     fn pause(&mut self) -> Result<()>;
     fn stop(&mut self) -> Result<()>;
@@ -27,7 +28,7 @@ pub trait PlayerBackend {
 pub fn default_player_backend() -> Result<Box<dyn PlayerBackend>> {
     #[cfg(feature = "playback-rodio")]
     {
-        return Ok(Box::<rodio_backend::LazyRodioPlayer>::default());
+        Ok(Box::<rodio_backend::LazyRodioPlayer>::default())
     }
 
     #[cfg(not(feature = "playback-rodio"))]
@@ -58,8 +59,8 @@ pub struct NullPlayer {
 }
 
 impl PlayerBackend for NullPlayer {
-    fn load(&mut self, _path: &Path) -> Result<()> {
-        self.state = PlaybackState::Stopped;
+    fn load_and_play(&mut self, _path: &Path) -> Result<()> {
+        self.state = PlaybackState::Playing;
         self.position = Duration::ZERO;
         Ok(())
     }
@@ -100,12 +101,6 @@ impl PlayerBackend for NullPlayer {
     }
 }
 
-impl Default for PlaybackState {
-    fn default() -> Self {
-        Self::Stopped
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::play_count_threshold_met;
@@ -142,7 +137,7 @@ mod rodio_backend {
     }
 
     impl PlayerBackend for LazyRodioPlayer {
-        fn load(&mut self, path: &Path) -> Result<()> {
+        fn load_and_play(&mut self, path: &Path) -> Result<()> {
             if let Some(mut inner) = self.inner.take() {
                 inner.stop()?;
             }
@@ -219,7 +214,7 @@ mod rodio_backend {
             let source = Decoder::try_from(file)
                 .with_context(|| format!("decoding audio file {}", path.display()))?;
             let sink = open_sink(source.channels(), source.sample_rate())?;
-            let player = Player::connect_new(&sink.mixer());
+            let player = Player::connect_new(sink.mixer());
             player.append(source);
             player.play();
             Ok(Self {
@@ -231,7 +226,7 @@ mod rodio_backend {
     }
 
     impl PlayerBackend for RodioPlayer {
-        fn load(&mut self, path: &Path) -> Result<()> {
+        fn load_and_play(&mut self, path: &Path) -> Result<()> {
             self.stop()?;
             *self = Self::load_path(path)?;
             Ok(())

@@ -41,7 +41,7 @@ pub trait MediaSession {
 pub fn default_media_session() -> Box<dyn MediaSession> {
     #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
     {
-        return Box::<macos::LazyMacMediaSession>::default();
+        Box::<macos::LazyMacMediaSession>::default()
     }
 
     #[cfg(not(all(target_os = "macos", feature = "macos-media-session")))]

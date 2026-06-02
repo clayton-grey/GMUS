@@ -20,20 +20,47 @@ pub struct ScanReport {
     pub errors: Vec<String>,
 }
 
-pub fn scan_path(conn: &Connection, paths: &AppPaths, root: &Path) -> Result<ScanReport> {
+pub fn add_library_root(
+    conn: &Connection,
+    paths: &AppPaths,
+    root: &Path,
+) -> Result<(PathBuf, ScanReport)> {
     let root = canonical_root(root)?;
-    let mut report = ScanReport::default();
-    scan_inner(conn, paths, &root, &mut report)?;
-    Ok(report)
+    let report = scan_canonical_path(conn, paths, &root)?;
+    db::upsert_library_root(conn, &root)?;
+    db::mark_library_root_scanned(conn, &root)?;
+    Ok((root, report))
+}
+
+pub fn update_library_root(
+    conn: &Connection,
+    paths: &AppPaths,
+    root: &Path,
+) -> Result<(PathBuf, ScanReport)> {
+    let root = canonical_root(root)?;
+    let report = rescan_canonical_path(conn, paths, &root)?;
+    db::upsert_library_root(conn, &root)?;
+    db::mark_library_root_scanned(conn, &root)?;
+    Ok((root, report))
 }
 
 pub fn rescan_path(conn: &Connection, paths: &AppPaths, root: &Path) -> Result<ScanReport> {
     let root = canonical_root(root)?;
+    rescan_canonical_path(conn, paths, &root)
+}
+
+fn scan_canonical_path(conn: &Connection, paths: &AppPaths, root: &Path) -> Result<ScanReport> {
+    let mut report = ScanReport::default();
+    scan_inner(conn, paths, root, &mut report)?;
+    Ok(report)
+}
+
+fn rescan_canonical_path(conn: &Connection, paths: &AppPaths, root: &Path) -> Result<ScanReport> {
     let mut report = ScanReport {
-        files_marked_missing: db::mark_locations_missing_under_root(conn, &root)?,
+        files_marked_missing: db::mark_locations_missing_under_root(conn, root)?,
         ..ScanReport::default()
     };
-    scan_inner(conn, paths, &root, &mut report)?;
+    scan_inner(conn, paths, root, &mut report)?;
     report.duplicate_tracks_merged = db::merge_similar_media_items(conn)?;
     Ok(report)
 }

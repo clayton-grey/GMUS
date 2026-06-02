@@ -388,7 +388,8 @@ pub fn add_tracks_to_playlist(
     playlist_id: i64,
     media_item_ids: &[i64],
 ) -> Result<usize> {
-    let mut position = conn.query_row(
+    let tx = conn.unchecked_transaction()?;
+    let mut position = tx.query_row(
         "SELECT COALESCE(MAX(position) + 1, 0) FROM playlist_tracks WHERE playlist_id = ?1",
         params![playlist_id],
         |row| row.get::<_, i64>(0),
@@ -396,7 +397,7 @@ pub fn add_tracks_to_playlist(
     let now = now_unix();
     let mut added = 0;
     for media_item_id in media_item_ids {
-        let changed = conn.execute(
+        let changed = tx.execute(
             r#"
             INSERT INTO playlist_tracks (
                 playlist_id, media_item_id, position, added_at
@@ -409,7 +410,8 @@ pub fn add_tracks_to_playlist(
             added += 1;
         }
     }
-    touch_playlist(conn, playlist_id)?;
+    touch_playlist(&tx, playlist_id)?;
+    tx.commit()?;
     Ok(added)
 }
 
@@ -418,17 +420,19 @@ pub fn remove_tracks_from_playlist(
     playlist_id: i64,
     media_item_ids: &[i64],
 ) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
     let mut removed = 0;
     for media_item_id in unique_media_item_ids(media_item_ids) {
-        removed += conn.execute(
+        removed += tx.execute(
             "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND media_item_id = ?2",
             params![playlist_id, media_item_id],
         )?;
     }
     if removed > 0 {
-        compact_playlist_positions(conn, playlist_id)?;
-        touch_playlist(conn, playlist_id)?;
+        compact_playlist_positions(&tx, playlist_id)?;
+        touch_playlist(&tx, playlist_id)?;
     }
+    tx.commit()?;
     Ok(removed)
 }
 
@@ -437,9 +441,10 @@ pub fn remove_latest_tracks_from_playlist(
     playlist_id: i64,
     media_item_ids: &[i64],
 ) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
     let mut removed = 0;
     for media_item_id in media_item_ids {
-        let entry_id = conn
+        let entry_id = tx
             .query_row(
                 r#"
                 SELECT id
@@ -453,16 +458,17 @@ pub fn remove_latest_tracks_from_playlist(
             )
             .optional()?;
         if let Some(entry_id) = entry_id {
-            removed += conn.execute(
+            removed += tx.execute(
                 "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND id = ?2",
                 params![playlist_id, entry_id],
             )?;
         }
     }
     if removed > 0 {
-        compact_playlist_positions(conn, playlist_id)?;
-        touch_playlist(conn, playlist_id)?;
+        compact_playlist_positions(&tx, playlist_id)?;
+        touch_playlist(&tx, playlist_id)?;
     }
+    tx.commit()?;
     Ok(removed)
 }
 
@@ -471,28 +477,32 @@ pub fn remove_playlist_track_entries(
     playlist_id: i64,
     playlist_track_ids: &[i64],
 ) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
     let mut removed = 0;
     for playlist_track_id in playlist_track_ids {
-        removed += conn.execute(
+        removed += tx.execute(
             "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND id = ?2",
             params![playlist_id, playlist_track_id],
         )?;
     }
     if removed > 0 {
-        compact_playlist_positions(conn, playlist_id)?;
-        touch_playlist(conn, playlist_id)?;
+        compact_playlist_positions(&tx, playlist_id)?;
+        touch_playlist(&tx, playlist_id)?;
     }
+    tx.commit()?;
     Ok(removed)
 }
 
 pub fn clear_playlist(conn: &Connection, playlist_id: i64) -> Result<usize> {
-    let removed = conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    let removed = tx.execute(
         "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
         params![playlist_id],
     )?;
     if removed > 0 {
-        touch_playlist(conn, playlist_id)?;
+        touch_playlist(&tx, playlist_id)?;
     }
+    tx.commit()?;
     Ok(removed)
 }
 
@@ -590,10 +600,11 @@ fn playlist_track_entry_ids(conn: &Connection, playlist_id: i64) -> Result<Vec<i
 }
 
 pub fn upsert_track(conn: &Connection, track: &TrackMetadata) -> Result<StoredTrack> {
+    let tx = conn.unchecked_transaction()?;
     let now = now_unix();
     let fingerprint = track.fingerprint();
 
-    conn.execute(
+    tx.execute(
         r#"
         INSERT INTO media_items (
             fingerprint, title, artist, album, album_artist, album_year, release_date,
@@ -637,14 +648,14 @@ pub fn upsert_track(conn: &Connection, track: &TrackMetadata) -> Result<StoredTr
         ],
     )?;
 
-    let media_item_id: i64 = conn.query_row(
+    let media_item_id: i64 = tx.query_row(
         "SELECT id FROM media_items WHERE fingerprint = ?1",
         params![fingerprint],
         |row| row.get(0),
     )?;
 
     let path = track.path.to_string_lossy();
-    conn.execute(
+    tx.execute(
         r#"
         INSERT INTO locations (
             media_item_id, path, file_size, modified_at, seen_at, missing
@@ -659,13 +670,13 @@ pub fn upsert_track(conn: &Connection, track: &TrackMetadata) -> Result<StoredTr
         params![media_item_id, path, track.file_size, track.modified_at, now],
     )?;
 
-    let location_id: i64 = conn.query_row(
+    let location_id: i64 = tx.query_row(
         "SELECT id FROM locations WHERE path = ?1",
         params![path],
         |row| row.get(0),
     )?;
 
-    conn.execute(
+    tx.execute(
         r#"
         INSERT INTO media_stats (media_item_id)
         VALUES (?1)
@@ -674,6 +685,7 @@ pub fn upsert_track(conn: &Connection, track: &TrackMetadata) -> Result<StoredTr
         params![media_item_id],
     )?;
 
+    tx.commit()?;
     Ok(StoredTrack {
         media_item_id,
         location_id,
@@ -682,81 +694,79 @@ pub fn upsert_track(conn: &Connection, track: &TrackMetadata) -> Result<StoredTr
 
 pub fn mark_locations_missing_under_root(conn: &Connection, root: &Path) -> Result<usize> {
     let root = root.to_string_lossy();
-    conn.execute(
+    let sql = format!(
         r#"
         UPDATE locations
         SET missing = 1
         WHERE missing = 0
-            AND (
-                path = ?1
-                OR ?1 = '/'
-                OR substr(path, 1, length(?1) + 1) = ?1 || '/'
-            )
+            AND {}
         "#,
-        params![root],
-    )
-    .map_err(Into::into)
+        path_matches_root_sql("path", "?1")
+    );
+    conn.execute(&sql, params![root]).map_err(Into::into)
 }
 
 pub fn merge_similar_media_items(conn: &Connection) -> Result<usize> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT
-            id,
-            title,
-            artist,
-            album,
-            album_artist,
-            track_number,
-            disc_number,
-            duration_ms,
-            updated_at,
-            COALESCE(
-                (
-                    SELECT library_roots.path
-                    FROM locations
-                    JOIN library_roots
-                        ON locations.path = library_roots.path
-                        OR library_roots.path = '/'
-                        OR substr(locations.path, 1, length(library_roots.path) + 1) =
-                            library_roots.path || '/'
-                    WHERE locations.media_item_id = media_items.id
-                    ORDER BY locations.missing ASC, length(library_roots.path) DESC
-                    LIMIT 1
-                ),
-                ''
-            ),
-            (
-                SELECT COUNT(*)
-                FROM locations
-                WHERE locations.media_item_id = media_items.id
-                    AND locations.missing = 0
-            )
-        FROM media_items
-        ORDER BY id
-        "#,
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(MergeCandidate {
-            id: row.get(0)?,
-            title: row.get(1)?,
-            artist: row.get(2)?,
-            album: row.get(3)?,
-            album_artist: row.get(4)?,
-            track_number: row.get(5)?,
-            disc_number: row.get(6)?,
-            duration_ms: row.get(7)?,
-            updated_at: row.get(8)?,
-            library_root: row.get(9)?,
-            present_locations: row.get(10)?,
-        })
-    })?;
-
+    let tx = conn.unchecked_transaction()?;
     let mut groups: HashMap<String, Vec<MergeCandidate>> = HashMap::new();
-    for row in rows {
-        let candidate = row?;
-        if let Some(key) = candidate.similarity_key() {
-            groups.entry(key).or_default().push(candidate);
+    {
+        let sql = format!(
+            r#"
+            SELECT
+                id,
+                title,
+                artist,
+                album,
+                album_artist,
+                track_number,
+                disc_number,
+                duration_ms,
+                updated_at,
+                COALESCE(
+                    (
+                        SELECT library_roots.path
+                        FROM locations
+                        JOIN library_roots
+                            ON {}
+                        WHERE locations.media_item_id = media_items.id
+                        ORDER BY locations.missing ASC, length(library_roots.path) DESC
+                        LIMIT 1
+                    ),
+                    ''
+                ),
+                (
+                    SELECT COUNT(*)
+                    FROM locations
+                    WHERE locations.media_item_id = media_items.id
+                        AND locations.missing = 0
+                )
+            FROM media_items
+            ORDER BY id
+            "#,
+            path_matches_root_sql("locations.path", "library_roots.path")
+        );
+        let mut stmt = tx.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok(MergeCandidate {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                artist: row.get(2)?,
+                album: row.get(3)?,
+                album_artist: row.get(4)?,
+                track_number: row.get(5)?,
+                disc_number: row.get(6)?,
+                duration_ms: row.get(7)?,
+                updated_at: row.get(8)?,
+                library_root: row.get(9)?,
+                present_locations: row.get(10)?,
+            })
+        })?;
+
+        for row in rows {
+            let candidate = row?;
+            if let Some(key) = candidate.similarity_key() {
+                groups.entry(key).or_default().push(candidate);
+            }
         }
     }
 
@@ -774,10 +784,11 @@ pub fn merge_similar_media_items(conn: &Connection) -> Result<usize> {
         });
         let canonical_id = candidates[0].id;
         for duplicate in candidates.into_iter().skip(1) {
-            merge_media_item(conn, canonical_id, duplicate.id)?;
+            merge_media_item(&tx, canonical_id, duplicate.id)?;
             merged += 1;
         }
     }
+    tx.commit()?;
     Ok(merged)
 }
 
@@ -920,9 +931,10 @@ pub fn record_play(
     duration_ms: i64,
     completed: bool,
 ) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
     let now = now_unix();
     let completed_i64 = i64::from(completed);
-    conn.execute(
+    tx.execute(
         r#"
         INSERT INTO play_events (
             media_item_id, location_id, played_at, duration_ms, completed
@@ -937,7 +949,7 @@ pub fn record_play(
         ],
     )?;
 
-    conn.execute(
+    tx.execute(
         r#"
         INSERT INTO media_stats (
             media_item_id, play_count, last_played_at, total_play_ms
@@ -956,6 +968,7 @@ pub fn record_play(
         ],
     )?;
 
+    tx.commit()?;
     Ok(())
 }
 
@@ -981,7 +994,9 @@ pub fn stats(conn: &Connection) -> Result<DbStats> {
 }
 
 pub fn library_tracks(conn: &Connection) -> Result<Vec<LibraryTrack>> {
-    let mut stmt = conn.prepare(
+    let active_root_matches_location =
+        path_matches_root_sql("locations.path", "library_roots.path");
+    let sql = format!(
         r#"
         WITH visible_tracks AS (
         SELECT
@@ -1007,12 +1022,7 @@ pub fn library_tracks(conn: &Connection) -> Result<Vec<LibraryTrack>> {
                 SELECT library_roots.path
                 FROM library_roots
                 WHERE library_roots.active = 1
-                    AND (
-                        locations.path = library_roots.path
-                        OR library_roots.path = '/'
-                        OR substr(locations.path, 1, length(library_roots.path) + 1) =
-                            library_roots.path || '/'
-                    )
+                    AND {active_root_matches_location}
                 ORDER BY length(library_roots.path) DESC
                 LIMIT 1
             ) AS library_root,
@@ -1029,12 +1039,7 @@ pub fn library_tracks(conn: &Connection) -> Result<Vec<LibraryTrack>> {
                     SELECT 1
                     FROM library_roots
                     WHERE library_roots.active = 1
-                        AND (
-                            locations.path = library_roots.path
-                            OR library_roots.path = '/'
-                            OR substr(locations.path, 1, length(library_roots.path) + 1) =
-                                library_roots.path || '/'
-                        )
+                        AND {active_root_matches_location}
                 )
             )
         )
@@ -1069,7 +1074,8 @@ pub fn library_tracks(conn: &Connection) -> Result<Vec<LibraryTrack>> {
             COALESCE(track_number, 0),
             COALESCE(title, path)
         "#,
-    )?;
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
     let rows = stmt.query_map([], |row| {
         Ok(LibraryTrack {
@@ -1119,6 +1125,12 @@ fn count(conn: &Connection, table: &str) -> Result<i64> {
         .map_err(Into::into)
 }
 
+fn path_matches_root_sql(path: &str, root: &str) -> String {
+    format!(
+        "({path} = {root} OR {root} = '/' OR substr({path}, 1, length({root}) + 1) = {root} || '/')"
+    )
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1153,7 +1165,6 @@ mod tests {
             disc_total: None,
             duration_ms: Some(120_000),
             compilation: false,
-            embedded_art: None,
         };
 
         let stored = upsert_track(&conn, &track).unwrap();
@@ -1200,7 +1211,6 @@ mod tests {
             disc_total: None,
             duration_ms: Some(120_000),
             compilation: false,
-            embedded_art: None,
         };
         let older = TrackMetadata {
             path: "/tmp/zulu.flac".into(),
@@ -1220,7 +1230,6 @@ mod tests {
             disc_total: None,
             duration_ms: Some(120_000),
             compilation: false,
-            embedded_art: None,
         };
 
         upsert_track(&conn, &newer).unwrap();
@@ -1318,7 +1327,6 @@ mod tests {
             disc_total: None,
             duration_ms: Some(120_000),
             compilation: false,
-            embedded_art: None,
         };
         let outside_root = TrackMetadata {
             path: "/tmp/other/song.flac".into(),
@@ -1338,7 +1346,6 @@ mod tests {
             disc_total: None,
             duration_ms: Some(120_000),
             compilation: false,
-            embedded_art: None,
         };
         let stored = upsert_track(&conn, &in_root).unwrap();
         upsert_track(&conn, &outside_root).unwrap();
@@ -1504,6 +1511,25 @@ mod tests {
     }
 
     #[test]
+    fn filesystem_root_matches_all_library_locations() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let track = test_track_metadata("/tmp/music/album/song.flac", "Nested Track", 1, 120_000);
+
+        upsert_track(&conn, &track).unwrap();
+        upsert_library_root(&conn, Path::new("/")).unwrap();
+
+        let tracks = library_tracks(&conn).unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].library_root.as_deref(), Some("/"));
+
+        let marked = mark_locations_missing_under_root(&conn, Path::new("/")).unwrap();
+
+        assert_eq!(marked, 1);
+        assert!(library_tracks(&conn).unwrap().is_empty());
+    }
+
+    #[test]
     fn merge_similar_media_items_combines_play_counts_for_renamed_tracks() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
@@ -1558,7 +1584,6 @@ mod tests {
             disc_total: None,
             duration_ms: Some(duration_ms),
             compilation: false,
-            embedded_art: None,
         }
     }
 }

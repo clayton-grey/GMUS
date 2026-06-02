@@ -10,7 +10,7 @@ mod tui;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(name = "gmus")]
@@ -46,7 +46,14 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         duration_ms: i64,
         /// Whether playback crossed the configured play-count threshold.
-        #[arg(long, default_value_t = true)]
+        #[arg(
+            long,
+            default_value_t = true,
+            action = ArgAction::Set,
+            num_args = 0..=1,
+            default_missing_value = "true",
+            value_name = "BOOL"
+        )]
         completed: bool,
     },
     /// Play one file through the default lightweight backend.
@@ -69,10 +76,7 @@ fn main() -> Result<()> {
 
     match cli.command.unwrap_or(Command::Tui { path: None }) {
         Command::Scan { path } => {
-            let root = scanner::canonical_root(&path)?;
-            let report = scanner::scan_path(&conn, &paths, &root)?;
-            db::upsert_library_root(&conn, &root)?;
-            db::mark_library_root_scanned(&conn, &root)?;
+            let (_root, report) = scanner::add_library_root(&conn, &paths, &path)?;
             println!(
                 "scanned {} files, stored {} tracks, cached {} covers, skipped {} files",
                 report.files_seen, report.tracks_stored, report.art_cached, report.files_skipped
@@ -134,8 +138,7 @@ fn main() -> Result<()> {
             }
 
             let mut player = player::default_player_backend()?;
-            player.load(&path)?;
-            player.play()?;
+            player.load_and_play(&path)?;
             player.sleep_until_end();
 
             let mut played_ms = player.position().as_millis() as i64;
@@ -160,10 +163,7 @@ fn main() -> Result<()> {
         }
         Command::Tui { path } => {
             if let Some(path) = path {
-                let root = scanner::canonical_root(&path)?;
-                let report = scanner::scan_path(&conn, &paths, &root)?;
-                db::upsert_library_root(&conn, &root)?;
-                db::mark_library_root_scanned(&conn, &root)?;
+                let (_root, report) = scanner::add_library_root(&conn, &paths, &path)?;
                 eprintln!(
                     "scanned {} files, stored {} tracks, cached {} covers, skipped {} files",
                     report.files_seen,
@@ -177,4 +177,22 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Command};
+    use clap::Parser;
+
+    #[test]
+    fn record_play_accepts_explicit_incomplete_status() {
+        let cli =
+            Cli::try_parse_from(["gmus", "record-play", "/tmp/song.flac", "--completed=false"])
+                .unwrap();
+
+        let Some(Command::RecordPlay { completed, .. }) = cli.command else {
+            panic!("expected record-play command");
+        };
+        assert!(!completed);
+    }
 }

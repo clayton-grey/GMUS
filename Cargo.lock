@@ -742,7 +742,6 @@ dependencies = [
  "sha2",
  "souvlaki",
  "tempfile",
- "thiserror 2.0.18",
  "unicode-width",
 ]
 
