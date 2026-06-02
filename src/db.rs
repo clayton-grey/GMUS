@@ -6,6 +6,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::media::TrackMetadata;
 
+const SCHEMA_VERSION: i64 = 1;
+
 #[derive(Debug, Clone, Copy)]
 pub struct StoredTrack {
     pub media_item_id: i64,
@@ -95,6 +97,26 @@ pub fn open(path: &Path) -> Result<Connection> {
 }
 
 fn migrate(conn: &Connection) -> Result<()> {
+    let version = user_version(conn)?;
+    if version > SCHEMA_VERSION {
+        anyhow::bail!(
+            "database schema version {version} is newer than this GMUS build supports ({SCHEMA_VERSION})"
+        );
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    migrate_v1(&tx)?;
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn user_version(conn: &Connection) -> Result<i64> {
+    conn.pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(Into::into)
+}
+
+fn migrate_v1(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS media_items (
@@ -1181,6 +1203,26 @@ fn now_unix() -> i64 {
 mod tests {
     use super::*;
     use crate::media::TrackMetadata;
+
+    #[test]
+    fn migrate_sets_schema_user_version() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        migrate(&conn).unwrap();
+
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_rejects_newer_schema_version() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
+
+        let error = migrate(&conn).unwrap_err();
+
+        assert!(error.to_string().contains("newer than this GMUS build"));
+    }
 
     #[test]
     fn records_completed_play_without_library_membership() {
