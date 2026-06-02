@@ -38,9 +38,9 @@ such as ALSA headers. The CI workflow installs `libasound2-dev` and
 ```sh
 cargo fmt --check
 cargo test --all-targets
-cargo check --no-default-features --all-targets
-cargo check --all-targets --features bundled-sqlite
-cargo check --all-targets --all-features
+cargo test --no-default-features --all-targets
+cargo test --all-targets --features bundled-sqlite
+cargo test --all-targets --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
