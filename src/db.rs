@@ -883,6 +883,10 @@ fn merge_media_item(conn: &Connection, canonical_id: i64, duplicate_id: i64) -> 
         params![canonical_id, duplicate_id],
     )?;
     conn.execute(
+        "UPDATE playlist_tracks SET media_item_id = ?1 WHERE media_item_id = ?2",
+        params![canonical_id, duplicate_id],
+    )?;
+    conn.execute(
         "DELETE FROM media_stats WHERE media_item_id = ?1",
         params![duplicate_id],
     )?;
@@ -1558,6 +1562,30 @@ mod tests {
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].path, "/tmp/music/right-name.flac");
         assert_eq!(tracks[0].play_count, 1);
+    }
+
+    #[test]
+    fn merge_similar_media_items_preserves_playlist_entries() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let old = test_track_metadata("/tmp/music/wrong-name.flac", "Same Track", 1, 120_000);
+        let mut renamed =
+            test_track_metadata("/tmp/music/right-name.flac", "Same Track", 1, 121_000);
+        renamed.modified_at = Some(2);
+
+        let old_stored = upsert_track(&conn, &old).unwrap();
+        let playlist = create_playlist(&conn, "Mix").unwrap();
+        add_tracks_to_playlist(&conn, playlist.id, &[old_stored.media_item_id]).unwrap();
+        mark_locations_missing_under_root(&conn, Path::new("/tmp/music")).unwrap();
+        let renamed_stored = upsert_track(&conn, &renamed).unwrap();
+
+        let merged = merge_similar_media_items(&conn).unwrap();
+
+        assert_eq!(merged, 1);
+        assert_eq!(
+            playlist_track_ids(&conn, playlist.id).unwrap(),
+            vec![renamed_stored.media_item_id]
+        );
     }
 
     fn test_track_metadata(
