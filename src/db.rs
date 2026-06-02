@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -692,7 +692,34 @@ pub fn upsert_track(conn: &Connection, track: &TrackMetadata) -> Result<StoredTr
     })
 }
 
+#[cfg(test)]
 pub fn mark_locations_missing_under_root(conn: &Connection, root: &Path) -> Result<usize> {
+    mark_locations_missing_under_root_except(conn, root, &[])
+}
+
+pub fn mark_locations_missing_under_root_except(
+    conn: &Connection,
+    root: &Path,
+    seen_paths: &[PathBuf],
+) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
+        r#"
+        CREATE TEMP TABLE IF NOT EXISTS gmus_scan_seen_paths (
+            path TEXT PRIMARY KEY
+        );
+        DELETE FROM gmus_scan_seen_paths;
+        "#,
+    )?;
+
+    {
+        let mut stmt =
+            tx.prepare("INSERT OR IGNORE INTO gmus_scan_seen_paths (path) VALUES (?1)")?;
+        for path in seen_paths {
+            stmt.execute(params![path.to_string_lossy()])?;
+        }
+    }
+
     let root = root.to_string_lossy();
     let sql = format!(
         r#"
@@ -700,10 +727,18 @@ pub fn mark_locations_missing_under_root(conn: &Connection, root: &Path) -> Resu
         SET missing = 1
         WHERE missing = 0
             AND {}
+            AND NOT EXISTS (
+                SELECT 1
+                FROM gmus_scan_seen_paths
+                WHERE gmus_scan_seen_paths.path = locations.path
+            )
         "#,
         path_matches_root_sql("path", "?1")
     );
-    conn.execute(&sql, params![root]).map_err(Into::into)
+    let marked = tx.execute(&sql, params![root])?;
+    tx.execute("DELETE FROM gmus_scan_seen_paths", [])?;
+    tx.commit()?;
+    Ok(marked)
 }
 
 pub fn merge_similar_media_items(conn: &Connection) -> Result<usize> {
