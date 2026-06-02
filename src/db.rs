@@ -677,6 +677,10 @@ pub fn upsert_track(conn: &Connection, track: &TrackMetadata) -> Result<StoredTr
     )?;
 
     let path = track.path.to_string_lossy();
+    if let Some(existing_media_item_id) = media_item_id_for_path(&tx, &path)? {
+        merge_media_item(&tx, media_item_id, existing_media_item_id)?;
+    }
+
     tx.execute(
         r#"
         INSERT INTO locations (
@@ -712,6 +716,16 @@ pub fn upsert_track(conn: &Connection, track: &TrackMetadata) -> Result<StoredTr
         media_item_id,
         location_id,
     })
+}
+
+fn media_item_id_for_path(conn: &Connection, path: &str) -> Result<Option<i64>> {
+    conn.query_row(
+        "SELECT media_item_id FROM locations WHERE path = ?1",
+        params![path],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -1662,6 +1676,43 @@ mod tests {
         assert_eq!(
             playlist_track_ids(&conn, playlist.id).unwrap(),
             vec![renamed_stored.media_item_id]
+        );
+    }
+
+    #[test]
+    fn upsert_track_preserves_history_when_same_path_fingerprint_changes() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let original = test_track_metadata("/tmp/music/song.flac", "Same Track", 1, 120_000);
+        let mut retagged = original.clone();
+        retagged.duration_ms = Some(125_000);
+        retagged.modified_at = Some(2);
+
+        let original_stored = upsert_track(&conn, &original).unwrap();
+        let playlist = create_playlist(&conn, "Mix").unwrap();
+        add_tracks_to_playlist(&conn, playlist.id, &[original_stored.media_item_id]).unwrap();
+        record_play(
+            &conn,
+            original_stored.media_item_id,
+            original_stored.location_id,
+            120_000,
+            true,
+        )
+        .unwrap();
+
+        let retagged_stored = upsert_track(&conn, &retagged).unwrap();
+        let tracks = library_tracks(&conn).unwrap();
+
+        assert_ne!(original_stored.media_item_id, retagged_stored.media_item_id);
+        assert_eq!(stats(&conn).unwrap().media_items, 1);
+        assert_eq!(stats(&conn).unwrap().completed_plays, 1);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].media_item_id, retagged_stored.media_item_id);
+        assert_eq!(tracks[0].duration_ms, Some(125_000));
+        assert_eq!(tracks[0].play_count, 1);
+        assert_eq!(
+            playlist_track_ids(&conn, playlist.id).unwrap(),
+            vec![retagged_stored.media_item_id]
         );
     }
 
