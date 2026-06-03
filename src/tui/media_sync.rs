@@ -35,7 +35,7 @@ impl App {
         Ok(handled)
     }
 
-    pub(super) fn publish_now_playing(&mut self) {
+    pub(super) fn publish_track_changed(&mut self) {
         let Some(current) = &self.current else {
             return;
         };

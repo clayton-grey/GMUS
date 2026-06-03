@@ -308,7 +308,7 @@ impl App {
                     last_position_ms: 0,
                     listened_ms: 0,
                 });
-                self.publish_now_playing();
+                self.publish_track_changed();
                 self.sync_integration_playback(true);
             }
             Err(error) => {

@@ -2722,7 +2722,7 @@ fn repeated_integration_failures_do_not_keep_overwriting_messages() {
         listened_ms: 0,
     });
 
-    app.publish_now_playing();
+    app.publish_track_changed();
     assert!(app.message.contains("media metadata unavailable"));
 
     app.message = String::from("normal playback message");
@@ -2748,7 +2748,7 @@ fn track_changed_event_uses_owned_track_snapshot() {
         listened_ms: 0,
     });
 
-    app.publish_now_playing();
+    app.publish_track_changed();
 
     assert_eq!(
         events.borrow().as_slice(),
