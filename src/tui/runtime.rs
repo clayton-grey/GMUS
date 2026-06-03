@@ -44,8 +44,8 @@ fn run_loop(
     loop {
         if Instant::now() >= next_tick {
             needs_draw |= app.expire_transient_status();
-            app.media_session.tick();
-            needs_draw |= app.handle_media_commands(conn)?;
+            app.integration.tick();
+            needs_draw |= app.handle_integration_commands(conn)?;
             needs_draw |= app.update_playback(conn)?;
 
             if app.current.is_some() {

@@ -1,5 +1,7 @@
+use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -23,7 +25,9 @@ use super::lines::{
 use super::mouse::{mouse_pane, MouseLayout};
 use super::renderer::{render, render_playlist_info_pane};
 use super::*;
-use crate::media_session::{MediaCommand, NoopMediaSession, NowPlaying};
+use crate::integration::{
+    Integration, IntegrationCommand, IntegrationEvent, NoopIntegration, NowPlaying,
+};
 use crate::player::NullPlayer;
 
 #[test]
@@ -2707,9 +2711,9 @@ fn relative_seek_while_paused_uses_suspended_position() {
 }
 
 #[test]
-fn repeated_media_session_failures_do_not_keep_overwriting_messages() {
+fn repeated_integration_failures_do_not_keep_overwriting_messages() {
     let mut app = test_app(vec![test_track(1, "first track")]);
-    app.media_session = Box::new(FailingMediaSession);
+    app.integration = Box::new(FailingIntegration);
     app.current = Some(PlayingTrack {
         index: 0,
         source: None,
@@ -2722,9 +2726,40 @@ fn repeated_media_session_failures_do_not_keep_overwriting_messages() {
     assert!(app.message.contains("media metadata unavailable"));
 
     app.message = String::from("normal playback message");
-    app.sync_media_playback(true);
+    app.sync_integration_playback(true);
 
     assert_eq!(app.message, "normal playback message");
+}
+
+#[test]
+fn now_playing_event_uses_owned_track_snapshot() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut track = test_track(1, "first track");
+    track.cover_path = Some(String::from("/tmp/cover.jpg"));
+    let mut app = test_app(vec![track]);
+    app.integration = Box::new(RecordingIntegration {
+        events: Rc::clone(&events),
+    });
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: app.tracks[0].clone(),
+        last_position_ms: 0,
+        listened_ms: 0,
+    });
+
+    app.publish_now_playing();
+
+    assert_eq!(
+        events.borrow().as_slice(),
+        &[IntegrationEvent::NowPlaying(NowPlaying {
+            title: Some(String::from("first track")),
+            artist: Some(String::from("Artist")),
+            album: Some(String::from("Album")),
+            duration_ms: Some(100_000),
+            artwork_path: Some(PathBuf::from("/tmp/cover.jpg")),
+        })]
+    );
 }
 
 fn test_app(tracks: Vec<LibraryTrack>) -> App {
@@ -2768,12 +2803,12 @@ fn test_app(tracks: Vec<LibraryTrack>) -> App {
         shuffle_scope: Vec::new(),
         shuffle_order: Vec::new(),
         player: Box::new(NullPlayer::default()),
-        media_session: Box::new(NoopMediaSession),
+        integration: Box::new(NoopIntegration),
         current: None,
         suspended_position_ms: None,
-        last_media_state: None,
-        last_media_position_s: None,
-        media_session_error_reported: false,
+        last_integration_state: None,
+        last_integration_position_s: None,
+        integration_error_reported: false,
         transient_status: None,
         message: String::new(),
     };
@@ -2920,18 +2955,29 @@ impl PlayerBackend for FailingSeekPlayer {
     }
 }
 
-struct FailingMediaSession;
+struct FailingIntegration;
 
-impl MediaSession for FailingMediaSession {
-    fn next_command(&mut self) -> Option<MediaCommand> {
+impl Integration for FailingIntegration {
+    fn next_command(&mut self) -> Option<IntegrationCommand> {
         None
     }
 
-    fn set_now_playing(&mut self, _now_playing: &NowPlaying<'_>) -> Result<()> {
-        anyhow::bail!("media session unavailable")
+    fn publish_event(&mut self, _event: &IntegrationEvent) -> Result<()> {
+        anyhow::bail!("integration unavailable")
+    }
+}
+
+struct RecordingIntegration {
+    events: Rc<RefCell<Vec<IntegrationEvent>>>,
+}
+
+impl Integration for RecordingIntegration {
+    fn next_command(&mut self) -> Option<IntegrationCommand> {
+        None
     }
 
-    fn set_playback_state(&mut self, _state: PlaybackState, _position_ms: i64) -> Result<()> {
-        anyhow::bail!("media session unavailable")
+    fn publish_event(&mut self, event: &IntegrationEvent) -> Result<()> {
+        self.events.borrow_mut().push(event.clone());
+        Ok(())
     }
 }

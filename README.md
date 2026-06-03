@@ -9,7 +9,7 @@ The initial implementation focuses on the foundation:
 - Tag scanning with `lofty`.
 - Cover-art discovery from embedded tags and folder images.
 - A small Ratatui shell that gives the application a real terminal surface.
-- Thin traits for playback and OS media-session integrations.
+- Thin traits for playback and OS integrations.
 
 ## Install And Build
 
@@ -139,10 +139,13 @@ Most playlist commands also have short aliases in the TUI command bar: `:pl`,
 `Esc` closes command output before falling through to filter clearing. Normal
 navigation/actions also return the info pane to selected-track metadata.
 
-On macOS, the default build also publishes Now Playing metadata and listens for
-system media-control events through `souvlaki`. The macOS backend also pumps a
-small AppKit event loop from the TUI loop; this is required for reliable media
-key callbacks in terminal apps without opening a visible window.
+The TUI publishes owned integration events for track metadata and playback
+state, and consumes integration commands such as play, pause, next, previous,
+and seek. On macOS, the default integration backend publishes Now Playing
+metadata and listens for system media-control events through `souvlaki`. The
+macOS backend also pumps a small AppKit event loop from the TUI loop; this is
+required for reliable media key callbacks in terminal apps without opening a
+visible window.
 
 Cover art is still extracted and cached for macOS Now Playing metadata. In-terminal
 art display is intentionally deferred to a future companion/widget or

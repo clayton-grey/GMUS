@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::PathBuf;
 #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
 use std::sync::mpsc::{self, Receiver};
 #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
@@ -9,18 +9,32 @@ use anyhow::Result;
 use crate::player::PlaybackState;
 
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct NowPlaying<'a> {
-    pub title: Option<&'a str>,
-    pub artist: Option<&'a str>,
-    pub album: Option<&'a str>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowPlaying {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
     pub duration_ms: Option<i64>,
-    pub artwork_path: Option<&'a Path>,
+    pub artwork_path: Option<PathBuf>,
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub enum MediaCommand {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaybackSnapshot {
+    pub state: PlaybackState,
+    pub position_ms: i64,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntegrationEvent {
+    NowPlaying(NowPlaying),
+    Playback(PlaybackSnapshot),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegrationCommand {
     Play,
     Pause,
     Toggle,
@@ -31,39 +45,34 @@ pub enum MediaCommand {
 }
 
 #[allow(dead_code)]
-pub trait MediaSession {
+pub trait Integration {
     fn tick(&mut self) {}
-    fn next_command(&mut self) -> Option<MediaCommand>;
-    fn set_now_playing(&mut self, now_playing: &NowPlaying<'_>) -> Result<()>;
-    fn set_playback_state(&mut self, state: PlaybackState, position_ms: i64) -> Result<()>;
+    fn next_command(&mut self) -> Option<IntegrationCommand>;
+    fn publish_event(&mut self, event: &IntegrationEvent) -> Result<()>;
 }
 
-pub fn default_media_session() -> Box<dyn MediaSession> {
+pub fn default_integration() -> Box<dyn Integration> {
     #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
     {
-        Box::<macos::LazyMacMediaSession>::default()
+        Box::<macos::LazyMacIntegration>::default()
     }
 
     #[cfg(not(all(target_os = "macos", feature = "macos-media-session")))]
     {
-        Box::new(NoopMediaSession)
+        Box::new(NoopIntegration)
     }
 }
 
 #[allow(dead_code)]
 #[derive(Debug, Default)]
-pub struct NoopMediaSession;
+pub struct NoopIntegration;
 
-impl MediaSession for NoopMediaSession {
-    fn next_command(&mut self) -> Option<MediaCommand> {
+impl Integration for NoopIntegration {
+    fn next_command(&mut self) -> Option<IntegrationCommand> {
         None
     }
 
-    fn set_now_playing(&mut self, _now_playing: &NowPlaying<'_>) -> Result<()> {
-        Ok(())
-    }
-
-    fn set_playback_state(&mut self, _state: PlaybackState, _position_ms: i64) -> Result<()> {
+    fn publish_event(&mut self, _event: &IntegrationEvent) -> Result<()> {
         Ok(())
     }
 }
@@ -74,7 +83,10 @@ pub mod macos {
     use anyhow::Result;
 
     #[cfg(feature = "macos-media-session")]
-    use super::{mpsc, Duration, MediaCommand, MediaSession, NowPlaying, PlaybackState, Receiver};
+    use super::{
+        mpsc, Duration, Integration, IntegrationCommand, IntegrationEvent, NowPlaying,
+        PlaybackSnapshot, PlaybackState, Receiver,
+    };
 
     #[cfg(feature = "macos-media-session")]
     use cocoa::appkit::{
@@ -87,17 +99,17 @@ pub mod macos {
 
     #[cfg(feature = "macos-media-session")]
     #[derive(Default)]
-    pub struct LazyMacMediaSession {
-        inner: Option<MacMediaSession>,
+    pub struct LazyMacIntegration {
+        inner: Option<MacIntegration>,
         unavailable: bool,
     }
 
     #[cfg(feature = "macos-media-session")]
-    impl LazyMacMediaSession {
-        fn inner_mut(&mut self) -> Result<&mut MacMediaSession> {
+    impl LazyMacIntegration {
+        fn inner_mut(&mut self) -> Result<&mut MacIntegration> {
             if self.inner.is_none() && !self.unavailable {
-                match MacMediaSession::new() {
-                    Ok(session) => self.inner = Some(session),
+                match MacIntegration::new() {
+                    Ok(integration) => self.inner = Some(integration),
                     Err(error) => {
                         self.unavailable = true;
                         return Err(error);
@@ -111,44 +123,46 @@ pub mod macos {
     }
 
     #[cfg(feature = "macos-media-session")]
-    impl MediaSession for LazyMacMediaSession {
+    impl Integration for LazyMacIntegration {
         fn tick(&mut self) {
             if let Some(inner) = &mut self.inner {
                 inner.tick();
             }
         }
 
-        fn next_command(&mut self) -> Option<MediaCommand> {
-            self.inner.as_mut().and_then(MediaSession::next_command)
+        fn next_command(&mut self) -> Option<IntegrationCommand> {
+            self.inner.as_mut().and_then(Integration::next_command)
         }
 
-        fn set_now_playing(&mut self, now_playing: &NowPlaying<'_>) -> Result<()> {
-            self.inner_mut()?.set_now_playing(now_playing)
-        }
-
-        fn set_playback_state(&mut self, state: PlaybackState, position_ms: i64) -> Result<()> {
-            if state == PlaybackState::Stopped {
+        fn publish_event(&mut self, event: &IntegrationEvent) -> Result<()> {
+            if matches!(
+                event,
+                IntegrationEvent::Playback(PlaybackSnapshot {
+                    state: PlaybackState::Stopped,
+                    ..
+                })
+            ) {
                 if let Some(inner) = &mut self.inner {
-                    inner.set_playback_state(state, position_ms)?;
+                    inner.publish_event(event)?;
                 }
                 self.inner = None;
                 return Ok(());
             }
 
-            self.inner_mut()?.set_playback_state(state, position_ms)
+            self.inner_mut()?.publish_event(event)
         }
     }
 
     #[cfg(feature = "macos-media-session")]
-    pub struct MacMediaSession {
+    pub struct MacIntegration {
         controls: souvlaki::MediaControls,
-        receiver: Receiver<MediaCommand>,
+        receiver: Receiver<IntegrationCommand>,
         appkit_pump: AppKitPump,
     }
 
     #[cfg(feature = "macos-media-session")]
     #[allow(dead_code)]
-    impl MacMediaSession {
+    impl MacIntegration {
         pub fn new() -> Result<Self> {
             let appkit_pump = AppKitPump::new();
             let (sender, receiver) = mpsc::channel();
@@ -172,21 +186,31 @@ pub mod macos {
     }
 
     #[cfg(feature = "macos-media-session")]
-    impl MediaSession for MacMediaSession {
+    impl Integration for MacIntegration {
         fn tick(&mut self) {
             self.appkit_pump.pump_pending_events();
         }
 
-        fn next_command(&mut self) -> Option<MediaCommand> {
+        fn next_command(&mut self) -> Option<IntegrationCommand> {
             self.receiver.try_recv().ok()
         }
 
-        fn set_now_playing(&mut self, now_playing: &NowPlaying<'_>) -> Result<()> {
-            let cover_url = now_playing.artwork_path.map(file_url);
+        fn publish_event(&mut self, event: &IntegrationEvent) -> Result<()> {
+            match event {
+                IntegrationEvent::NowPlaying(now_playing) => self.set_now_playing(now_playing),
+                IntegrationEvent::Playback(playback) => self.set_playback_state(*playback),
+            }
+        }
+    }
+
+    #[cfg(feature = "macos-media-session")]
+    impl MacIntegration {
+        fn set_now_playing(&mut self, now_playing: &NowPlaying) -> Result<()> {
+            let cover_url = now_playing.artwork_path.as_deref().map(file_url);
             self.controls.set_metadata(souvlaki::MediaMetadata {
-                title: now_playing.title,
-                album: now_playing.album,
-                artist: now_playing.artist,
+                title: now_playing.title.as_deref(),
+                album: now_playing.album.as_deref(),
+                artist: now_playing.artist.as_deref(),
                 cover_url: cover_url.as_deref(),
                 duration: now_playing
                     .duration_ms
@@ -196,11 +220,11 @@ pub mod macos {
             Ok(())
         }
 
-        fn set_playback_state(&mut self, state: PlaybackState, position_ms: i64) -> Result<()> {
+        fn set_playback_state(&mut self, playback: PlaybackSnapshot) -> Result<()> {
             let progress = Some(souvlaki::MediaPosition(Duration::from_millis(
-                position_ms.max(0) as u64,
+                playback.position_ms.max(0) as u64,
             )));
-            let playback = match state {
+            let playback = match playback.state {
                 PlaybackState::Stopped => souvlaki::MediaPlayback::Stopped,
                 PlaybackState::Paused => souvlaki::MediaPlayback::Paused { progress },
                 PlaybackState::Playing => souvlaki::MediaPlayback::Playing { progress },
@@ -216,16 +240,16 @@ pub mod macos {
     }
 
     #[cfg(feature = "macos-media-session")]
-    fn map_event(event: souvlaki::MediaControlEvent) -> Option<MediaCommand> {
+    fn map_event(event: souvlaki::MediaControlEvent) -> Option<IntegrationCommand> {
         match event {
-            souvlaki::MediaControlEvent::Play => Some(MediaCommand::Play),
-            souvlaki::MediaControlEvent::Pause => Some(MediaCommand::Pause),
-            souvlaki::MediaControlEvent::Toggle => Some(MediaCommand::Toggle),
-            souvlaki::MediaControlEvent::Stop => Some(MediaCommand::Stop),
-            souvlaki::MediaControlEvent::Next => Some(MediaCommand::Next),
-            souvlaki::MediaControlEvent::Previous => Some(MediaCommand::Previous),
+            souvlaki::MediaControlEvent::Play => Some(IntegrationCommand::Play),
+            souvlaki::MediaControlEvent::Pause => Some(IntegrationCommand::Pause),
+            souvlaki::MediaControlEvent::Toggle => Some(IntegrationCommand::Toggle),
+            souvlaki::MediaControlEvent::Stop => Some(IntegrationCommand::Stop),
+            souvlaki::MediaControlEvent::Next => Some(IntegrationCommand::Next),
+            souvlaki::MediaControlEvent::Previous => Some(IntegrationCommand::Previous),
             souvlaki::MediaControlEvent::SetPosition(position) => {
-                Some(MediaCommand::SeekTo(position.0.as_millis() as i64))
+                Some(IntegrationCommand::SeekTo(position.0.as_millis() as i64))
             }
             _ => None,
         }
@@ -286,5 +310,5 @@ pub mod macos {
 
     #[cfg(not(feature = "macos-media-session"))]
     #[allow(dead_code)]
-    pub struct MacMediaSession;
+    pub struct MacIntegration;
 }

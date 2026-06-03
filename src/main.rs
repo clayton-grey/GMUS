@@ -1,9 +1,9 @@
 mod art;
 mod config;
 mod db;
+mod integration;
 mod library;
 mod media;
-mod media_session;
 mod player;
 mod scanner;
 mod tui;

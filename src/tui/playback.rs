@@ -133,7 +133,7 @@ impl App {
             if let Some(current) = &mut self.current {
                 current.align_position(position_ms);
             }
-            self.sync_media_playback(true);
+            self.sync_integration_playback(true);
             return Ok(true);
         }
 
@@ -146,7 +146,7 @@ impl App {
         if let Some(current) = &mut self.current {
             current.align_position(position_ms);
         }
-        self.sync_media_playback(true);
+        self.sync_integration_playback(true);
         Ok(true)
     }
 
@@ -179,7 +179,7 @@ impl App {
         }
         self.suspended_position_ms = Some(position_ms);
         self.message = String::from("paused");
-        self.sync_media_playback(true);
+        self.sync_integration_playback(true);
         Ok(())
     }
 
@@ -191,7 +191,7 @@ impl App {
         let Some(position_ms) = self.suspended_position_ms else {
             self.player.play()?;
             self.message = String::from("playing");
-            self.sync_media_playback(true);
+            self.sync_integration_playback(true);
             return Ok(());
         };
 
@@ -207,7 +207,7 @@ impl App {
                     current.align_position(position_ms);
                 }
                 self.message = format!("seek failed: {error:#}");
-                self.sync_media_playback(true);
+                self.sync_integration_playback(true);
                 return Ok(());
             }
         }
@@ -216,7 +216,7 @@ impl App {
             current.align_position(position_ms);
         }
         self.message = String::from("playing");
-        self.sync_media_playback(true);
+        self.sync_integration_playback(true);
         Ok(())
     }
 
@@ -309,7 +309,7 @@ impl App {
                     listened_ms: 0,
                 });
                 self.publish_now_playing();
-                self.sync_media_playback(true);
+                self.sync_integration_playback(true);
             }
             Err(error) => {
                 self.message = format!("could not play {}: {error:#}", track.path);
@@ -331,7 +331,7 @@ impl App {
         self.finish_current(conn, false)?;
         self.player.stop()?;
         self.message = String::from("stopped");
-        self.sync_media_playback(true);
+        self.sync_integration_playback(true);
         Ok(())
     }
 
@@ -381,7 +381,7 @@ impl App {
             return Ok(false);
         }
         if self.suspended_position_ms.is_some() {
-            self.sync_media_playback(false);
+            self.sync_integration_playback(false);
             return Ok(false);
         }
 
@@ -398,14 +398,14 @@ impl App {
             }
             changed = true;
         }
-        self.sync_media_playback(false);
+        self.sync_integration_playback(false);
         Ok(changed)
     }
 
     pub(super) fn shutdown(&mut self, conn: &Connection) -> Result<()> {
         self.finish_current(conn, false)?;
         self.player.stop()?;
-        self.sync_media_playback(true);
+        self.sync_integration_playback(true);
         Ok(())
     }
 

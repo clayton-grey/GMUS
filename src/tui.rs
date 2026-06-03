@@ -6,7 +6,7 @@ use rusqlite::Connection;
 
 use crate::config::AppPaths;
 use crate::db::{self, LibraryTrack};
-use crate::media_session::{self, MediaSession};
+use crate::integration::{self, Integration};
 use crate::player::{self, PlaybackState, PlayerBackend};
 
 mod browser;
@@ -98,12 +98,12 @@ struct App {
     shuffle_scope: Vec<PlaybackEntry>,
     shuffle_order: Vec<PlaybackEntry>,
     player: Box<dyn PlayerBackend>,
-    media_session: Box<dyn MediaSession>,
+    integration: Box<dyn Integration>,
     current: Option<PlayingTrack>,
     suspended_position_ms: Option<i64>,
-    last_media_state: Option<PlaybackState>,
-    last_media_position_s: Option<i64>,
-    media_session_error_reported: bool,
+    last_integration_state: Option<PlaybackState>,
+    last_integration_position_s: Option<i64>,
+    integration_error_reported: bool,
     transient_status: Option<TransientStatus>,
     message: String,
 }
@@ -150,12 +150,12 @@ impl App {
             shuffle_scope: Vec::new(),
             shuffle_order: Vec::new(),
             player: player::default_player_backend()?,
-            media_session: media_session::default_media_session(),
+            integration: integration::default_integration(),
             current: None,
             suspended_position_ms: None,
-            last_media_state: None,
-            last_media_position_s: None,
-            media_session_error_reported: false,
+            last_integration_state: None,
+            last_integration_position_s: None,
+            integration_error_reported: false,
             transient_status: None,
             message: String::from(
                 "Tab pane  Enter select/play  x play  c pause  p playlists  v stop  b/z next/prev",
