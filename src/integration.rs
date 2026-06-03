@@ -9,7 +9,7 @@ mod macos;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NowPlaying {
+pub struct TrackSnapshot {
     pub title: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,
@@ -27,7 +27,7 @@ pub struct PlaybackSnapshot {
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntegrationEvent {
-    NowPlaying(NowPlaying),
+    TrackChanged(TrackSnapshot),
     Playback(PlaybackSnapshot),
 }
 

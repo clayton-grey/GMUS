@@ -139,9 +139,9 @@ Most playlist commands also have short aliases in the TUI command bar: `:pl`,
 `Esc` closes command output before falling through to filter clearing. Normal
 navigation/actions also return the info pane to selected-track metadata.
 
-The TUI publishes owned integration events for track metadata and playback
-state, and consumes integration commands such as play, pause, next, previous,
-and seek. On macOS, the default integration backend publishes Now Playing
+The TUI publishes owned integration events for track changes and playback state,
+and consumes integration commands such as play, pause, next, previous, and seek.
+On macOS, the default integration backend maps those events to Now Playing
 metadata and listens for system media-control events through `souvlaki`. The
 macOS backend also pumps a small AppKit event loop from the TUI loop; this is
 required for reliable media key callbacks in terminal apps without opening a

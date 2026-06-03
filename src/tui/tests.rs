@@ -26,7 +26,7 @@ use super::mouse::{mouse_pane, MouseLayout};
 use super::renderer::{render, render_playlist_info_pane};
 use super::*;
 use crate::integration::{
-    Integration, IntegrationCommand, IntegrationEvent, NoopIntegration, NowPlaying,
+    Integration, IntegrationCommand, IntegrationEvent, NoopIntegration, TrackSnapshot,
 };
 use crate::player::NullPlayer;
 
@@ -2732,7 +2732,7 @@ fn repeated_integration_failures_do_not_keep_overwriting_messages() {
 }
 
 #[test]
-fn now_playing_event_uses_owned_track_snapshot() {
+fn track_changed_event_uses_owned_track_snapshot() {
     let events = Rc::new(RefCell::new(Vec::new()));
     let mut track = test_track(1, "first track");
     track.cover_path = Some(String::from("/tmp/cover.jpg"));
@@ -2752,7 +2752,7 @@ fn now_playing_event_uses_owned_track_snapshot() {
 
     assert_eq!(
         events.borrow().as_slice(),
-        &[IntegrationEvent::NowPlaying(NowPlaying {
+        &[IntegrationEvent::TrackChanged(TrackSnapshot {
             title: Some(String::from("first track")),
             artist: Some(String::from("Artist")),
             album: Some(String::from("Album")),

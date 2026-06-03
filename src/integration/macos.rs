@@ -6,7 +6,7 @@ use cocoa::appkit::{NSApp, NSApplication, NSApplicationActivationPolicyAccessory
 use cocoa::base::{nil, YES};
 use cocoa::foundation::{NSAutoreleasePool, NSDate, NSDefaultRunLoopMode};
 
-use super::{Integration, IntegrationCommand, IntegrationEvent, NowPlaying, PlaybackSnapshot};
+use super::{Integration, IntegrationCommand, IntegrationEvent, PlaybackSnapshot, TrackSnapshot};
 use crate::player::PlaybackState;
 
 #[derive(Default)]
@@ -103,21 +103,21 @@ impl Integration for MacIntegration {
 
     fn publish_event(&mut self, event: &IntegrationEvent) -> Result<()> {
         match event {
-            IntegrationEvent::NowPlaying(now_playing) => self.set_now_playing(now_playing),
+            IntegrationEvent::TrackChanged(track) => self.set_now_playing(track),
             IntegrationEvent::Playback(playback) => self.set_playback_state(*playback),
         }
     }
 }
 
 impl MacIntegration {
-    fn set_now_playing(&mut self, now_playing: &NowPlaying) -> Result<()> {
-        let cover_url = now_playing.artwork_path.as_deref().map(file_url);
+    fn set_now_playing(&mut self, track: &TrackSnapshot) -> Result<()> {
+        let cover_url = track.artwork_path.as_deref().map(file_url);
         self.controls.set_metadata(souvlaki::MediaMetadata {
-            title: now_playing.title.as_deref(),
-            album: now_playing.album.as_deref(),
-            artist: now_playing.artist.as_deref(),
+            title: track.title.as_deref(),
+            album: track.album.as_deref(),
+            artist: track.artist.as_deref(),
             cover_url: cover_url.as_deref(),
-            duration: now_playing
+            duration: track
                 .duration_ms
                 .and_then(|value| u64::try_from(value).ok())
                 .map(Duration::from_millis),

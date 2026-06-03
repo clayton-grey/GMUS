@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::integration::{IntegrationCommand, IntegrationEvent, NowPlaying, PlaybackSnapshot};
+use crate::integration::{IntegrationCommand, IntegrationEvent, PlaybackSnapshot, TrackSnapshot};
 
 use super::App;
 
@@ -39,7 +39,7 @@ impl App {
         let Some(current) = &self.current else {
             return;
         };
-        let now_playing = NowPlaying {
+        let track = TrackSnapshot {
             title: Some(current.track.display_title().to_string()),
             artist: current.track.artist.clone(),
             album: current.track.album.clone(),
@@ -48,7 +48,7 @@ impl App {
         };
         match self
             .integration
-            .publish_event(&IntegrationEvent::NowPlaying(now_playing))
+            .publish_event(&IntegrationEvent::TrackChanged(track))
         {
             Ok(()) => self.integration_error_reported = false,
             Err(error) => {
