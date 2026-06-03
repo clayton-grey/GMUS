@@ -147,6 +147,9 @@ macOS backend also pumps a small AppKit event loop from the TUI loop; this is
 required for reliable media key callbacks in terminal apps without opening a
 visible window.
 
+OS-specific integrations live behind this event boundary so the core playback,
+library, and TUI code can stay independent from platform APIs.
+
 Cover art is still extracted and cached for macOS Now Playing metadata. In-terminal
 art display is intentionally deferred to a future companion/widget or
 protocol-backed solution so the core TUI stays light and stable.
