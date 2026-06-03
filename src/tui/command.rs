@@ -6,7 +6,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 use unicode_width::UnicodeWidthStr;
 
-use crate::{db, scanner};
+use crate::{db, library};
 
 use super::{App, CommandOutputKind};
 
@@ -290,15 +290,25 @@ fn matches_notice(matches: &[String]) -> String {
     }
 }
 
-fn command_needs_busy(input: &str) -> bool {
+fn library_job_for_command(
+    input: &str,
+) -> Option<std::result::Result<library::LibraryJob, String>> {
     let input = input.strip_prefix(':').unwrap_or(input).trim();
-    let Some(command) = input.split_whitespace().next() else {
-        return false;
-    };
-    matches!(
-        command.to_ascii_lowercase().as_str(),
-        "add" | "update" | "u"
-    )
+    let mut parts = input.splitn(2, char::is_whitespace);
+    let command = parts.next()?.to_ascii_lowercase();
+    let rest = parts.next().unwrap_or_default().trim();
+
+    match command.as_str() {
+        "add" => Some(
+            command_path(rest)
+                .map(library::LibraryJob::AddRoot)
+                .ok_or_else(|| String::from("usage: :add PATH")),
+        ),
+        "update" | "u" => Some(Ok(command_path(rest)
+            .map(library::LibraryJob::UpdateRoot)
+            .unwrap_or(library::LibraryJob::UpdateAllRoots))),
+        _ => None,
+    }
 }
 
 fn display_command(input: &str) -> String {
@@ -345,26 +355,6 @@ fn unquote_command_arg(value: &str) -> &str {
         }
     }
     value
-}
-
-fn scan_status(action: &str, root: &Path, report: &scanner::ScanReport) -> String {
-    let mut status = format!(
-        "{action} {}: stored {} tracks, cached {} covers, skipped {}",
-        root.display(),
-        report.tracks_stored,
-        report.art_cached,
-        report.files_skipped
-    );
-    if !report.errors.is_empty() {
-        status.push_str(&format!(", errors {}", report.errors.len()));
-    }
-    if report.files_marked_missing > 0 {
-        status.push_str(&format!(", missing {}", report.files_marked_missing));
-    }
-    if report.duplicate_tracks_merged > 0 {
-        status.push_str(&format!(", merged {}", report.duplicate_tracks_merged));
-    }
-    status
 }
 
 fn display_width(text: &str) -> usize {
@@ -426,27 +416,59 @@ impl App {
     pub(super) fn submit_command(&mut self, conn: &Connection) {
         self.command_mode = false;
         let command = std::mem::take(&mut self.command);
-        if command_needs_busy(command.trim()) {
-            self.pending_command = Some(command.clone());
-            self.show_command_output(vec![
-                format!("working: {}", display_command(&command)),
-                String::from("scanning files recursively..."),
-            ]);
-            self.message = format!("working: {}", display_command(&command));
-            self.show_transient_status(self.message.clone());
+        if let Some(job) = library_job_for_command(command.trim()) {
+            match job {
+                Ok(job) => self.start_library_job(command, job),
+                Err(message) => self.finish_command_result(Ok(message)),
+            }
         } else {
             let result = self.run_command(conn, command.trim());
             self.finish_command_result(result);
         }
     }
 
-    pub(super) fn execute_pending_command(&mut self, conn: &Connection) -> bool {
-        let Some(command) = self.pending_command.take() else {
-            return false;
+    fn start_library_job(&mut self, command: String, job: library::LibraryJob) {
+        if let Some(active_job) = &self.library_job {
+            self.finish_command_result(Ok(format!(
+                "scan already running: {}",
+                active_job.command()
+            )));
+            return;
+        }
+
+        let command = display_command(&command);
+        self.library_job = Some(super::LibraryJobRunner::spawn(
+            command.clone(),
+            self.paths.clone(),
+            job,
+        ));
+        self.show_command_output(vec![
+            format!("working: {command}"),
+            String::from("scanning files recursively..."),
+        ]);
+        self.message = format!("working: {command}");
+        self.show_transient_status(self.message.clone());
+    }
+
+    pub(super) fn poll_library_job(&mut self, conn: &Connection) -> Result<bool> {
+        let result = match self.library_job.as_ref() {
+            Some(job) => match job.try_finish() {
+                Ok(Some(result)) => result,
+                Ok(None) => return Ok(false),
+                Err(error) => Err(error),
+            },
+            None => return Ok(false),
         };
-        let result = self.run_command(conn, command.trim());
+        self.library_job = None;
+
+        let result = result.and_then(|job_result| {
+            if job_result.refreshes_library() {
+                self.refresh(conn)?;
+            }
+            Ok(library::job_status(&job_result))
+        });
         self.finish_command_result(result);
-        true
+        Ok(true)
     }
 
     fn finish_command_result(&mut self, result: Result<String>) {
@@ -524,9 +546,11 @@ impl App {
         let Some(path) = command_path(raw_path) else {
             return Ok(String::from("usage: :add PATH"));
         };
-        let (root, report) = scanner::add_library_root(conn, &self.paths, &path)?;
-        self.refresh(conn)?;
-        Ok(scan_status("added", &root, &report))
+        let result = library::add_root(conn, &self.paths, &path)?;
+        if result.refreshes_library() {
+            self.refresh(conn)?;
+        }
+        Ok(library::job_status(&result))
     }
 
     fn command_remove(&mut self, conn: &Connection, raw_path: &str) -> Result<String> {
@@ -543,52 +567,15 @@ impl App {
     }
 
     fn command_update(&mut self, conn: &Connection, raw_path: &str) -> Result<String> {
-        if let Some(path) = command_path(raw_path) {
-            let (root, report) = scanner::update_library_root(conn, &self.paths, &path)?;
+        let result = if let Some(path) = command_path(raw_path) {
+            library::update_root(conn, &self.paths, &path)?
+        } else {
+            library::update_all_roots(conn, &self.paths)?
+        };
+        if result.refreshes_library() {
             self.refresh(conn)?;
-            return Ok(scan_status("updated", &root, &report));
         }
-
-        let roots = db::active_library_roots(conn)?;
-        if roots.is_empty() {
-            return Ok(String::from("no active library roots; use :add PATH"));
-        }
-
-        let mut files_seen = 0;
-        let mut tracks_stored = 0;
-        let mut art_cached = 0;
-        let mut files_skipped = 0;
-        let mut files_marked_missing = 0;
-        let mut duplicate_tracks_merged = 0;
-        let mut errors = 0;
-        for root in &roots {
-            let path = PathBuf::from(&root.path);
-            match scanner::rescan_path(conn, &self.paths, &path) {
-                Ok(report) => {
-                    files_seen += report.files_seen;
-                    tracks_stored += report.tracks_stored;
-                    art_cached += report.art_cached;
-                    files_skipped += report.files_skipped;
-                    files_marked_missing += report.files_marked_missing;
-                    duplicate_tracks_merged += report.duplicate_tracks_merged;
-                    errors += report.errors.len();
-                    db::mark_library_root_scanned(conn, &path)?;
-                }
-                Err(_) => errors += 1,
-            }
-        }
-        self.refresh(conn)?;
-        Ok(format!(
-            "updated {} roots, scanned {} files, stored {} tracks, cached {} covers, skipped {}, missing {}, merged {}, errors {}",
-            roots.len(),
-            files_seen,
-            tracks_stored,
-            art_cached,
-            files_skipped,
-            files_marked_missing,
-            duplicate_tracks_merged,
-            errors
-        ))
+        Ok(library::job_status(&result))
     }
 
     fn command_library(&mut self, conn: &Connection) -> Result<String> {

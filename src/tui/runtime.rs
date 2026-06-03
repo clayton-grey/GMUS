@@ -69,7 +69,7 @@ fn run_loop(
             needs_draw = false;
         }
 
-        if app.execute_pending_command(conn) {
+        if app.poll_library_job(conn)? {
             needs_draw = true;
             next_tick = Instant::now();
             continue;

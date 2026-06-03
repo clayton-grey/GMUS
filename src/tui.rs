@@ -14,6 +14,7 @@ mod command;
 mod control;
 mod filter;
 mod formatting;
+mod jobs;
 mod layout;
 mod lines;
 mod media_sync;
@@ -30,6 +31,7 @@ mod tests;
 pub use runtime::run;
 
 use browser::{TrackRow, TreeEntry};
+use jobs::LibraryJobRunner;
 use playback::{PlayTarget, PlaybackEntry, PlaybackSource, PlayingTrack};
 use playlist::PlaylistPanelEntry;
 use status::TransientStatus;
@@ -86,7 +88,7 @@ struct App {
     command_roots: Vec<db::LibraryRoot>,
     command_selected: usize,
     command_focus: bool,
-    pending_command: Option<String>,
+    library_job: Option<LibraryJobRunner>,
     info_panel_visible: bool,
     play_target: PlayTarget,
     continuous: bool,
@@ -138,7 +140,7 @@ impl App {
             command_roots: Vec::new(),
             command_selected: 0,
             command_focus: false,
-            pending_command: None,
+            library_job: None,
             info_panel_visible: true,
             play_target: PlayTarget::Library,
             continuous: true,

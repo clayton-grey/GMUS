@@ -1,6 +1,7 @@
 mod art;
 mod config;
 mod db;
+mod library;
 mod media;
 mod media_session;
 mod player;
@@ -76,7 +77,11 @@ fn main() -> Result<()> {
 
     match cli.command.unwrap_or(Command::Tui { path: None }) {
         Command::Scan { path } => {
-            let (_root, report) = scanner::add_library_root(&conn, &paths, &path)?;
+            let library::LibraryJobResult::Root { report, .. } =
+                library::add_root(&conn, &paths, &path)?
+            else {
+                unreachable!("add_root always scans one root");
+            };
             println!(
                 "scanned {} files, stored {} tracks, cached {} covers, skipped {} files",
                 report.files_seen, report.tracks_stored, report.art_cached, report.files_skipped
@@ -163,7 +168,11 @@ fn main() -> Result<()> {
         }
         Command::Tui { path } => {
             if let Some(path) = path {
-                let (_root, report) = scanner::add_library_root(&conn, &paths, &path)?;
+                let library::LibraryJobResult::Root { report, .. } =
+                    library::add_root(&conn, &paths, &path)?
+                else {
+                    unreachable!("add_root always scans one root");
+                };
                 eprintln!(
                     "scanned {} files, stored {} tracks, cached {} covers, skipped {} files",
                     report.files_seen,

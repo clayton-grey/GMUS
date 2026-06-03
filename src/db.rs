@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -91,6 +92,7 @@ impl LibraryTrack {
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     migrate(&conn)?;
     Ok(conn)

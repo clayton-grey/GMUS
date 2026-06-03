@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -994,9 +995,16 @@ fn metadata_pane_shows_selected_track_details() {
 }
 
 #[test]
-fn scan_commands_queue_busy_output_before_running() {
+fn scan_commands_start_background_job_before_finishing() {
+    let data_dir = tempdir().unwrap();
+    let db_path = data_dir.path().join("gmus.sqlite3");
+    let conn = db::open(&db_path).unwrap();
     let mut app = test_app(vec![test_track(1, "first track")]);
-    let conn = Connection::open_in_memory().unwrap();
+    app.paths = AppPaths {
+        data_dir: data_dir.path().to_path_buf(),
+        db_path,
+        art_dir: data_dir.path().join("art"),
+    };
     app.command_mode = true;
     app.command = String::from("update");
 
@@ -1004,9 +1012,89 @@ fn scan_commands_queue_busy_output_before_running() {
         .unwrap();
 
     assert!(!app.command_mode);
-    assert_eq!(app.pending_command.as_deref(), Some("update"));
+    assert!(app.library_job.is_some());
     assert!(app.command_output[0].contains("working: :update"));
     assert!(app.command_output[1].contains("scanning files"));
+
+    assert!(wait_for_library_job(&mut app, &conn));
+}
+
+#[test]
+fn background_scan_completion_returns_to_idle() {
+    let data_dir = tempdir().unwrap();
+    let db_path = data_dir.path().join("gmus.sqlite3");
+    let conn = db::open(&db_path).unwrap();
+    let mut app = test_app(Vec::new());
+    app.paths = AppPaths {
+        data_dir: data_dir.path().to_path_buf(),
+        db_path,
+        art_dir: data_dir.path().join("art"),
+    };
+    app.command_mode = true;
+    app.command = String::from("update");
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(wait_for_library_job(&mut app, &conn));
+    assert!(app.library_job.is_none());
+    assert_eq!(app.message, "no active library roots; use :add PATH");
+}
+
+#[test]
+fn playlist_commands_run_while_background_scan_is_active() {
+    let data_dir = tempdir().unwrap();
+    let db_path = data_dir.path().join("gmus.sqlite3");
+    let conn = db::open(&db_path).unwrap();
+    let mut app = test_app(Vec::new());
+    app.paths = AppPaths {
+        data_dir: data_dir.path().to_path_buf(),
+        db_path,
+        art_dir: data_dir.path().join("art"),
+    };
+    app.command_mode = true;
+    app.command = String::from("update");
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.library_job.is_some());
+
+    app.command_mode = true;
+    app.command = String::from("playlist Road");
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(app.library_job.is_some());
+    assert!(app.playlist_panel_open);
+    assert_eq!(app.playlists.len(), 1);
+    assert_eq!(app.playlists[0].name, "Road");
+
+    assert!(wait_for_library_job(&mut app, &conn));
+}
+
+#[test]
+fn second_scan_command_reports_active_background_scan() {
+    let data_dir = tempdir().unwrap();
+    let db_path = data_dir.path().join("gmus.sqlite3");
+    let conn = db::open(&db_path).unwrap();
+    let mut app = test_app(Vec::new());
+    app.paths = AppPaths {
+        data_dir: data_dir.path().to_path_buf(),
+        db_path,
+        art_dir: data_dir.path().join("art"),
+    };
+    app.command_mode = true;
+    app.command = String::from("update");
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+
+    app.command_mode = true;
+    app.command = String::from("update");
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(app.library_job.is_some());
+    assert_eq!(app.message, "scan already running: :update");
+    assert!(wait_for_library_job(&mut app, &conn));
 }
 
 #[test]
@@ -2670,7 +2758,7 @@ fn test_app(tracks: Vec<LibraryTrack>) -> App {
         command_roots: Vec::new(),
         command_selected: 0,
         command_focus: false,
-        pending_command: None,
+        library_job: None,
         info_panel_visible: true,
         play_target: PlayTarget::Library,
         continuous: true,
@@ -2700,6 +2788,16 @@ fn test_paths() -> AppPaths {
         db_path: PathBuf::from("/tmp/gmus-test/gmus.sqlite3"),
         art_dir: PathBuf::from("/tmp/gmus-test/art"),
     }
+}
+
+fn wait_for_library_job(app: &mut App, conn: &Connection) -> bool {
+    for _ in 0..50 {
+        if app.poll_library_job(conn).unwrap() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    false
 }
 
 fn test_track(id: i64, title: &str) -> LibraryTrack {
