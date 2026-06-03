@@ -52,7 +52,7 @@ impl App {
         {
             Ok(()) => self.integration_error_reported = false,
             Err(error) => {
-                self.report_integration_error(format!("media metadata unavailable: {error:#}"));
+                self.report_integration_error(format!("track integration unavailable: {error:#}"));
             }
         }
     }

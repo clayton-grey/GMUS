@@ -104,6 +104,11 @@ struct App {
     last_integration_state: Option<PlaybackState>,
     last_integration_position_s: Option<i64>,
     integration_error_reported: bool,
+    #[cfg_attr(
+        not(all(target_os = "macos", feature = "macos-media-session")),
+        allow(dead_code)
+    )]
+    track_notifications_visible: bool,
     transient_status: Option<TransientStatus>,
     message: String,
 }
@@ -156,6 +161,7 @@ impl App {
             last_integration_state: None,
             last_integration_position_s: None,
             integration_error_reported: false,
+            track_notifications_visible: true,
             transient_status: None,
             message: String::from(
                 "Tab pane  Enter select/play  x play  c pause  p playlists  v stop  b/z next/prev",

@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 [features]
 default = ["playback-rodio", "macos-media-session"]
 bundled-sqlite = ["rusqlite/bundled"]
-macos-media-session = ["dep:cocoa", "dep:souvlaki"]
+macos-media-session = ["dep:cocoa", "dep:objc", "dep:souvlaki"]
 playback-rodio = ["dep:rodio"]
 
 [dependencies]
@@ -25,6 +25,7 @@ unicode-width = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = { version = "0.24", optional = true }
+objc = { version = "0.2", optional = true }
 souvlaki = { version = "0.8.3", optional = true }
 
 [dev-dependencies]

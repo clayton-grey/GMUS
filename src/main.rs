@@ -1,9 +1,14 @@
+// objc 0.2 macros used by the macOS overlay helper still expand cfg(cargo-clippy).
+#![allow(unexpected_cfgs)]
+
 mod art;
 mod config;
 mod db;
 mod integration;
 mod library;
 mod media;
+#[cfg(all(target_os = "macos", feature = "macos-media-session"))]
+mod notifier_helper;
 mod player;
 mod scanner;
 mod tui;
@@ -70,6 +75,11 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
+    if notifier_helper::run_if_requested()? {
+        return Ok(());
+    }
+
     let cli = Cli::parse();
     let paths = config::AppPaths::resolve(cli.db)?;
     let conn = db::open(&paths.db_path)

@@ -6,11 +6,32 @@ use anyhow::Result;
 use rusqlite::Connection;
 use unicode_width::UnicodeWidthStr;
 
+#[cfg(all(target_os = "macos", feature = "macos-media-session"))]
+use crate::integration::IntegrationEvent;
 use crate::{db, library};
 
 use super::{App, CommandOutputKind};
 
+#[cfg(not(all(target_os = "macos", feature = "macos-media-session")))]
+pub(super) const COMMAND_NAMES: &[&str] = &BASE_COMMAND_NAMES;
+
+#[cfg(all(target_os = "macos", feature = "macos-media-session"))]
 pub(super) const COMMAND_NAMES: &[&str] = &[
+    "add",
+    "remove",
+    "update",
+    "library",
+    "playlist",
+    "playlist-clear",
+    "playlist-delete",
+    "filter",
+    "clear",
+    "clear-output",
+    "notifications",
+];
+
+#[cfg(not(all(target_os = "macos", feature = "macos-media-session")))]
+const BASE_COMMAND_NAMES: [&str; 10] = [
     "add",
     "remove",
     "update",
@@ -538,8 +559,39 @@ impl App {
                     Ok(String::from("no output to clear"))
                 }
             }
+            #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
+            "notifications" | "notify" => self.command_notifications(rest),
             _ => Ok(format!("unknown command: {command}")),
         }
+    }
+
+    #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
+    fn command_notifications(&mut self, raw_value: &str) -> Result<String> {
+        let value = raw_value.trim().to_ascii_lowercase();
+        let visible = match value.as_str() {
+            "" | "status" => return Ok(self.notification_status_message()),
+            "on" | "yes" | "true" | "show" | "visible" => true,
+            "off" | "no" | "false" | "hide" | "hidden" => false,
+            "toggle" => !self.track_notifications_visible,
+            _ => return Ok(String::from("usage: :notifications [on|off|toggle|status]")),
+        };
+
+        self.track_notifications_visible = visible;
+        self.integration
+            .publish_event(&IntegrationEvent::TrackNotificationsVisible(visible))?;
+        Ok(self.notification_status_message())
+    }
+
+    #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
+    fn notification_status_message(&self) -> String {
+        format!(
+            "track notifications {}",
+            if self.track_notifications_visible {
+                "visible"
+            } else {
+                "hidden"
+            }
+        )
     }
 
     fn command_add(&mut self, conn: &Connection, raw_path: &str) -> Result<String> {

@@ -29,6 +29,7 @@ pub struct PlaybackSnapshot {
 pub enum IntegrationEvent {
     TrackChanged(TrackSnapshot),
     Playback(PlaybackSnapshot),
+    TrackNotificationsVisible(bool),
 }
 
 #[allow(dead_code)]

@@ -370,6 +370,33 @@ fn command_mode_executes_playlist_commands() {
     assert!(app.playlists.is_empty());
 }
 
+#[cfg(all(target_os = "macos", feature = "macos-media-session"))]
+#[test]
+fn command_mode_toggles_track_notifications() {
+    let conn = Connection::open_in_memory().unwrap();
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut app = test_app(Vec::new());
+    app.integration = Box::new(RecordingIntegration {
+        events: Rc::clone(&events),
+    });
+
+    app.command = String::from("notifications off");
+    app.execute_command(&conn);
+
+    assert!(!app.track_notifications_visible);
+    assert_eq!(app.message, "track notifications hidden");
+    assert_eq!(
+        events.borrow().as_slice(),
+        &[IntegrationEvent::TrackNotificationsVisible(false)]
+    );
+
+    app.command = String::from("notifications toggle");
+    app.execute_command(&conn);
+
+    assert!(app.track_notifications_visible);
+    assert_eq!(app.message, "track notifications visible");
+}
+
 #[test]
 fn library_command_focuses_root_list_and_toggles_roots() {
     let data_dir = tempdir().unwrap();
@@ -477,6 +504,10 @@ fn command_help_lists_available_commands() {
 
     assert!(text.contains("commands: add remove update library playlist"));
     assert!(text.contains("playlist-clear playlist-delete filter clear clear-output"));
+    #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
+    assert!(text.contains("notifications"));
+    #[cfg(not(all(target_os = "macos", feature = "macos-media-session")))]
+    assert!(!text.contains("notifications"));
     assert!(!text.contains(":library_"));
     assert_eq!(
         command_info_lines(&app, 120, 10)[0].spans[0].style,
@@ -2723,7 +2754,7 @@ fn repeated_integration_failures_do_not_keep_overwriting_messages() {
     });
 
     app.publish_track_changed();
-    assert!(app.message.contains("media metadata unavailable"));
+    assert!(app.message.contains("track integration unavailable"));
 
     app.message = String::from("normal playback message");
     app.sync_integration_playback(true);
@@ -2809,6 +2840,7 @@ fn test_app(tracks: Vec<LibraryTrack>) -> App {
         last_integration_state: None,
         last_integration_position_s: None,
         integration_error_reported: false,
+        track_notifications_visible: true,
         transient_status: None,
         message: String::new(),
     };

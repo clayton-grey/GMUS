@@ -1,24 +1,36 @@
-use std::sync::mpsc::{self, Receiver};
-use std::time::Duration;
+mod appkit;
+mod media_session;
+mod notifications;
 
-use anyhow::Result;
-use cocoa::appkit::{NSApp, NSApplication, NSApplicationActivationPolicyAccessory, NSEventMask};
-use cocoa::base::{nil, YES};
-use cocoa::foundation::{NSAutoreleasePool, NSDate, NSDefaultRunLoopMode};
+use anyhow::{Context, Result};
 
-use super::{Integration, IntegrationCommand, IntegrationEvent, PlaybackSnapshot, TrackSnapshot};
+use super::{Integration, IntegrationCommand, IntegrationEvent, PlaybackSnapshot};
 use crate::player::PlaybackState;
 
-#[derive(Default)]
+use appkit::AppKitPump;
+use media_session::MediaSession;
+use notifications::MacNotifier;
+
 pub(super) struct LazyMacIntegration {
     inner: Option<MacIntegration>,
     unavailable: bool,
+    track_notifications_visible: bool,
+}
+
+impl Default for LazyMacIntegration {
+    fn default() -> Self {
+        Self {
+            inner: None,
+            unavailable: false,
+            track_notifications_visible: true,
+        }
+    }
 }
 
 impl LazyMacIntegration {
     fn inner_mut(&mut self) -> Result<&mut MacIntegration> {
         if self.inner.is_none() && !self.unavailable {
-            match MacIntegration::new() {
+            match MacIntegration::new(self.track_notifications_visible) {
                 Ok(integration) => self.inner = Some(integration),
                 Err(error) => {
                     self.unavailable = true;
@@ -28,7 +40,7 @@ impl LazyMacIntegration {
         }
         self.inner
             .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("macOS media controls are unavailable for this process"))
+            .ok_or_else(|| anyhow::anyhow!("macOS integrations are unavailable for this process"))
     }
 }
 
@@ -44,6 +56,14 @@ impl Integration for LazyMacIntegration {
     }
 
     fn publish_event(&mut self, event: &IntegrationEvent) -> Result<()> {
+        if let IntegrationEvent::TrackNotificationsVisible(visible) = event {
+            self.track_notifications_visible = *visible;
+            if let Some(inner) = &mut self.inner {
+                inner.publish_event(event)?;
+            }
+            return Ok(());
+        }
+
         if matches!(
             event,
             IntegrationEvent::Playback(PlaybackSnapshot {
@@ -63,30 +83,17 @@ impl Integration for LazyMacIntegration {
 }
 
 struct MacIntegration {
-    controls: souvlaki::MediaControls,
-    receiver: Receiver<IntegrationCommand>,
+    media_session: MediaSession,
+    notifier: MacNotifier,
     appkit_pump: AppKitPump,
 }
 
-#[allow(dead_code)]
 impl MacIntegration {
-    fn new() -> Result<Self> {
+    fn new(track_notifications_visible: bool) -> Result<Self> {
         let appkit_pump = AppKitPump::new();
-        let (sender, receiver) = mpsc::channel();
-        let config = souvlaki::PlatformConfig {
-            display_name: "GMUS",
-            dbus_name: "gmus",
-            hwnd: None,
-        };
-        let mut controls = souvlaki::MediaControls::new(config)?;
-        controls.attach(move |event| {
-            if let Some(command) = map_event(event) {
-                let _ = sender.send(command);
-            }
-        })?;
         Ok(Self {
-            controls,
-            receiver,
+            media_session: MediaSession::new()?,
+            notifier: MacNotifier::new(track_notifications_visible),
             appkit_pump,
         })
     }
@@ -98,112 +105,25 @@ impl Integration for MacIntegration {
     }
 
     fn next_command(&mut self) -> Option<IntegrationCommand> {
-        self.receiver.try_recv().ok()
+        self.media_session.next_command()
     }
 
     fn publish_event(&mut self, event: &IntegrationEvent) -> Result<()> {
         match event {
-            IntegrationEvent::TrackChanged(track) => self.set_now_playing(track),
-            IntegrationEvent::Playback(playback) => self.set_playback_state(*playback),
-        }
-    }
-}
-
-impl MacIntegration {
-    fn set_now_playing(&mut self, track: &TrackSnapshot) -> Result<()> {
-        let cover_url = track.artwork_path.as_deref().map(file_url);
-        self.controls.set_metadata(souvlaki::MediaMetadata {
-            title: track.title.as_deref(),
-            album: track.album.as_deref(),
-            artist: track.artist.as_deref(),
-            cover_url: cover_url.as_deref(),
-            duration: track
-                .duration_ms
-                .and_then(|value| u64::try_from(value).ok())
-                .map(Duration::from_millis),
-        })?;
-        Ok(())
-    }
-
-    fn set_playback_state(&mut self, playback: PlaybackSnapshot) -> Result<()> {
-        let progress = Some(souvlaki::MediaPosition(Duration::from_millis(
-            playback.position_ms.max(0) as u64,
-        )));
-        let playback = match playback.state {
-            PlaybackState::Stopped => souvlaki::MediaPlayback::Stopped,
-            PlaybackState::Paused => souvlaki::MediaPlayback::Paused { progress },
-            PlaybackState::Playing => souvlaki::MediaPlayback::Playing { progress },
-        };
-        self.controls.set_playback(playback)?;
-        Ok(())
-    }
-}
-
-fn file_url(path: &std::path::Path) -> String {
-    format!("file://{}", percent_encode_path(path))
-}
-
-fn map_event(event: souvlaki::MediaControlEvent) -> Option<IntegrationCommand> {
-    match event {
-        souvlaki::MediaControlEvent::Play => Some(IntegrationCommand::Play),
-        souvlaki::MediaControlEvent::Pause => Some(IntegrationCommand::Pause),
-        souvlaki::MediaControlEvent::Toggle => Some(IntegrationCommand::Toggle),
-        souvlaki::MediaControlEvent::Stop => Some(IntegrationCommand::Stop),
-        souvlaki::MediaControlEvent::Next => Some(IntegrationCommand::Next),
-        souvlaki::MediaControlEvent::Previous => Some(IntegrationCommand::Previous),
-        souvlaki::MediaControlEvent::SetPosition(position) => {
-            Some(IntegrationCommand::SeekTo(position.0.as_millis() as i64))
-        }
-        _ => None,
-    }
-}
-
-fn percent_encode_path(path: &std::path::Path) -> String {
-    let path = path.to_string_lossy();
-    let mut out = String::with_capacity(path.len());
-    for byte in path.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*byte as char)
+            IntegrationEvent::TrackChanged(track) => {
+                self.media_session.set_now_playing(track)?;
+                self.notifier
+                    .notify_track_changed(track)
+                    .context("publishing macOS track notification")?;
+                Ok(())
             }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
-
-struct AppKitPump;
-
-impl AppKitPump {
-    fn new() -> Self {
-        unsafe {
-            let pool = NSAutoreleasePool::new(nil);
-            let app = NSApp();
-            let _ = app.setActivationPolicy_(NSApplicationActivationPolicyAccessory);
-            app.finishLaunching();
-            pool.drain();
-        }
-        Self
-    }
-
-    fn pump_pending_events(&self) {
-        unsafe {
-            let pool = NSAutoreleasePool::new(nil);
-            let app = NSApp();
-            let until = NSDate::distantPast(nil);
-            loop {
-                let event = app.nextEventMatchingMask_untilDate_inMode_dequeue_(
-                    NSEventMask::NSAnyEventMask.bits(),
-                    until,
-                    NSDefaultRunLoopMode,
-                    YES,
-                );
-                if event == nil {
-                    break;
-                }
-                app.sendEvent_(event);
+            IntegrationEvent::Playback(playback) => {
+                self.media_session.set_playback_state(*playback)
             }
-            pool.drain();
+            IntegrationEvent::TrackNotificationsVisible(visible) => {
+                self.notifier.set_visible(*visible);
+                Ok(())
+            }
         }
     }
 }

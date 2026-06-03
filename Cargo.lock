@@ -736,6 +736,7 @@ dependencies = [
  "crossterm",
  "hex",
  "lofty",
+ "objc",
  "ratatui",
  "rodio",
  "rusqlite",

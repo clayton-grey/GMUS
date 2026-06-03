@@ -21,7 +21,9 @@ cargo install --path .
 ```
 
 The default build enables Rodio playback and macOS media-session integration
-when compiling on macOS. Other useful build modes:
+when compiling on macOS. On non-macOS targets, the macOS feature resolves to a
+no-op integration and the macOS-only crates are not compiled. Other useful build
+modes:
 
 ```sh
 cargo build --no-default-features
@@ -31,7 +33,8 @@ cargo build --all-features
 
 On Linux, the Rodio/CPAL stack may require system audio development packages
 such as ALSA headers. The CI workflow installs `libasound2-dev` and
-`pkg-config` for this.
+`pkg-config` for this. For the most portable SQLite build on Linux or Windows,
+use `--features bundled-sqlite`.
 
 ## Development Checks
 
@@ -67,6 +70,12 @@ By default, GMUS stores data in:
   `~/.local/share/gmus/gmus.sqlite3`
 
 Cover art is cached next to the database under `art/`.
+
+On macOS, GMUS may also create a hidden notification helper bundle at
+`~/Library/Application Support/GMUS/GMUS.app`. The helper gives macOS a real app
+identity for track-change artwork overlays. It is launched only when GMUS posts
+a track change, uses `LSUIElement` so it has no Dock or menu bar presence, and
+exits after the overlay dismisses.
 
 ## Design Notes
 
@@ -132,6 +141,7 @@ Library commands:
 - `:filter TEXT`: apply a filter from command mode
 - `:clear`: clear the active filter
 - `:clear-output`, `:close`, or `:hide`: close command output and return the info pane to metadata
+- `:notifications [on|off|toggle|status]`: show or hide macOS track-change overlays
 
 Most playlist commands also have short aliases in the TUI command bar: `:pl`,
 `:pl-clear`, `:pl-delete`, `:playlist-rm`, and `:pl-rm`.
@@ -142,14 +152,17 @@ navigation/actions also return the info pane to selected-track metadata.
 The TUI publishes owned integration events for track changes and playback state,
 and consumes integration commands such as play, pause, next, previous, and seek.
 On macOS, the default integration backend maps those events to Now Playing
-metadata and listens for system media-control events through `souvlaki`. The
-macOS backend also pumps a small AppKit event loop from the TUI loop; this is
-required for reliable media key callbacks in terminal apps without opening a
-visible window.
+metadata, listens for system media-control events through `souvlaki`, and shows
+track-change artwork overlays through a hidden helper app. The helper keeps a
+small AppKit-only surface and exits after each overlay. The macOS backend also
+pumps a small AppKit event loop from the TUI loop; this is required for reliable
+media key callbacks in terminal apps without opening a visible window.
 
 OS-specific integrations live behind this event boundary so the core playback,
 library, and TUI code can stay independent from platform APIs.
 
-Cover art is still extracted and cached for macOS Now Playing metadata. In-terminal
-art display is intentionally deferred to a future companion/widget or
-protocol-backed solution so the core TUI stays light and stable.
+Cover art is extracted and cached during scans with embedded artwork preferred
+over folder artwork. The macOS integration reuses that cached art for Now
+Playing metadata and track-change overlays. In-terminal art display is
+deferred to a future companion/widget or protocol-backed solution so the core
+TUI stays light and stable.
