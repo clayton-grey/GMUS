@@ -2,7 +2,13 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use rusqlite::Connection;
 
+use crate::db::{self, SavedPaneLayout};
+
 use super::keymap::KeyAction;
+use super::layout::{
+    clamp_info_panel_offset, clamp_library_pane_offset, info_panel_target_height,
+    library_pane_percent, INFO_PANE_STEP_ROWS, LIBRARY_PANE_STEP_PERCENT, WIDE_TREE_PERCENT,
+};
 use super::mouse::{mouse_pane, MouseLayout};
 use super::{App, FocusPane, TreeEntry};
 
@@ -274,6 +280,8 @@ impl App {
                 }
             }
             KeyAction::OpenPlaylist => self.open_playlist_panel(conn)?,
+            KeyAction::ShrinkPane => self.resize_focused_pane(conn, false)?,
+            KeyAction::GrowPane => self.resize_focused_pane(conn, true)?,
             KeyAction::CommandMode => {
                 self.filter_mode = false;
                 self.command_mode = true;
@@ -373,6 +381,8 @@ impl App {
             input_visible: self.input_bar_visible(),
             playlist_info_visible: self.playlist_panel_open,
             keymap_info_visible: self.keymap_panel_open,
+            library_pane_percent_offset: self.library_pane_percent_offset,
+            info_pane_height_offset: self.info_pane_height_offset,
         };
         let Some(pane) = mouse_pane(mouse.column, mouse.row, layout) else {
             return dismissed_startup_info;
@@ -389,6 +399,85 @@ impl App {
             self.clear_filter(conn)?;
         }
         Ok(())
+    }
+
+    fn resize_focused_pane(&mut self, conn: &Connection, grow: bool) -> Result<()> {
+        match self.focus {
+            FocusPane::Tree => {
+                let delta = if grow {
+                    LIBRARY_PANE_STEP_PERCENT
+                } else {
+                    -LIBRARY_PANE_STEP_PERCENT
+                };
+                self.resize_library_boundary(conn, delta, "library", grow)
+            }
+            FocusPane::Tracks => {
+                let delta = if grow {
+                    LIBRARY_PANE_STEP_PERCENT
+                } else {
+                    -LIBRARY_PANE_STEP_PERCENT
+                };
+                self.resize_library_boundary(conn, delta, "tracks", !grow)
+            }
+            FocusPane::Playlist | FocusPane::Keymap => {
+                let delta = if grow {
+                    -INFO_PANE_STEP_ROWS
+                } else {
+                    INFO_PANE_STEP_ROWS
+                };
+                self.resize_info_boundary(conn, delta, !grow)
+            }
+        }
+    }
+
+    fn resize_library_boundary(
+        &mut self,
+        conn: &Connection,
+        delta: i16,
+        pane: &str,
+        grow: bool,
+    ) -> Result<()> {
+        let previous = clamp_library_pane_offset(self.library_pane_percent_offset);
+        let next = clamp_library_pane_offset(previous.saturating_add(delta));
+        self.library_pane_percent_offset = next;
+        self.save_pane_layout(conn)?;
+
+        let direction = if grow { "larger" } else { "smaller" };
+        let split = library_pane_percent(WIDE_TREE_PERCENT, next);
+        self.message = if previous == next {
+            format!("{pane} pane size limit (library split {split}%)")
+        } else {
+            format!("{pane} pane {direction} (library split {split}%)")
+        };
+        self.show_transient_status(self.message.clone());
+        Ok(())
+    }
+
+    fn resize_info_boundary(&mut self, conn: &Connection, delta: i16, grow: bool) -> Result<()> {
+        let previous = clamp_info_panel_offset(self.info_pane_height_offset);
+        let next = clamp_info_panel_offset(previous.saturating_add(delta));
+        self.info_pane_height_offset = next;
+        self.save_pane_layout(conn)?;
+
+        let direction = if grow { "larger" } else { "smaller" };
+        let height = info_panel_target_height(next);
+        self.message = if previous == next {
+            format!("info pane size limit ({height} rows)")
+        } else {
+            format!("info pane {direction} ({height} rows)")
+        };
+        self.show_transient_status(self.message.clone());
+        Ok(())
+    }
+
+    fn save_pane_layout(&self, conn: &Connection) -> Result<()> {
+        db::save_pane_layout(
+            conn,
+            SavedPaneLayout {
+                library_percent_offset: self.library_pane_percent_offset,
+                info_height_offset: self.info_pane_height_offset,
+            },
+        )
     }
 
     fn dismiss_startup_info(&mut self) -> bool {

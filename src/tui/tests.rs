@@ -571,6 +571,104 @@ fn keymap_key_toggles_keymap_pane() {
 }
 
 #[test]
+fn keymap_lists_pane_resize_bindings() {
+    let app = test_app(vec![test_track(1, "first track")]);
+    let text = keymap_text(&app);
+
+    assert!(text.contains("{"));
+    assert!(text.contains("move boundary left/up"));
+    assert!(text.contains("}"));
+    assert!(text.contains("move boundary right/down"));
+}
+
+#[test]
+fn pane_resize_keys_adjust_library_boundary_for_tree_and_tracks() {
+    let conn = test_conn();
+    let mut app = test_app(vec![test_track(1, "first track")]);
+
+    app.focus = FocusPane::Tree;
+    app.handle_key(
+        &conn,
+        KeyEvent::new(KeyCode::Char('}'), KeyModifiers::SHIFT),
+    )
+    .unwrap();
+
+    assert_eq!(app.library_pane_percent_offset, 2);
+    assert!(app.message.contains("library pane larger"));
+    assert_eq!(
+        db::pane_layout(&conn).unwrap().library_percent_offset,
+        app.library_pane_percent_offset
+    );
+
+    app.focus = FocusPane::Tracks;
+    app.handle_key(
+        &conn,
+        KeyEvent::new(KeyCode::Char('}'), KeyModifiers::SHIFT),
+    )
+    .unwrap();
+
+    assert_eq!(app.library_pane_percent_offset, 4);
+    assert!(app.message.contains("tracks pane smaller"));
+
+    app.handle_key(
+        &conn,
+        KeyEvent::new(KeyCode::Char('{'), KeyModifiers::SHIFT),
+    )
+    .unwrap();
+
+    assert_eq!(app.library_pane_percent_offset, 2);
+    assert!(app.message.contains("tracks pane larger"));
+}
+
+#[test]
+fn pane_resize_keys_adjust_bottom_management_pane_height() {
+    let conn = test_conn();
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    app.keymap_panel_open = true;
+    app.focus = FocusPane::Keymap;
+
+    app.handle_key(
+        &conn,
+        KeyEvent::new(KeyCode::Char('}'), KeyModifiers::SHIFT),
+    )
+    .unwrap();
+
+    assert_eq!(app.info_pane_height_offset, -1);
+    assert!(app.message.contains("info pane smaller"));
+    assert_eq!(
+        db::pane_layout(&conn).unwrap().info_height_offset,
+        app.info_pane_height_offset
+    );
+
+    app.handle_key(
+        &conn,
+        KeyEvent::new(KeyCode::Char('{'), KeyModifiers::SHIFT),
+    )
+    .unwrap();
+
+    assert_eq!(app.info_pane_height_offset, 0);
+    assert!(app.message.contains("info pane larger"));
+}
+
+#[test]
+fn app_start_restores_pane_layout_offsets() {
+    let conn = test_conn();
+    db::save_pane_layout(
+        &conn,
+        db::SavedPaneLayout {
+            library_percent_offset: 4,
+            info_height_offset: 3,
+        },
+    )
+    .unwrap();
+
+    let app = App::new(&conn, &test_paths()).unwrap();
+
+    assert_eq!(app.library_pane_percent_offset, 4);
+    assert_eq!(app.info_pane_height_offset, 3);
+}
+
+#[test]
 fn keymap_pane_edits_mapping_and_persists_override() {
     let data_dir = tempdir().unwrap();
     let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
@@ -2275,6 +2373,26 @@ fn wide_mouse_hit_testing_uses_split_panes() {
 }
 
 #[test]
+fn mouse_hit_testing_uses_persisted_library_split_offset() {
+    assert_eq!(
+        mouse_pane(
+            50,
+            20,
+            MouseLayout::new(100, 30, 2).with_pane_offsets(20, 0)
+        ),
+        Some(FocusPane::Tree)
+    );
+    assert_eq!(
+        mouse_pane(
+            60,
+            20,
+            MouseLayout::new(100, 30, 2).with_pane_offsets(20, 0)
+        ),
+        Some(FocusPane::Tracks)
+    );
+}
+
+#[test]
 fn mouse_hit_testing_ignores_bottom_info_and_input_rows() {
     assert_eq!(
         mouse_pane(60, 5, MouseLayout::new(100, 30, 2).with_info(true, true)),
@@ -3697,6 +3815,8 @@ fn test_app(tracks: Vec<LibraryTrack>) -> App {
         library_job: None,
         info_panel_visible: true,
         startup_info_visible: false,
+        library_pane_percent_offset: 0,
+        info_pane_height_offset: 0,
         play_target: PlayTarget::Library,
         continuous: true,
         repeat: false,

@@ -56,6 +56,12 @@ pub struct SavedKeyBinding {
     pub key: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SavedPaneLayout {
+    pub library_percent_offset: i16,
+    pub info_height_offset: i16,
+}
+
 #[derive(Debug, Clone)]
 pub struct LibraryTrack {
     pub media_item_id: i64,
@@ -583,6 +589,23 @@ pub fn save_restore_track_enabled(conn: &Connection, enabled: bool) -> Result<()
     save_app_setting_bool(conn, "restore-track", enabled)
 }
 
+pub fn pane_layout(conn: &Connection) -> Result<SavedPaneLayout> {
+    Ok(SavedPaneLayout {
+        library_percent_offset: app_setting_i16(conn, "library-pane-percent-offset", 0)?,
+        info_height_offset: app_setting_i16(conn, "info-pane-height-offset", 0)?,
+    })
+}
+
+pub fn save_pane_layout(conn: &Connection, layout: SavedPaneLayout) -> Result<()> {
+    save_app_setting_i16(
+        conn,
+        "library-pane-percent-offset",
+        layout.library_percent_offset,
+    )?;
+    save_app_setting_i16(conn, "info-pane-height-offset", layout.info_height_offset)?;
+    Ok(())
+}
+
 pub fn saved_filter(conn: &Connection) -> Result<Option<String>> {
     conn.query_row(
         "SELECT filter FROM app_filter_state WHERE id = 1",
@@ -608,14 +631,18 @@ pub fn save_filter(conn: &Connection, filter: &str) -> Result<()> {
     Ok(())
 }
 
+fn app_setting_value(conn: &Connection, key: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT value FROM app_settings WHERE key = ?1",
+        params![key],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 fn app_setting_bool(conn: &Connection, key: &str, default: bool) -> Result<bool> {
-    let value: Option<String> = conn
-        .query_row(
-            "SELECT value FROM app_settings WHERE key = ?1",
-            params![key],
-            |row| row.get(0),
-        )
-        .optional()?;
+    let value = app_setting_value(conn, key)?;
     let Some(value) = value else {
         return Ok(default);
     };
@@ -625,9 +652,23 @@ fn app_setting_bool(conn: &Connection, key: &str, default: bool) -> Result<bool>
     ))
 }
 
+fn app_setting_i16(conn: &Connection, key: &str, default: i16) -> Result<i16> {
+    Ok(app_setting_value(conn, key)?
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(default))
+}
+
 fn save_app_setting_bool(conn: &Connection, key: &str, enabled: bool) -> Result<()> {
-    let now = now_unix();
     let value = if enabled { "1" } else { "0" };
+    save_app_setting(conn, key, value)
+}
+
+fn save_app_setting_i16(conn: &Connection, key: &str, value: i16) -> Result<()> {
+    save_app_setting(conn, key, &value.to_string())
+}
+
+fn save_app_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    let now = now_unix();
     conn.execute(
         r#"
         INSERT INTO app_settings (key, value, updated_at)
@@ -1574,6 +1615,22 @@ mod tests {
         assert!(!restore_filter_enabled(&conn).unwrap());
         assert!(!restore_track_enabled(&conn).unwrap());
         assert_eq!(saved_filter(&conn).unwrap().as_deref(), Some("artist:eno"));
+    }
+
+    #[test]
+    fn pane_layout_round_trips_through_app_settings() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        assert_eq!(pane_layout(&conn).unwrap(), SavedPaneLayout::default());
+
+        let layout = SavedPaneLayout {
+            library_percent_offset: 6,
+            info_height_offset: -2,
+        };
+        save_pane_layout(&conn, layout).unwrap();
+
+        assert_eq!(pane_layout(&conn).unwrap(), layout);
     }
 
     #[test]

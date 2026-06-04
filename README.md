@@ -109,6 +109,7 @@ Keyboard control:
 - `k`: open or focus the keymap pane
 - In the keymap pane, `Enter` edits non-reserved mappings, `Esc` cancels editing, and `Backspace` resets it to default
 - `Enter`, `Esc`, and `:` are reserved for their default behaviors and cannot be edited or mapped to another action
+- `{` / `}`: nudge the selected pane boundary left/up or right/down
 - `+` / `=`: add the selected track, artist, album, or playlist entry to the active playlist
 - `-`: remove the selected track or playlist entry from the active playlist
 - `v`: stop
@@ -123,6 +124,12 @@ Keyboard control:
 - `/`: type a library filter, then `Enter` or `Tab` to apply, or `Esc` to clear
 - `:`: type a command, then `Enter` to run it; `Tab` completes commands and paths
 - `q` or `Ctrl-C`: quit
+
+Pane sizing starts from the default relative layout and stores small offsets in
+the local database. In the wide layout, `{` moves the selected browser boundary
+left and `}` moves it right. In stacked or bottom-pane layouts, `{` moves the
+selected boundary up and `}` moves it down. With the tracks pane focused, the
+adjustment is relative to the tracks pane's own edge.
 
 Playback advances through the active filtered track set and selected play target
 when continuous mode is on, so next, previous, shuffle, repeat, and natural

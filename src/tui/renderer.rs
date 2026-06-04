@@ -4,8 +4,8 @@ use ratatui::Frame;
 
 use super::keymap::keymap_items;
 use super::layout::{
-    info_panel_height, BOTTOM_STATUS_ROWS, LIST_SCROLL_PADDING, NARROW_TREE_PERCENT,
-    STACKED_PANE_WIDTH, WIDE_TREE_PERCENT,
+    info_panel_height_with_offset, library_pane_percent, BOTTOM_STATUS_ROWS, LIST_SCROLL_PADDING,
+    NARROW_TREE_PERCENT, STACKED_PANE_WIDTH, WIDE_TREE_PERCENT,
 };
 use super::lines::{
     command_border_style, command_info_lines, command_info_title, command_pane_style,
@@ -20,9 +20,10 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
     let info_visible = app.info_area_visible();
     let input_visible = app.input_bar_visible();
     let info_height = if info_visible {
-        info_panel_height(
+        info_panel_height_with_offset(
             area.height.saturating_sub(BOTTOM_STATUS_ROWS),
             input_visible,
+            app.info_pane_height_offset,
         )
     } else {
         0
@@ -73,11 +74,12 @@ fn render_browser_panes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn render_wide_browser_panes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let tree_percent = library_pane_percent(WIDE_TREE_PERCENT, app.library_pane_percent_offset);
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(WIDE_TREE_PERCENT),
-            Constraint::Percentage(100 - WIDE_TREE_PERCENT),
+            Constraint::Percentage(tree_percent),
+            Constraint::Percentage(100 - tree_percent),
         ])
         .split(area);
 
@@ -86,11 +88,12 @@ fn render_wide_browser_panes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn render_stacked_browser_panes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let tree_percent = library_pane_percent(NARROW_TREE_PERCENT, app.library_pane_percent_offset);
     let stack = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(NARROW_TREE_PERCENT),
-            Constraint::Percentage(100 - NARROW_TREE_PERCENT),
+            Constraint::Percentage(tree_percent),
+            Constraint::Percentage(100 - tree_percent),
         ])
         .split(area);
 

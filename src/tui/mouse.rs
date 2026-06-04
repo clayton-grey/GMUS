@@ -1,5 +1,6 @@
 use super::layout::{
-    info_panel_height, percent_floor, NARROW_TREE_PERCENT, STACKED_PANE_WIDTH, WIDE_TREE_PERCENT,
+    info_panel_height_with_offset, library_pane_percent, percent_floor, NARROW_TREE_PERCENT,
+    STACKED_PANE_WIDTH, WIDE_TREE_PERCENT,
 };
 use super::FocusPane;
 
@@ -12,6 +13,8 @@ pub(super) struct MouseLayout {
     pub(super) input_visible: bool,
     pub(super) playlist_info_visible: bool,
     pub(super) keymap_info_visible: bool,
+    pub(super) library_pane_percent_offset: i16,
+    pub(super) info_pane_height_offset: i16,
 }
 
 #[cfg(test)]
@@ -29,6 +32,8 @@ impl MouseLayout {
             input_visible: false,
             playlist_info_visible: false,
             keymap_info_visible: false,
+            library_pane_percent_offset: 0,
+            info_pane_height_offset: 0,
         }
     }
 
@@ -47,6 +52,16 @@ impl MouseLayout {
         self.keymap_info_visible = keymap_info_visible;
         self
     }
+
+    pub(super) fn with_pane_offsets(
+        mut self,
+        library_pane_percent_offset: i16,
+        info_pane_height_offset: i16,
+    ) -> Self {
+        self.library_pane_percent_offset = library_pane_percent_offset;
+        self.info_pane_height_offset = info_pane_height_offset;
+        self
+    }
 }
 
 pub(super) fn mouse_pane(column: u16, row: u16, layout: MouseLayout) -> Option<FocusPane> {
@@ -58,7 +73,11 @@ pub(super) fn mouse_pane(column: u16, row: u16, layout: MouseLayout) -> Option<F
     }
 
     let info_height = if layout.info_visible {
-        info_panel_height(main_height, layout.input_visible)
+        info_panel_height_with_offset(
+            main_height,
+            layout.input_visible,
+            layout.info_pane_height_offset,
+        )
     } else {
         0
     };
@@ -76,14 +95,18 @@ pub(super) fn mouse_pane(column: u16, row: u16, layout: MouseLayout) -> Option<F
     }
 
     if layout.terminal_width < STACKED_PANE_WIDTH {
-        let tree_height = percent_floor(browser_height, NARROW_TREE_PERCENT).max(1);
+        let tree_percent =
+            library_pane_percent(NARROW_TREE_PERCENT, layout.library_pane_percent_offset);
+        let tree_height = percent_floor(browser_height, tree_percent).max(1);
         if row < tree_height {
             return Some(FocusPane::Tree);
         }
 
         Some(FocusPane::Tracks)
     } else {
-        let tree_width = percent_floor(layout.terminal_width, WIDE_TREE_PERCENT).max(1);
+        let tree_percent =
+            library_pane_percent(WIDE_TREE_PERCENT, layout.library_pane_percent_offset);
+        let tree_width = percent_floor(layout.terminal_width, tree_percent).max(1);
         if column < tree_width {
             return Some(FocusPane::Tree);
         }

@@ -102,6 +102,8 @@ struct App {
     library_job: Option<LibraryJobRunner>,
     info_panel_visible: bool,
     startup_info_visible: bool,
+    library_pane_percent_offset: i16,
+    info_pane_height_offset: i16,
     play_target: PlayTarget,
     continuous: bool,
     repeat: bool,
@@ -127,6 +129,7 @@ struct App {
 
 impl App {
     fn new(conn: &Connection, paths: &AppPaths) -> Result<Self> {
+        let pane_layout = db::pane_layout(conn)?;
         let mut app = Self {
             paths: paths.clone(),
             tracks: db::library_tracks(conn)?,
@@ -167,6 +170,8 @@ impl App {
             library_job: None,
             info_panel_visible: true,
             startup_info_visible: true,
+            library_pane_percent_offset: pane_layout.library_percent_offset,
+            info_pane_height_offset: pane_layout.info_height_offset,
             play_target: PlayTarget::Library,
             continuous: true,
             repeat: false,

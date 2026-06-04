@@ -24,6 +24,8 @@ pub(super) enum KeyAction {
     ToggleKeymap,
     ToggleInfo,
     OpenPlaylist,
+    ShrinkPane,
+    GrowPane,
     CommandMode,
     FilterMode,
     PlaySelected,
@@ -61,6 +63,8 @@ impl KeyAction {
             Self::ToggleKeymap => "toggle-keymap",
             Self::ToggleInfo => "toggle-info",
             Self::OpenPlaylist => "open-playlist",
+            Self::ShrinkPane => "shrink-pane",
+            Self::GrowPane => "grow-pane",
             Self::CommandMode => "command-mode",
             Self::FilterMode => "filter-mode",
             Self::PlaySelected => "play-selected",
@@ -98,6 +102,8 @@ impl KeyAction {
             "toggle-keymap" => Self::ToggleKeymap,
             "toggle-info" => Self::ToggleInfo,
             "open-playlist" => Self::OpenPlaylist,
+            "shrink-pane" => Self::ShrinkPane,
+            "grow-pane" => Self::GrowPane,
             "command-mode" => Self::CommandMode,
             "filter-mode" => Self::FilterMode,
             "play-selected" => Self::PlaySelected,
@@ -249,6 +255,8 @@ const TOGGLE_ARTIST_EXPANSION_KEYS: &[KeySpec] = &[KeySpec::new(KeyCode::Char('e
 const TOGGLE_KEYMAP_KEYS: &[KeySpec] = &[KeySpec::new(KeyCode::Char('k'))];
 const TOGGLE_INFO_KEYS: &[KeySpec] = &[KeySpec::new(KeyCode::Char('i'))];
 const OPEN_PLAYLIST_KEYS: &[KeySpec] = &[KeySpec::new(KeyCode::Char('p'))];
+const SHRINK_PANE_KEYS: &[KeySpec] = &[KeySpec::new(KeyCode::Char('{'))];
+const GROW_PANE_KEYS: &[KeySpec] = &[KeySpec::new(KeyCode::Char('}'))];
 // Bare ':' is reserved because it owns the transition into the command interface.
 const COMMAND_MODE_KEYS: &[KeySpec] = &[KeySpec::new(KeyCode::Char(':'))];
 const FILTER_MODE_KEYS: &[KeySpec] = &[KeySpec::new(KeyCode::Char('/'))];
@@ -352,6 +360,18 @@ pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
         action: KeyAction::OpenPlaylist,
         default_keys: OPEN_PLAYLIST_KEYS,
         label: "open playlist pane",
+    },
+    KeyBinding {
+        section: "Panes",
+        action: KeyAction::ShrinkPane,
+        default_keys: SHRINK_PANE_KEYS,
+        label: "move boundary left/up",
+    },
+    KeyBinding {
+        section: "Panes",
+        action: KeyAction::GrowPane,
+        default_keys: GROW_PANE_KEYS,
+        label: "move boundary right/down",
     },
     KeyBinding {
         section: "Panes",
