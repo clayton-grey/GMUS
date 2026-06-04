@@ -392,6 +392,7 @@ impl App {
     }
 
     pub(super) fn shutdown(&mut self, conn: &Connection) -> Result<()> {
+        self.save_browser_selection(conn)?;
         self.finish_current(conn, false)?;
         self.player.stop()?;
         self.sync_integration_playback(true);

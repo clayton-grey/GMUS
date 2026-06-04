@@ -2799,6 +2799,70 @@ fn track_changed_event_uses_owned_track_snapshot() {
     );
 }
 
+#[test]
+fn saved_browser_selection_restores_album_and_track() {
+    let first = test_track(1, "first track");
+    let mut second = test_track(2, "second track");
+    second.album = Some("Other Album".to_string());
+    let mut app = test_app(vec![first, second]);
+
+    let restored = app.restore_saved_browser_selection(&db::SavedBrowserSelection {
+        tree_kind: "album".to_string(),
+        artist: Some("Artist".to_string()),
+        album: Some("Other Album".to_string()),
+        playlist_id: None,
+        media_item_id: Some(2),
+    });
+
+    assert!(restored);
+    assert!(app.expanded_artists.contains("Artist"));
+    assert!(matches!(
+        app.selected_tree_entry(),
+        Some(TreeEntry::Album { album, .. }) if album == "Other Album"
+    ));
+    assert_eq!(app.selected_playable_media_item_id(), Some(2));
+}
+
+#[test]
+fn invalid_saved_browser_selection_resets_to_default_selection() {
+    let mut app = test_app(vec![test_track(1, "first track")]);
+
+    let restored = app.restore_saved_browser_selection(&db::SavedBrowserSelection {
+        tree_kind: "artist".to_string(),
+        artist: Some("Artist".to_string()),
+        album: None,
+        playlist_id: None,
+        media_item_id: Some(999),
+    });
+
+    assert!(!restored);
+    assert_eq!(app.selected_tree, 0);
+    assert_eq!(app.selected_playable_media_item_id(), Some(1));
+}
+
+#[test]
+fn save_browser_selection_persists_selected_artist_and_track() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    let mut other_artist = test_track(2, "other artist track");
+    other_artist.artist = Some("Other Artist".to_string());
+    other_artist.album_artist = Some("Other Artist".to_string());
+    let mut app = test_app(vec![test_track(1, "first track"), other_artist]);
+
+    app.selected_tree = app
+        .tree_entries()
+        .iter()
+        .position(|entry| matches!(entry, TreeEntry::Artist { artist } if artist == "Other Artist"))
+        .unwrap();
+    app.sync_selection();
+    app.save_browser_selection(&conn).unwrap();
+
+    let selection = db::browser_selection(&conn).unwrap().unwrap();
+    assert_eq!(selection.tree_kind, "artist");
+    assert_eq!(selection.artist.as_deref(), Some("Other Artist"));
+    assert_eq!(selection.media_item_id, Some(2));
+}
+
 fn test_app(tracks: Vec<LibraryTrack>) -> App {
     let mut app = App {
         paths: test_paths(),

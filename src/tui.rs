@@ -19,6 +19,7 @@ mod layout;
 mod lines;
 mod media_sync;
 mod mouse;
+mod persistence;
 mod playback;
 mod playlist;
 mod renderer;
@@ -169,7 +170,12 @@ impl App {
         };
         app.refresh_playlist_tracks(conn)?;
         app.rebuild_search_cache();
-        app.sync_selection();
+        match db::browser_selection(conn)? {
+            Some(selection) => {
+                app.restore_saved_browser_selection(&selection);
+            }
+            None => app.sync_selection(),
+        }
         Ok(app)
     }
 

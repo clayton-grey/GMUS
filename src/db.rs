@@ -41,6 +41,15 @@ pub struct PlaylistTrack {
     pub media_item_id: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedBrowserSelection {
+    pub tree_kind: String,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub playlist_id: Option<i64>,
+    pub media_item_id: Option<i64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct LibraryTrack {
     pub media_item_id: i64,
@@ -193,6 +202,16 @@ fn migrate_v1(conn: &Connection) -> Result<()> {
             media_item_id   INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
             position        INTEGER NOT NULL,
             added_at        INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS app_browser_selection (
+            id              INTEGER PRIMARY KEY CHECK (id = 1),
+            tree_kind       TEXT NOT NULL,
+            artist          TEXT,
+            album           TEXT,
+            playlist_id     INTEGER,
+            media_item_id   INTEGER,
+            updated_at      INTEGER NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_locations_media_item
@@ -405,6 +424,55 @@ pub fn playlist_tracks(conn: &Connection, playlist_id: i64) -> Result<Vec<Playli
         tracks.push(row?);
     }
     Ok(tracks)
+}
+
+pub fn browser_selection(conn: &Connection) -> Result<Option<SavedBrowserSelection>> {
+    conn.query_row(
+        r#"
+        SELECT tree_kind, artist, album, playlist_id, media_item_id
+        FROM app_browser_selection
+        WHERE id = 1
+        "#,
+        [],
+        |row| {
+            Ok(SavedBrowserSelection {
+                tree_kind: row.get(0)?,
+                artist: row.get(1)?,
+                album: row.get(2)?,
+                playlist_id: row.get(3)?,
+                media_item_id: row.get(4)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn save_browser_selection(conn: &Connection, selection: &SavedBrowserSelection) -> Result<()> {
+    let now = now_unix();
+    conn.execute(
+        r#"
+        INSERT INTO app_browser_selection (
+            id, tree_kind, artist, album, playlist_id, media_item_id, updated_at
+        ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
+        ON CONFLICT(id) DO UPDATE SET
+            tree_kind = excluded.tree_kind,
+            artist = excluded.artist,
+            album = excluded.album,
+            playlist_id = excluded.playlist_id,
+            media_item_id = excluded.media_item_id,
+            updated_at = excluded.updated_at
+        "#,
+        params![
+            selection.tree_kind.as_str(),
+            selection.artist.as_deref(),
+            selection.album.as_deref(),
+            selection.playlist_id,
+            selection.media_item_id,
+            now
+        ],
+    )?;
+    Ok(())
 }
 
 pub fn add_tracks_to_playlist(
@@ -1238,6 +1306,23 @@ mod tests {
         let error = migrate(&conn).unwrap_err();
 
         assert!(error.to_string().contains("newer than this GMUS build"));
+    }
+
+    #[test]
+    fn browser_selection_round_trips() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let selection = SavedBrowserSelection {
+            tree_kind: "album".to_string(),
+            artist: Some("Artist".to_string()),
+            album: Some("Album".to_string()),
+            playlist_id: None,
+            media_item_id: Some(42),
+        };
+
+        save_browser_selection(&conn, &selection).unwrap();
+
+        assert_eq!(browser_selection(&conn).unwrap(), Some(selection));
     }
 
     #[test]
