@@ -7,7 +7,8 @@ use std::time::UNIX_EPOCH;
 use anyhow::{bail, Context, Result};
 
 use crate::integration::TrackSnapshot;
-use crate::notifier_helper;
+
+use super::notifier_helper;
 
 const HELPER_APP_NAME: &str = "GMUS.app";
 const LEGACY_HELPER_APP_NAME: &str = "GMUS Notifier.app";

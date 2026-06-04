@@ -1,6 +1,7 @@
 mod appkit;
 mod media_session;
 mod notifications;
+mod notifier_helper;
 
 use anyhow::{Context, Result};
 
@@ -10,6 +11,10 @@ use crate::player::PlaybackState;
 use appkit::AppKitPump;
 use media_session::MediaSession;
 use notifications::MacNotifier;
+
+pub(super) fn run_helper_if_requested() -> Result<bool> {
+    notifier_helper::run_if_requested()
+}
 
 pub(super) struct LazyMacIntegration {
     inner: Option<MacIntegration>,

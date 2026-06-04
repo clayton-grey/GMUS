@@ -7,8 +7,6 @@ mod db;
 mod integration;
 mod library;
 mod media;
-#[cfg(all(target_os = "macos", feature = "macos-media-session"))]
-mod notifier_helper;
 mod player;
 mod scanner;
 mod tui;
@@ -75,8 +73,7 @@ enum Command {
 }
 
 fn main() -> Result<()> {
-    #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
-    if notifier_helper::run_if_requested()? {
+    if integration::run_helper_if_requested()? {
         return Ok(());
     }
 

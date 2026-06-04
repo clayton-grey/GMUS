@@ -63,6 +63,18 @@ pub fn default_integration() -> Box<dyn Integration> {
     }
 }
 
+pub fn run_helper_if_requested() -> Result<bool> {
+    #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
+    {
+        macos::run_helper_if_requested()
+    }
+
+    #[cfg(not(all(target_os = "macos", feature = "macos-media-session")))]
+    {
+        Ok(false)
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct NoopIntegration;

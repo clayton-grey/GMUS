@@ -17,7 +17,7 @@ use cocoa::foundation::{
 };
 use objc::{class, msg_send, sel, sel_impl};
 
-pub(crate) const HELPER_MODE_ARG: &str = "--gmus-notifier";
+pub(super) const HELPER_MODE_ARG: &str = "--gmus-notifier";
 
 const TITLE_ARG: &str = "--title";
 const SUBTITLE_ARG: &str = "--subtitle";
@@ -29,7 +29,7 @@ const OVERLAY_FADE_IN: Duration = Duration::from_millis(120);
 const OVERLAY_FADE_OUT: Duration = Duration::from_millis(180);
 const OVERLAY_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
-pub(crate) fn run_if_requested() -> Result<bool> {
+pub(super) fn run_if_requested() -> Result<bool> {
     let args: Vec<_> = env::args_os().skip(1).collect();
     let Some(helper_index) = args
         .iter()
@@ -46,7 +46,7 @@ pub(crate) fn run_if_requested() -> Result<bool> {
     Ok(true)
 }
 
-pub(crate) fn notification_args(
+pub(super) fn notification_args(
     title: &str,
     subtitle: Option<&str>,
     body: &str,
@@ -73,7 +73,7 @@ pub(crate) fn notification_args(
     args
 }
 
-pub(crate) fn gmus_support_dir() -> Result<PathBuf> {
+pub(super) fn gmus_support_dir() -> Result<PathBuf> {
     let home = env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
