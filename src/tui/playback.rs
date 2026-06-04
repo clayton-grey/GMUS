@@ -274,17 +274,6 @@ impl App {
         Ok(())
     }
 
-    pub(super) fn toggle_pause_current(&mut self) -> Result<()> {
-        match self.logical_state() {
-            PlaybackState::Playing => self.suspend_current()?,
-            PlaybackState::Paused => self.resume_current()?,
-            PlaybackState::Stopped => {
-                self.message = String::from("nothing playing");
-            }
-        }
-        Ok(())
-    }
-
     #[cfg(test)]
     pub(super) fn play_index(&mut self, conn: &Connection, index: usize) -> Result<()> {
         self.play_entry(conn, PlaybackEntry::library(index))

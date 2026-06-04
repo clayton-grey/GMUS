@@ -17,6 +17,8 @@ use crate::player::PlaybackState;
 use super::renderer::render;
 use super::App;
 
+const INTEGRATION_TICK: Duration = Duration::from_millis(75);
+
 pub fn run(conn: &Connection, paths: &AppPaths) -> Result<()> {
     let mut terminal = setup_terminal()?;
     let mut app = match App::new(conn, paths) {
@@ -40,12 +42,22 @@ fn run_loop(
     let mut needs_draw = true;
     let mut last_render_position_s = None;
     let mut next_tick = Instant::now();
+    let mut next_integration_tick = Instant::now();
 
     loop {
-        if Instant::now() >= next_tick {
-            needs_draw |= app.expire_transient_status();
+        let now = Instant::now();
+        if now >= next_integration_tick {
             app.integration.tick();
-            needs_draw |= app.handle_integration_commands(conn)?;
+            let handled_integration_command = app.handle_integration_commands(conn)?;
+            needs_draw |= handled_integration_command;
+            if handled_integration_command {
+                next_tick = now;
+            }
+            next_integration_tick = Instant::now() + INTEGRATION_TICK;
+        }
+
+        if now >= next_tick {
+            needs_draw |= app.expire_transient_status();
             needs_draw |= app.update_playback(conn)?;
 
             if app.current.is_some() {
@@ -76,6 +88,7 @@ fn run_loop(
         }
 
         let input_wait = next_tick
+            .min(next_integration_tick)
             .checked_duration_since(Instant::now())
             .unwrap_or(Duration::ZERO);
         if event::poll(input_wait)? {

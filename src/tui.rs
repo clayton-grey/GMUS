@@ -164,7 +164,7 @@ impl App {
             track_notifications_visible: true,
             transient_status: None,
             message: String::from(
-                "Tab pane  Enter select/play  x play  c pause  p playlists  v stop  b/z next/prev",
+                "Tab pane  Enter select/play  x play  c play/pause  p playlists  v stop  b/z next/prev",
             ),
         };
         app.refresh_playlist_tracks(conn)?;

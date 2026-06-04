@@ -278,7 +278,13 @@ fn key_controls_match_cmus_style_bindings() {
 
     app.handle_key(&conn, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.message, "nothing playing");
+    assert_eq!(app.logical_state(), PlaybackState::Playing);
+    assert_eq!(
+        app.current
+            .as_ref()
+            .map(|current| current.track.title.as_deref()),
+        Some(Some("first track"))
+    );
 
     app.handle_key(&conn, KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE))
         .unwrap();

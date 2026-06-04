@@ -250,7 +250,7 @@ impl App {
                 self.sync_selection();
             }
             KeyCode::Char('c') => {
-                self.toggle_pause_current()?;
+                self.toggle_pause(conn)?;
             }
             KeyCode::Char('p') => self.open_playlist_panel(conn)?,
             KeyCode::Char('+') | KeyCode::Char('=') => {

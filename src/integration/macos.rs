@@ -74,7 +74,6 @@ impl Integration for LazyMacIntegration {
             if let Some(inner) = &mut self.inner {
                 inner.publish_event(event)?;
             }
-            self.inner = None;
             return Ok(());
         }
 
