@@ -1,4 +1,7 @@
-use crate::db::LibraryTrack;
+use anyhow::Result;
+use rusqlite::Connection;
+
+use crate::db::{self, LibraryTrack};
 
 use super::browser::track_root_label;
 use super::layout::{BOTTOM_STATUS_ROWS, COMMAND_OUTPUT_MAX_ROWS};
@@ -417,7 +420,7 @@ impl App {
         }
     }
 
-    pub(super) fn confirm_filter(&mut self) {
+    pub(super) fn confirm_filter(&mut self, conn: &Connection) -> Result<()> {
         let warning = FilterQuery::parse(&self.filter)
             .warning()
             .map(str::to_string);
@@ -428,9 +431,11 @@ impl App {
         self.reset_shuffle_order();
         self.sync_selection();
         self.message = warning.unwrap_or_else(|| format!("filter: {}", self.filter_display()));
+        self.save_filter_state(conn)?;
+        Ok(())
     }
 
-    pub(super) fn clear_filter(&mut self) {
+    pub(super) fn clear_filter(&mut self, conn: &Connection) -> Result<()> {
         let selected_tree_entry = self.selected_tree_entry().cloned();
         let selected_media_item_id = self.selected_playable_media_item_id();
 
@@ -442,6 +447,15 @@ impl App {
             selected_media_item_id,
         );
         self.message = String::from("filter cleared");
+        self.save_filter_state(conn)?;
+        Ok(())
+    }
+
+    pub(super) fn save_filter_state(&self, conn: &Connection) -> Result<()> {
+        if self.restore_filter {
+            db::save_filter(conn, &self.filter)?;
+        }
+        Ok(())
     }
 
     pub(super) fn filter_bar_visible(&self) -> bool {
@@ -462,6 +476,7 @@ impl App {
             || self.command_output_visible()
             || self.filter_mode
             || self.playlist_panel_open
+            || self.keymap_panel_open
     }
 
     pub(super) fn command_output_height(&self) -> u16 {

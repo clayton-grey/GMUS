@@ -50,6 +50,12 @@ pub struct SavedBrowserSelection {
     pub media_item_id: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedKeyBinding {
+    pub action: String,
+    pub key: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct LibraryTrack {
     pub media_item_id: i64,
@@ -101,6 +107,15 @@ impl LibraryTrack {
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    migrate(&conn)?;
+    Ok(conn)
+}
+
+#[cfg(test)]
+pub(crate) fn open_in_memory_for_tests() -> Result<Connection> {
+    let conn = Connection::open_in_memory()?;
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     migrate(&conn)?;
@@ -214,6 +229,25 @@ fn migrate_v1(conn: &Connection) -> Result<()> {
             updated_at      INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS app_key_bindings (
+            action          TEXT NOT NULL,
+            key             TEXT NOT NULL,
+            updated_at      INTEGER NOT NULL,
+            PRIMARY KEY (action, key)
+        );
+
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key             TEXT PRIMARY KEY,
+            value           TEXT NOT NULL,
+            updated_at      INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS app_filter_state (
+            id              INTEGER PRIMARY KEY CHECK (id = 1),
+            filter          TEXT NOT NULL,
+            updated_at      INTEGER NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_locations_media_item
             ON locations(media_item_id);
         CREATE INDEX IF NOT EXISTS idx_play_events_media_item
@@ -238,6 +272,7 @@ fn migrate_v1(conn: &Connection) -> Result<()> {
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     ensure_playlist_tracks_allow_duplicates(conn)?;
+    ensure_key_bindings_allow_duplicates(conn)?;
     conn.execute_batch(
         r#"
         CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist_position
@@ -475,6 +510,137 @@ pub fn save_browser_selection(conn: &Connection, selection: &SavedBrowserSelecti
     Ok(())
 }
 
+pub fn key_bindings(conn: &Connection) -> Result<Vec<SavedKeyBinding>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT action, key
+        FROM app_key_bindings
+        ORDER BY action, key
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(SavedKeyBinding {
+            action: row.get(0)?,
+            key: row.get(1)?,
+        })
+    })?;
+
+    let mut bindings = Vec::new();
+    for row in rows {
+        bindings.push(row?);
+    }
+    Ok(bindings)
+}
+
+pub fn save_key_binding(conn: &Connection, binding: &SavedKeyBinding) -> Result<()> {
+    let now = now_unix();
+    conn.execute(
+        r#"
+        INSERT INTO app_key_bindings (action, key, updated_at)
+        VALUES (?1, ?2, ?3)
+        ON CONFLICT(action, key) DO UPDATE SET
+            updated_at = excluded.updated_at
+        "#,
+        params![binding.action.as_str(), binding.key.as_str(), now],
+    )?;
+    Ok(())
+}
+
+pub fn delete_key_binding(conn: &Connection, action: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM app_key_bindings WHERE action = ?1",
+        params![action],
+    )?;
+    Ok(())
+}
+
+pub fn delete_key_bindings(conn: &Connection) -> Result<()> {
+    conn.execute("DELETE FROM app_key_bindings", [])?;
+    Ok(())
+}
+
+pub fn delete_key_binding_key(conn: &Connection, action: &str, key: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM app_key_bindings WHERE action = ?1 AND key = ?2",
+        params![action, key],
+    )?;
+    Ok(())
+}
+
+pub fn restore_filter_enabled(conn: &Connection) -> Result<bool> {
+    app_setting_bool(conn, "restore-filter", true)
+}
+
+pub fn save_restore_filter_enabled(conn: &Connection, enabled: bool) -> Result<()> {
+    save_app_setting_bool(conn, "restore-filter", enabled)
+}
+
+pub fn restore_track_enabled(conn: &Connection) -> Result<bool> {
+    app_setting_bool(conn, "restore-track", true)
+}
+
+pub fn save_restore_track_enabled(conn: &Connection, enabled: bool) -> Result<()> {
+    save_app_setting_bool(conn, "restore-track", enabled)
+}
+
+pub fn saved_filter(conn: &Connection) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT filter FROM app_filter_state WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn save_filter(conn: &Connection, filter: &str) -> Result<()> {
+    let now = now_unix();
+    conn.execute(
+        r#"
+        INSERT INTO app_filter_state (id, filter, updated_at)
+        VALUES (1, ?1, ?2)
+        ON CONFLICT(id) DO UPDATE SET
+            filter = excluded.filter,
+            updated_at = excluded.updated_at
+        "#,
+        params![filter, now],
+    )?;
+    Ok(())
+}
+
+fn app_setting_bool(conn: &Connection, key: &str, default: bool) -> Result<bool> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    Ok(matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    ))
+}
+
+fn save_app_setting_bool(conn: &Connection, key: &str, enabled: bool) -> Result<()> {
+    let now = now_unix();
+    let value = if enabled { "1" } else { "0" };
+    conn.execute(
+        r#"
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (?1, ?2, ?3)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = excluded.updated_at
+        "#,
+        params![key, value, now],
+    )?;
+    Ok(())
+}
+
 pub fn add_tracks_to_playlist(
     conn: &Connection,
     playlist_id: i64,
@@ -649,6 +815,46 @@ fn ensure_playlist_tracks_allow_duplicates(conn: &Connection) -> Result<()> {
         ORDER BY playlist_id, position, added_at, media_item_id;
 
         DROP TABLE playlist_tracks_old;
+        "#,
+    )?;
+    Ok(())
+}
+
+fn ensure_key_bindings_allow_duplicates(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(app_key_bindings)")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+    })?;
+    let mut action_pk = 0;
+    let mut key_pk = 0;
+    for row in rows {
+        let (column, pk) = row?;
+        match column.as_str() {
+            "action" => action_pk = pk,
+            "key" => key_pk = pk,
+            _ => {}
+        }
+    }
+    if action_pk == 1 && key_pk == 2 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        r#"
+        ALTER TABLE app_key_bindings RENAME TO app_key_bindings_old;
+
+        CREATE TABLE app_key_bindings (
+            action          TEXT NOT NULL,
+            key             TEXT NOT NULL,
+            updated_at      INTEGER NOT NULL,
+            PRIMARY KEY (action, key)
+        );
+
+        INSERT OR IGNORE INTO app_key_bindings (action, key, updated_at)
+        SELECT action, key, updated_at
+        FROM app_key_bindings_old;
+
+        DROP TABLE app_key_bindings_old;
         "#,
     )?;
     Ok(())
@@ -1323,6 +1529,51 @@ mod tests {
         save_browser_selection(&conn, &selection).unwrap();
 
         assert_eq!(browser_selection(&conn).unwrap(), Some(selection));
+    }
+
+    #[test]
+    fn key_bindings_round_trip_and_delete() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let first = SavedKeyBinding {
+            action: "toggle-info".to_string(),
+            key: "none:char:o".to_string(),
+        };
+        let second = SavedKeyBinding {
+            action: "toggle-info".to_string(),
+            key: "none:char:m".to_string(),
+        };
+
+        save_key_binding(&conn, &first).unwrap();
+        save_key_binding(&conn, &second).unwrap();
+        assert_eq!(
+            key_bindings(&conn).unwrap(),
+            vec![second.clone(), first.clone()]
+        );
+
+        delete_key_binding_key(&conn, &first.action, &first.key).unwrap();
+        assert_eq!(key_bindings(&conn).unwrap(), vec![second.clone()]);
+
+        delete_key_binding(&conn, &second.action).unwrap();
+        assert!(key_bindings(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn restore_settings_and_filter_round_trip() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        assert!(restore_filter_enabled(&conn).unwrap());
+        assert!(restore_track_enabled(&conn).unwrap());
+        assert_eq!(saved_filter(&conn).unwrap(), None);
+
+        save_restore_filter_enabled(&conn, false).unwrap();
+        save_restore_track_enabled(&conn, false).unwrap();
+        save_filter(&conn, "artist:eno").unwrap();
+
+        assert!(!restore_filter_enabled(&conn).unwrap());
+        assert!(!restore_track_enabled(&conn).unwrap());
+        assert_eq!(saved_filter(&conn).unwrap().as_deref(), Some("artist:eno"));
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::db::{self, SavedBrowserSelection};
+use crate::db::{self, LibraryTrack, SavedBrowserSelection};
 
 use super::{App, TreeEntry};
 
@@ -64,12 +64,21 @@ impl App {
         true
     }
 
+    #[cfg(test)]
     pub(super) fn save_browser_selection(&self, conn: &Connection) -> Result<()> {
         let Some(tree_entry) = self.selected_tree_entry() else {
             return Ok(());
         };
         let selection =
             saved_selection_from_tree_entry(tree_entry, self.selected_playable_media_item_id());
+        db::save_browser_selection(conn, &selection)
+    }
+
+    pub(super) fn save_current_track_selection(&self, conn: &Connection) -> Result<()> {
+        let Some(current) = &self.current else {
+            return Ok(());
+        };
+        let selection = saved_selection_from_track(&current.track);
         db::save_browser_selection(conn, &selection)
     }
 
@@ -108,6 +117,7 @@ impl App {
     }
 }
 
+#[cfg(test)]
 fn saved_selection_from_tree_entry(
     entry: &TreeEntry,
     media_item_id: Option<i64>,
@@ -147,6 +157,16 @@ fn saved_selection_from_tree_entry(
     }
 
     selection
+}
+
+fn saved_selection_from_track(track: &LibraryTrack) -> SavedBrowserSelection {
+    SavedBrowserSelection {
+        tree_kind: TREE_KIND_ARTIST.to_string(),
+        artist: Some(track.tree_artist().to_string()),
+        album: None,
+        playlist_id: None,
+        media_item_id: Some(track.media_item_id),
+    }
 }
 
 fn saved_tree_matches_entry(selection: &SavedBrowserSelection, entry: &TreeEntry) -> bool {

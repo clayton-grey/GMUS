@@ -1,15 +1,12 @@
 # GMUS
 
-GMUS is an early Rust prototype for a small terminal music player inspired by
-cmus, with macOS compatibility and a low compute footprint as first-class goals.
+GMUS is my take on an alternative to CMUS with some additional ammentities and UX adjustments based on my sensitibilities. It changes things to a unified interfaced based around the main CMUS library view with additional views to show metadata and manage playlists. Additionally, this provided an opportunity to explore how AI co-development has continued to evolve.
 
-The initial implementation focuses on the foundation:
-
-- SQLite-backed play history that is independent from any library membership.
-- Tag scanning with `lofty`.
-- Cover-art discovery from embedded tags and folder images.
-- A small Ratatui shell that gives the application a real terminal surface.
-- Thin traits for playback and OS integrations.
+- adds a quick-to-use filtering mechanism
+- an alternative stacked layout for narrow windows
+- improved feedback with more in-app command visibiility
+- reworking of hotkeys
+- support for media playback keys though an OS integration
 
 ## Install And Build
 
@@ -92,15 +89,15 @@ The TUI is moving toward the cmus library view:
 
 - left pane: artists, with expandable album rows
 - right pane: album headers with years/durations and selectable tracks for the selected artist or album
-- bottom info pane: metadata for the selected track, or inverted command help/output for `:` commands
+- bottom info pane: metadata for the selected track, keymap help, playlist management, or inverted command help/output for `:` commands
 - command/filter row: shown below the bottom info pane when active
 - bottom strip: current track, position, playback state, and transient messages
 - narrow terminals stack the artist pane above the track pane, with info still at the bottom
 
 Keyboard control:
 
-- `Tab`: switch between artist tree, track pane, and playlist pane when open
-- `Up` / `Down` or `j` / `k`: move selection
+- `Tab`: switch between artist tree, track pane, and bottom management pane when open
+- `Up` / `Down`: move selection
 - `Enter`: play the first listed track for the selected tree item, or play the selected track
 - `Space`: expand/collapse in the tree
 - `e`: expand/collapse the selected artist
@@ -109,6 +106,9 @@ Keyboard control:
 - `x`: play
 - `c`: pause/resume
 - `p`: open or focus the playlist pane
+- `k`: open or focus the keymap pane
+- In the keymap pane, `Enter` edits non-reserved mappings, `Esc` cancels editing, and `Backspace` resets it to default
+- `Enter`, `Esc`, and `:` are reserved for their default behaviors and cannot be edited or mapped to another action
 - `+` / `=`: add the selected track, artist, album, or playlist entry to the active playlist
 - `-`: remove the selected track or playlist entry from the active playlist
 - `v`: stop
@@ -127,6 +127,9 @@ Keyboard control:
 Playback advances through the active filtered track set and selected play target
 when continuous mode is on, so next, previous, shuffle, repeat, and natural
 auto-advance stay inside the current filter.
+On restart, the browser restores the last played track at the artist level and
+restores the last confirmed filter when those restore settings are enabled.
+Both are on by default.
 
 Library commands:
 
@@ -138,6 +141,10 @@ Library commands:
 - `:playlist NAME`: create/select a playlist and open the playlist pane
 - `:playlist-clear NAME`: remove all tracks from a playlist
 - `:playlist-delete NAME`: delete a playlist
+- `:keymap`: show the keymap pane
+- `:keymap-reset`: reset custom key mappings to defaults
+- `:restore-filter [on|off|toggle|status]`: toggle whether the last filter is restored on startup
+- `:restore-track [on|off|toggle|status]`: toggle whether the last played track is restored on startup
 - `:filter TEXT`: apply a filter from command mode
 - `:clear`: clear the active filter
 - `:clear-output`, `:close`, or `:hide`: close command output and return the info pane to metadata

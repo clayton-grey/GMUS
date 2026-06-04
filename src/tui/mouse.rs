@@ -11,6 +11,7 @@ pub(super) struct MouseLayout {
     pub(super) info_visible: bool,
     pub(super) input_visible: bool,
     pub(super) playlist_info_visible: bool,
+    pub(super) keymap_info_visible: bool,
 }
 
 #[cfg(test)]
@@ -27,6 +28,7 @@ impl MouseLayout {
             info_visible: false,
             input_visible: false,
             playlist_info_visible: false,
+            keymap_info_visible: false,
         }
     }
 
@@ -38,6 +40,11 @@ impl MouseLayout {
 
     pub(super) fn with_playlist_info(mut self, playlist_info_visible: bool) -> Self {
         self.playlist_info_visible = playlist_info_visible;
+        self
+    }
+
+    pub(super) fn with_keymap_info(mut self, keymap_info_visible: bool) -> Self {
+        self.keymap_info_visible = keymap_info_visible;
         self
     }
 }
@@ -61,6 +68,9 @@ pub(super) fn mouse_pane(column: u16, row: u16, layout: MouseLayout) -> Option<F
     if browser_height == 0 || row >= browser_height {
         if layout.playlist_info_visible && info_height > 0 && row < browser_height + info_height {
             return Some(FocusPane::Playlist);
+        }
+        if layout.keymap_info_visible && info_height > 0 && row < browser_height + info_height {
+            return Some(FocusPane::Keymap);
         }
         return None;
     }

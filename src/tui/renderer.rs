@@ -2,6 +2,7 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::widgets::{Block, Borders, List, Paragraph};
 use ratatui::Frame;
 
+use super::keymap::keymap_items;
 use super::layout::{
     info_panel_height, BOTTOM_STATUS_ROWS, LIST_SCROLL_PADDING, NARROW_TREE_PERCENT,
     STACKED_PANE_WIDTH, WIDE_TREE_PERCENT,
@@ -131,10 +132,15 @@ fn render_info_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let command_info = app.command_mode || app.command_output_visible();
     let filter_info = !command_info && app.filter_mode;
     let playlist_info = !command_info && !filter_info && app.playlist_panel_open;
+    let keymap_info = !command_info && !filter_info && !playlist_info && app.keymap_panel_open;
     let info_inner_width = usize::from(area.width.saturating_sub(2));
     let info_inner_height = area.height.saturating_sub(2);
     if playlist_info {
         render_playlist_info_pane(frame, app, area, info_inner_width);
+        return;
+    }
+    if keymap_info {
+        render_keymap_info_pane(frame, app, area, info_inner_width);
         return;
     }
 
@@ -185,6 +191,25 @@ pub(super) fn render_playlist_info_pane(
         .scroll_padding(LIST_SCROLL_PADDING)
         .highlight_style(pane_highlight_style(playlist_active));
     frame.render_stateful_widget(playlist, area, &mut app.playlist_state);
+}
+
+pub(super) fn render_keymap_info_pane(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    info_inner_width: usize,
+) {
+    let keymap_active = pane_active(app, FocusPane::Keymap);
+    let keymap = List::new(keymap_items(app, info_inner_width))
+        .block(
+            Block::default()
+                .title(command_info_title(app))
+                .borders(Borders::ALL)
+                .border_style(pane_border_style(keymap_active)),
+        )
+        .scroll_padding(LIST_SCROLL_PADDING)
+        .highlight_style(pane_highlight_style(keymap_active));
+    frame.render_stateful_widget(keymap, area, &mut app.keymap_state);
 }
 
 fn render_input_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {

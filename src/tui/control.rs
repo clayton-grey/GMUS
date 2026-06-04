@@ -2,6 +2,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use rusqlite::Connection;
 
+use super::keymap::KeyAction;
 use super::mouse::{mouse_pane, MouseLayout};
 use super::{App, FocusPane, TreeEntry};
 
@@ -63,6 +64,7 @@ impl App {
                 }
             }
             FocusPane::Playlist => self.move_playlist_selection(direction, amount),
+            FocusPane::Keymap => self.move_keymap_selection(direction, amount),
         }
         self.sync_selection();
     }
@@ -71,7 +73,8 @@ impl App {
         self.focus = match self.focus {
             FocusPane::Tree => FocusPane::Tracks,
             FocusPane::Tracks if self.playlist_panel_open => FocusPane::Playlist,
-            FocusPane::Tracks | FocusPane::Playlist => FocusPane::Tree,
+            FocusPane::Tracks if self.keymap_panel_open => FocusPane::Keymap,
+            FocusPane::Tracks | FocusPane::Playlist | FocusPane::Keymap => FocusPane::Tree,
         };
     }
 
@@ -87,6 +90,7 @@ impl App {
             }
             FocusPane::Tracks => self.play_selected_row(conn)?,
             FocusPane::Playlist => self.activate_playlist_selection(conn)?,
+            FocusPane::Keymap => self.activate_keymap_selection(),
         }
         self.focus = focus;
         self.sync_selection();
@@ -106,6 +110,7 @@ impl App {
                 self.toggle_selected_playlist_expansion();
                 self.sync_selection();
             }
+            FocusPane::Keymap => self.activate_keymap_selection(),
         }
     }
 
@@ -169,11 +174,9 @@ impl App {
             self.shutdown(conn)?;
             return Ok(true);
         }
-        if matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R'))
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-        {
-            self.clear_command_output();
-            self.refresh(conn)?;
+
+        if self.keymap_capture_action.is_some() {
+            self.capture_key_binding(conn, key)?;
             return Ok(false);
         }
 
@@ -187,7 +190,7 @@ impl App {
                     } else if self.filter.is_empty() {
                         self.message = String::from("command cancelled");
                     } else {
-                        self.clear_filter();
+                        self.clear_filter(conn)?;
                     }
                 }
                 KeyCode::Enter => self.submit_command(conn),
@@ -204,9 +207,9 @@ impl App {
         if self.filter_mode {
             match key.code {
                 KeyCode::Esc => {
-                    self.clear_filter();
+                    self.clear_filter(conn)?;
                 }
-                KeyCode::Enter | KeyCode::Tab => self.confirm_filter(),
+                KeyCode::Enter | KeyCode::Tab => self.confirm_filter(conn)?,
                 KeyCode::Backspace => {
                     self.filter.pop();
                     self.selected_tree = 0;
@@ -228,69 +231,76 @@ impl App {
             return self.handle_command_focus_key(conn, key);
         }
 
-        if !matches!(key.code, KeyCode::Esc | KeyCode::Char(':')) {
+        let action = self.key_action_for_event(key);
+        if !matches!(key.code, KeyCode::Esc) && action != Some(KeyAction::CommandMode) {
             self.clear_command_output();
         }
 
-        match key.code {
-            KeyCode::Char('q') => {
+        if matches!(key.code, KeyCode::Esc) {
+            self.handle_escape(conn)?;
+        } else if let Some(action) = action {
+            return self.handle_key_action(conn, action);
+        }
+        Ok(false)
+    }
+
+    fn handle_key_action(&mut self, conn: &Connection, action: KeyAction) -> Result<bool> {
+        match action {
+            KeyAction::Quit => {
                 self.shutdown(conn)?;
                 return Ok(true);
             }
-            KeyCode::Esc => self.handle_escape(),
-            KeyCode::Tab => self.toggle_focus(),
-            KeyCode::Down | KeyCode::Char('j') => self.move_down(),
-            KeyCode::Up | KeyCode::Char('k') => self.move_up(),
-            KeyCode::PageDown => self.page_down(),
-            KeyCode::PageUp => self.page_up(),
-            KeyCode::Enter => self.activate(conn)?,
-            KeyCode::Char(' ') => self.space_action(),
-            KeyCode::Char('e') => {
+            KeyAction::RefreshLibrary => self.refresh(conn)?,
+            KeyAction::ToggleFocus => self.toggle_focus(),
+            KeyAction::MoveDown => self.move_down(),
+            KeyAction::MoveUp => self.move_up(),
+            KeyAction::PageDown => self.page_down(),
+            KeyAction::PageUp => self.page_up(),
+            KeyAction::Activate => self.activate(conn)?,
+            KeyAction::SpaceAction => self.space_action(),
+            KeyAction::Escape => self.handle_escape(conn)?,
+            KeyAction::ToggleArtistExpansion => {
                 self.toggle_artist_expansion();
                 self.sync_selection();
             }
-            KeyCode::Char('c') => {
-                self.toggle_pause(conn)?;
-            }
-            KeyCode::Char('p') => self.open_playlist_panel(conn)?,
-            KeyCode::Char('+') | KeyCode::Char('=') => {
-                self.add_selected_tracks_to_active_playlist(conn)?;
-            }
-            KeyCode::Char('-') => {
-                self.remove_selected_tracks_from_active_playlist(conn)?;
-            }
-            KeyCode::Char('C') => self.toggle_continuous(),
-            KeyCode::Char('x') => self.play_from_controls(conn)?,
-            KeyCode::Char('v') => self.stop_current(conn)?,
-            KeyCode::Char('b') => self.play_next(conn)?,
-            KeyCode::Char('z') => self.play_previous(conn)?,
-            KeyCode::Char('L') => self.toggle_play_target(),
-            KeyCode::Char('R') => self.toggle_repeat(),
-            KeyCode::Char('S') => self.toggle_shuffle(),
-            KeyCode::Char('i') => {
-                if self.playlist_panel_open {
+            KeyAction::ToggleKeymap => self.toggle_keymap_panel(),
+            KeyAction::ToggleInfo => {
+                if self.playlist_panel_open || self.keymap_panel_open {
                     self.show_track_info_panel();
                 } else {
                     self.toggle_info_panel();
                 }
             }
-            KeyCode::Char('I') => self.select_current_track(),
-            KeyCode::Char(':') => {
+            KeyAction::OpenPlaylist => self.open_playlist_panel(conn)?,
+            KeyAction::CommandMode => {
                 self.filter_mode = false;
                 self.command_mode = true;
                 self.command.clear();
                 self.clear_command_output();
                 self.message = String::from("typing command");
             }
-            KeyCode::Char('/') => {
+            KeyAction::FilterMode => {
                 self.filter_mode = true;
                 self.message = String::from("typing filter");
             }
-            KeyCode::Left | KeyCode::Char('h') => self.seek_relative(-SCRUB_SECONDS)?,
-            KeyCode::Right | KeyCode::Char('l') => self.seek_relative(SCRUB_SECONDS)?,
-            KeyCode::Char(',') => self.seek_relative(-60)?,
-            KeyCode::Char('.') => self.seek_relative(60)?,
-            _ => {}
+            KeyAction::PlaySelected => self.play_from_controls(conn)?,
+            KeyAction::TogglePause => self.toggle_pause(conn)?,
+            KeyAction::Stop => self.stop_current(conn)?,
+            KeyAction::PlayNext => self.play_next(conn)?,
+            KeyAction::PlayPrevious => self.play_previous(conn)?,
+            KeyAction::SeekBack => self.seek_relative(-SCRUB_SECONDS)?,
+            KeyAction::SeekForward => self.seek_relative(SCRUB_SECONDS)?,
+            KeyAction::SeekBackMinute => self.seek_relative(-60)?,
+            KeyAction::SeekForwardMinute => self.seek_relative(60)?,
+            KeyAction::ToggleContinuous => self.toggle_continuous(),
+            KeyAction::TogglePlayTarget => self.toggle_play_target(),
+            KeyAction::ToggleRepeat => self.toggle_repeat(),
+            KeyAction::ToggleShuffle => self.toggle_shuffle(),
+            KeyAction::SelectCurrent => self.select_current_track(),
+            KeyAction::AddToPlaylist => self.add_selected_tracks_to_active_playlist(conn)?,
+            KeyAction::RemoveFromPlaylist => {
+                self.remove_selected_tracks_from_active_playlist(conn)?
+            }
         }
         Ok(false)
     }
@@ -359,6 +369,7 @@ impl App {
             info_visible: self.info_area_visible(),
             input_visible: self.input_bar_visible(),
             playlist_info_visible: self.playlist_panel_open,
+            keymap_info_visible: self.keymap_panel_open,
         };
         let Some(pane) = mouse_pane(mouse.column, mouse.row, layout) else {
             return false;
@@ -368,11 +379,12 @@ impl App {
         true
     }
 
-    pub(super) fn handle_escape(&mut self) {
+    pub(super) fn handle_escape(&mut self, conn: &Connection) -> Result<()> {
         if self.clear_command_output() {
             self.message = String::from("output cleared");
         } else {
-            self.clear_filter();
+            self.clear_filter(conn)?;
         }
+        Ok(())
     }
 }

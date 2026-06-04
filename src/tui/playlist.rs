@@ -191,6 +191,7 @@ impl App {
         self.active_playlist_id = Some(playlist.id);
         self.expanded_playlists.insert(playlist.id);
         self.playlist_panel_open = true;
+        self.keymap_panel_open = false;
         self.sync_selection();
         self.select_playlist_row_for_id(playlist.id);
         Ok(format!("playlist: {}", playlist.name))
@@ -210,6 +211,7 @@ impl App {
         self.active_playlist_id = Some(playlist.id);
         self.expanded_playlists.insert(playlist.id);
         self.playlist_panel_open = true;
+        self.keymap_panel_open = false;
         self.sync_selection();
         self.select_playlist_row_for_id(playlist.id);
         Ok(format!("cleared {removed} tracks from {}", playlist.name))
@@ -264,6 +266,7 @@ impl App {
         }
 
         self.playlist_panel_open = true;
+        self.keymap_panel_open = false;
         if self.active_playlist_id.is_none() {
             self.active_playlist_id = self.playlists.first().map(|playlist| playlist.id);
         }
@@ -280,8 +283,9 @@ impl App {
 
     pub(super) fn show_track_info_panel(&mut self) {
         self.playlist_panel_open = false;
+        self.keymap_panel_open = false;
         self.info_panel_visible = true;
-        if self.focus == FocusPane::Playlist {
+        if matches!(self.focus, FocusPane::Playlist | FocusPane::Keymap) {
             self.focus = FocusPane::Tree;
         }
         self.apply_selection_state();
@@ -395,6 +399,7 @@ impl App {
                 let media_item_ids = self.selected_source_media_item_ids();
                 db::remove_tracks_from_playlist(conn, playlist_id, &media_item_ids)?
             }
+            FocusPane::Keymap => 0,
         };
         if removed == 0 {
             self.message = String::from("no selected tracks to remove");
@@ -442,6 +447,7 @@ impl App {
                 })
                 .into_iter()
                 .collect(),
+            FocusPane::Keymap => Vec::new(),
         };
         indices
             .into_iter()

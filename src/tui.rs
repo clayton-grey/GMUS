@@ -15,6 +15,7 @@ mod control;
 mod filter;
 mod formatting;
 mod jobs;
+mod keymap;
 mod layout;
 mod lines;
 mod media_sync;
@@ -33,6 +34,7 @@ pub use runtime::run;
 
 use browser::{TrackRow, TreeEntry};
 use jobs::LibraryJobRunner;
+use keymap::{KeyAction, KeySpec};
 use playback::{PlayTarget, PlaybackEntry, PlaybackSource, PlayingTrack};
 use playlist::PlaylistPanelEntry;
 use status::TransientStatus;
@@ -42,6 +44,7 @@ enum FocusPane {
     Tree,
     Tracks,
     Playlist,
+    Keymap,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -70,17 +73,22 @@ struct App {
     tree_state: ListState,
     track_state: ListState,
     playlist_state: ListState,
+    keymap_state: ListState,
     selected_tree: usize,
     selected_track_row: usize,
     selected_playlist_row: usize,
+    selected_keymap_row: usize,
     expanded_artists: HashSet<String>,
     compilations_expanded: bool,
     playlists_expanded: bool,
     expanded_playlists: HashSet<i64>,
     active_playlist_id: Option<i64>,
     playlist_panel_open: bool,
+    keymap_panel_open: bool,
     focus: FocusPane,
     filter: String,
+    restore_filter: bool,
+    restore_track: bool,
     filter_mode: bool,
     command: String,
     command_mode: bool,
@@ -89,6 +97,8 @@ struct App {
     command_roots: Vec<db::LibraryRoot>,
     command_selected: usize,
     command_focus: bool,
+    key_bindings: HashMap<KeyAction, Vec<KeySpec>>,
+    keymap_capture_action: Option<KeyAction>,
     library_job: Option<LibraryJobRunner>,
     info_panel_visible: bool,
     play_target: PlayTarget,
@@ -127,17 +137,22 @@ impl App {
             tree_state: ListState::default(),
             track_state: ListState::default(),
             playlist_state: ListState::default(),
+            keymap_state: ListState::default(),
             selected_tree: 0,
             selected_track_row: 0,
             selected_playlist_row: 0,
+            selected_keymap_row: 0,
             expanded_artists: HashSet::new(),
             compilations_expanded: false,
             playlists_expanded: false,
             expanded_playlists: HashSet::new(),
             active_playlist_id: None,
             playlist_panel_open: false,
+            keymap_panel_open: false,
             focus: FocusPane::Tree,
             filter: String::new(),
+            restore_filter: db::restore_filter_enabled(conn)?,
+            restore_track: db::restore_track_enabled(conn)?,
             filter_mode: false,
             command: String::new(),
             command_mode: false,
@@ -146,6 +161,8 @@ impl App {
             command_roots: Vec::new(),
             command_selected: 0,
             command_focus: false,
+            key_bindings: HashMap::new(),
+            keymap_capture_action: None,
             library_job: None,
             info_panel_visible: true,
             play_target: PlayTarget::Library,
@@ -165,16 +182,29 @@ impl App {
             track_notifications_visible: true,
             transient_status: None,
             message: String::from(
-                "Tab pane  Enter select/play  x play  c play/pause  p playlists  v stop  b/z next/prev",
+                "Tab pane  Enter select/play  k keymap  x play  c play/pause  p playlists  v stop",
             ),
         };
+        app.load_key_bindings(conn)?;
         app.refresh_playlist_tracks(conn)?;
         app.rebuild_search_cache();
-        match db::browser_selection(conn)? {
-            Some(selection) => {
-                app.restore_saved_browser_selection(&selection);
+        if app.restore_filter {
+            if let Some(filter) = db::saved_filter(conn)? {
+                app.filter = filter;
             }
-            None => app.sync_selection(),
+        }
+        if app.restore_track {
+            match db::browser_selection(conn)? {
+                Some(selection) => {
+                    if app.restore_saved_browser_selection(&selection) {
+                        app.focus = FocusPane::Tracks;
+                        app.apply_selection_state();
+                    }
+                }
+                None => app.sync_selection(),
+            }
+        } else {
+            app.sync_selection();
         }
         Ok(app)
     }

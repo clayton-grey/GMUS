@@ -468,6 +468,38 @@ impl App {
         }
     }
 
+    pub(super) fn select_current_track_for_restore(&mut self) {
+        let Some(index) = self
+            .current
+            .as_ref()
+            .and_then(|current| self.track_index_for_media_item_id(current.track.media_item_id))
+        else {
+            return;
+        };
+        let Some(track) = self.tracks.get(index) else {
+            return;
+        };
+        let artist = track.tree_artist().to_string();
+        if let Some(position) = self.tree_entries().iter().position(|entry| {
+            matches!(entry, TreeEntry::Artist { artist: entry_artist } if entry_artist == &artist)
+        }) {
+            self.selected_tree = position;
+            self.rebuild_track_rows();
+        } else {
+            self.select_track_index(index);
+        }
+
+        if let Some(position) = self
+            .track_rows()
+            .iter()
+            .position(|row| row.track_index() == Some(index))
+        {
+            self.selected_track_row = position;
+        }
+        self.focus = super::FocusPane::Tracks;
+        self.apply_selection_state();
+    }
+
     pub(super) fn select_track_index(&mut self, index: usize) {
         if let Some(track) = self.tracks.get(index) {
             let artist = track.tree_artist().to_string();

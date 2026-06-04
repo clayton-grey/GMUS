@@ -24,6 +24,10 @@ pub(super) const COMMAND_NAMES: &[&str] = &[
     "playlist",
     "playlist-clear",
     "playlist-delete",
+    "keymap",
+    "keymap-reset",
+    "restore-filter",
+    "restore-track",
     "filter",
     "clear",
     "clear-output",
@@ -31,7 +35,7 @@ pub(super) const COMMAND_NAMES: &[&str] = &[
 ];
 
 #[cfg(not(all(target_os = "macos", feature = "macos-media-session")))]
-const BASE_COMMAND_NAMES: [&str; 10] = [
+const BASE_COMMAND_NAMES: [&str; 14] = [
     "add",
     "remove",
     "update",
@@ -39,6 +43,10 @@ const BASE_COMMAND_NAMES: [&str; 10] = [
     "playlist",
     "playlist-clear",
     "playlist-delete",
+    "keymap",
+    "keymap-reset",
+    "restore-filter",
+    "restore-track",
     "filter",
     "clear",
     "clear-output",
@@ -311,6 +319,24 @@ fn matches_notice(matches: &[String]) -> String {
     }
 }
 
+fn toggle_command_value(raw_value: &str, current: bool) -> Option<bool> {
+    match raw_value.trim().to_ascii_lowercase().as_str() {
+        "" | "toggle" => Some(!current),
+        "status" => Some(current),
+        "on" | "yes" | "true" | "show" | "enable" | "enabled" => Some(true),
+        "off" | "no" | "false" | "hide" | "disable" | "disabled" => Some(false),
+        _ => None,
+    }
+}
+
+fn on_off(enabled: bool) -> &'static str {
+    if enabled {
+        "on"
+    } else {
+        "off"
+    }
+}
+
 fn library_job_for_command(
     input: &str,
 ) -> Option<std::result::Result<library::LibraryJob, String>> {
@@ -541,15 +567,27 @@ impl App {
             "playlist-delete" | "pl-delete" | "playlist-rm" | "pl-rm" => {
                 self.command_playlist_delete(conn, rest)
             }
+            "keymap" | "keys" => {
+                self.clear_command_output();
+                self.toggle_keymap_panel();
+                Ok(String::from("keymap panel"))
+            }
+            "keymap-reset" | "keys-reset" => {
+                self.clear_command_output();
+                self.reset_key_bindings(conn)?;
+                Ok(String::from("keymap reset to defaults"))
+            }
+            "restore-filter" => self.command_restore_filter(conn, rest),
+            "restore-track" => self.command_restore_track(conn, rest),
             "filter" | "f" => {
                 self.clear_command_output();
                 self.filter = rest.to_string();
-                self.confirm_filter();
+                self.confirm_filter(conn)?;
                 Ok(format!("filter: {}", self.filter_display()))
             }
             "clear" | "clear-filter" => {
                 self.clear_command_output();
-                self.clear_filter();
+                self.clear_filter(conn)?;
                 Ok(String::from("filter cleared"))
             }
             "clear-output" | "close" | "hide" => {
@@ -592,6 +630,41 @@ impl App {
                 "hidden"
             }
         )
+    }
+
+    fn command_restore_filter(&mut self, conn: &Connection, raw_value: &str) -> Result<String> {
+        let Some(enabled) = toggle_command_value(raw_value, self.restore_filter) else {
+            return Ok(String::from(
+                "usage: :restore-filter [on|off|toggle|status]",
+            ));
+        };
+        if raw_value.trim().eq_ignore_ascii_case("status") {
+            return Ok(format!("restore filter {}", on_off(self.restore_filter)));
+        }
+
+        self.restore_filter = enabled;
+        db::save_restore_filter_enabled(conn, enabled)?;
+        if enabled {
+            self.save_filter_state(conn)?;
+        }
+        Ok(format!("restore filter {}", on_off(enabled)))
+    }
+
+    fn command_restore_track(&mut self, conn: &Connection, raw_value: &str) -> Result<String> {
+        let Some(enabled) = toggle_command_value(raw_value, self.restore_track) else {
+            return Ok(String::from("usage: :restore-track [on|off|toggle|status]"));
+        };
+        if raw_value.trim().eq_ignore_ascii_case("status") {
+            return Ok(format!("restore track {}", on_off(self.restore_track)));
+        }
+
+        self.restore_track = enabled;
+        db::save_restore_track_enabled(conn, enabled)?;
+        if enabled {
+            self.save_current_track_selection(conn)?;
+            self.select_current_track_for_restore();
+        }
+        Ok(format!("restore track {}", on_off(enabled)))
     }
 
     fn command_add(&mut self, conn: &Connection, raw_path: &str) -> Result<String> {

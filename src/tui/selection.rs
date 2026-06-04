@@ -76,6 +76,18 @@ impl App {
         } else {
             self.playlist_state.select(Some(self.selected_playlist_row));
         }
+
+        let keymap_len = super::keymap::keymap_row_count();
+        self.selected_keymap_row = if keymap_len == 0 {
+            0
+        } else {
+            self.selected_keymap_row.min(keymap_len - 1)
+        };
+        if keymap_len == 0 || !self.keymap_panel_open {
+            self.keymap_state.select(None);
+        } else {
+            self.keymap_state.select(Some(self.selected_keymap_row));
+        }
     }
 
     pub(super) fn clamp_tree_selection(&mut self) {

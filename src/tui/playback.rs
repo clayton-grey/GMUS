@@ -297,6 +297,10 @@ impl App {
                     last_position_ms: 0,
                     listened_ms: 0,
                 });
+                if self.restore_track {
+                    self.save_current_track_selection(conn)?;
+                    self.select_current_track_for_restore();
+                }
                 self.publish_track_changed();
                 self.sync_integration_playback(true);
             }
@@ -392,7 +396,6 @@ impl App {
     }
 
     pub(super) fn shutdown(&mut self, conn: &Connection) -> Result<()> {
-        self.save_browser_selection(conn)?;
         self.finish_current(conn, false)?;
         self.player.stop()?;
         self.sync_integration_playback(true);

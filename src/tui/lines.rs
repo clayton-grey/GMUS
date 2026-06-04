@@ -23,6 +23,8 @@ pub(super) fn command_info_title(app: &App) -> &'static str {
         "Filter"
     } else if app.playlist_panel_open && !app.command_mode && !app.command_output_visible() {
         "Playlists"
+    } else if app.keymap_panel_open && !app.command_mode && !app.command_output_visible() {
+        "Keymap"
     } else if app.command_mode || app.command_output_visible() {
         "Command"
     } else {
@@ -47,6 +49,7 @@ pub(super) fn pane_active(app: &App, pane: FocusPane) -> bool {
         && !app.command_focus
         && app.focus == pane
         && (pane != FocusPane::Playlist || app.playlist_panel_open)
+        && (pane != FocusPane::Keymap || app.keymap_panel_open)
 }
 
 pub(super) fn pane_border_style(active: bool) -> Style {

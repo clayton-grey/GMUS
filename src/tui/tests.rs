@@ -16,6 +16,7 @@ use tempfile::tempdir;
 
 use super::filter::FilterQuery;
 use super::formatting::display_width;
+use super::keymap::{keymap_lines, keymap_row_for_action, KeyAction};
 use super::lines::{
     album_header_line, command_help_lines, command_info_lines, command_info_title,
     disc_divider_line, filter_info_lines, filter_line, input_line, metadata_lines,
@@ -270,7 +271,7 @@ fn continuous_flag_reflects_toggle_state() {
 #[test]
 fn key_controls_match_cmus_style_bindings() {
     let mut app = test_app(vec![test_track(1, "first track")]);
-    let conn = Connection::open_in_memory().unwrap();
+    let conn = test_conn();
 
     assert!(!app
         .handle_key(&conn, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
@@ -379,7 +380,7 @@ fn command_mode_executes_playlist_commands() {
 #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
 #[test]
 fn command_mode_toggles_track_notifications() {
-    let conn = Connection::open_in_memory().unwrap();
+    let conn = test_conn();
     let events = Rc::new(RefCell::new(Vec::new()));
     let mut app = test_app(Vec::new());
     app.integration = Box::new(RecordingIntegration {
@@ -461,7 +462,7 @@ fn library_command_focuses_root_list_and_toggles_roots() {
 #[test]
 fn colon_opens_command_bar() {
     let mut app = test_app(vec![test_track(1, "first track")]);
-    let conn = Connection::open_in_memory().unwrap();
+    let conn = test_conn();
 
     app.handle_key(&conn, KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE))
         .unwrap();
@@ -509,7 +510,12 @@ fn command_help_lists_available_commands() {
     let text = lines_text(&command_info_lines(&app, 120, 10));
 
     assert!(text.contains("commands: add remove update library playlist"));
-    assert!(text.contains("playlist-clear playlist-delete filter clear clear-output"));
+    assert!(text.contains("playlist-clear playlist-delete keymap keymap-reset"));
+    assert!(text.contains("restore-filter"));
+    assert!(text.contains("restore-track"));
+    assert!(text.contains("filter"));
+    assert!(text.contains("clear"));
+    assert!(text.contains("clear-output"));
     #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
     assert!(text.contains("notifications"));
     #[cfg(not(all(target_os = "macos", feature = "macos-media-session")))]
@@ -541,9 +547,541 @@ fn command_help_wraps_command_list() {
 }
 
 #[test]
+fn keymap_key_toggles_keymap_pane() {
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    let conn = test_conn();
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(app.keymap_panel_open);
+    assert_eq!(app.focus, FocusPane::Keymap);
+    assert!(pane_active(&app, FocusPane::Keymap));
+    assert_eq!(command_info_title(&app), "Keymap");
+    assert!(app.info_area_visible());
+    let keymap_text = keymap_text(&app);
+    assert!(keymap_text.contains("k"));
+    assert!(keymap_text.contains("toggle keymap pane"));
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(!app.keymap_panel_open);
+    assert_eq!(app.focus, FocusPane::Tree);
+}
+
+#[test]
+fn keymap_pane_edits_mapping_and_persists_override() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    let mut app = test_app(vec![test_track(1, "first track")]);
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+    app.selected_keymap_row = keymap_row_for_action(KeyAction::ToggleInfo).unwrap();
+    app.apply_selection_state();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+
+    assert_eq!(app.keymap_capture_action, Some(KeyAction::ToggleInfo));
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+        .unwrap();
+
+    assert_eq!(app.keymap_capture_action, None);
+    assert!(keymap_text(&app).contains("o"));
+    assert!(keymap_text(&app).contains("default i"));
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(!app.keymap_panel_open);
+    assert!(app.info_panel_visible);
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(!app.info_panel_visible);
+
+    let mut reloaded = test_app(vec![test_track(1, "first track")]);
+    reloaded.load_key_bindings(&conn).unwrap();
+    reloaded
+        .handle_key(&conn, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(!reloaded.info_panel_visible);
+}
+
+#[test]
+fn keymap_pane_adds_multiple_bindings_for_one_action() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    let mut app = test_app(vec![test_track(1, "first track")]);
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+    app.selected_keymap_row = keymap_row_for_action(KeyAction::ToggleInfo).unwrap();
+    app.apply_selection_state();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))
+        .unwrap();
+
+    let text = keymap_text(&app);
+    assert!(text.contains("i / o / m"));
+    assert!(text.contains("default i"));
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(!app.keymap_panel_open);
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(!app.info_panel_visible);
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.info_panel_visible);
+
+    let saved = db::key_bindings(&conn).unwrap();
+    assert_eq!(saved.len(), 2);
+
+    let mut reloaded = test_app(vec![test_track(1, "first track")]);
+    reloaded.load_key_bindings(&conn).unwrap();
+    reloaded
+        .handle_key(&conn, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(!reloaded.info_panel_visible);
+    reloaded
+        .handle_key(&conn, KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(reloaded.info_panel_visible);
+}
+
+#[test]
+fn keymap_pane_marks_colon_as_reserved() {
+    let app = test_app(vec![test_track(1, "first track")]);
+    let lines = keymap_lines(&app, 80);
+    let command_line = lines
+        .iter()
+        .find(|line| line_text(line).contains("enter command mode"))
+        .unwrap();
+
+    assert_eq!(command_line.spans[0].style, Style::default().fg(Color::Red));
+    assert!(line_text(command_line).contains("(reserved)"));
+}
+
+#[test]
+fn keymap_pane_marks_enter_as_reserved() {
+    let app = test_app(vec![test_track(1, "first track")]);
+    let lines = keymap_lines(&app, 80);
+    let activate_line = lines
+        .iter()
+        .find(|line| line_text(line).contains("play or activate selection"))
+        .unwrap();
+
+    assert_eq!(
+        activate_line.spans[0].style,
+        Style::default().fg(Color::Red)
+    );
+    assert!(line_text(activate_line).contains("(reserved)"));
+}
+
+#[test]
+fn keymap_pane_marks_esc_as_reserved() {
+    let app = test_app(vec![test_track(1, "first track")]);
+    let lines = keymap_lines(&app, 80);
+    let escape_line = lines
+        .iter()
+        .find(|line| line_text(line).contains("cancel or clear active mode"))
+        .unwrap();
+
+    assert_eq!(escape_line.spans[0].style, Style::default().fg(Color::Red));
+    assert!(line_text(escape_line).contains("(reserved)"));
+}
+
+#[test]
+fn keymap_pane_blocks_editing_reserved_rows() {
+    let mut app = test_app(vec![test_track(1, "first track")]);
+
+    app.selected_keymap_row = keymap_row_for_action(KeyAction::Activate).unwrap();
+    app.activate_keymap_selection();
+    assert_eq!(app.keymap_capture_action, None);
+    assert_eq!(
+        app.message,
+        "Enter is reserved for activation and confirmation"
+    );
+
+    app.selected_keymap_row = keymap_row_for_action(KeyAction::CommandMode).unwrap();
+    app.activate_keymap_selection();
+    assert_eq!(app.keymap_capture_action, None);
+    assert_eq!(app.message, "':' is reserved for command mode");
+
+    app.selected_keymap_row = keymap_row_for_action(KeyAction::Escape).unwrap();
+    app.activate_keymap_selection();
+    assert_eq!(app.keymap_capture_action, None);
+    assert_eq!(app.message, "Esc is reserved for cancellation and recovery");
+}
+
+#[test]
+fn keymap_pane_rejects_reserved_colon_mapping() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    let mut app = test_app(vec![test_track(1, "first track")]);
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+    app.selected_keymap_row = keymap_row_for_action(KeyAction::ToggleInfo).unwrap();
+    app.apply_selection_state();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE))
+        .unwrap();
+
+    assert_eq!(app.keymap_capture_action, Some(KeyAction::ToggleInfo));
+    assert_eq!(app.message, "':' is reserved for command mode");
+    assert!(db::key_bindings(&conn).unwrap().is_empty());
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(app.command_mode);
+    assert!(app.info_panel_visible);
+}
+
+#[test]
+fn keymap_pane_rejects_reserved_enter_mapping() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    let mut app = test_app(vec![test_track(1, "first track")]);
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+    app.selected_keymap_row = keymap_row_for_action(KeyAction::ToggleInfo).unwrap();
+    app.apply_selection_state();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+
+    assert_eq!(app.keymap_capture_action, Some(KeyAction::ToggleInfo));
+    assert_eq!(
+        app.message,
+        "Enter is reserved for activation and confirmation"
+    );
+    assert!(db::key_bindings(&conn).unwrap().is_empty());
+}
+
+#[test]
+fn keymap_pane_rejects_reserved_esc_mapping() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    let mut app = test_app(vec![test_track(1, "first track")]);
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+    app.selected_keymap_row = keymap_row_for_action(KeyAction::ToggleInfo).unwrap();
+    app.apply_selection_state();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+
+    assert_eq!(app.keymap_capture_action, None);
+    assert_eq!(app.message, "Esc is reserved for cancellation and recovery");
+    assert!(db::key_bindings(&conn).unwrap().is_empty());
+}
+
+#[test]
+fn stale_reserved_colon_mapping_is_ignored_and_deleted() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    db::save_key_binding(
+        &conn,
+        &db::SavedKeyBinding {
+            action: "toggle-info".to_string(),
+            key: "none:char::".to_string(),
+        },
+    )
+    .unwrap();
+    let mut app = test_app(vec![test_track(1, "first track")]);
+
+    app.load_key_bindings(&conn).unwrap();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(app.command_mode);
+    assert!(app.info_panel_visible);
+    assert!(db::key_bindings(&conn).unwrap().is_empty());
+}
+
+#[test]
+fn stale_reserved_enter_mapping_is_ignored_and_deleted() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    db::save_key_binding(
+        &conn,
+        &db::SavedKeyBinding {
+            action: "command-mode".to_string(),
+            key: "none:enter".to_string(),
+        },
+    )
+    .unwrap();
+    let mut app = test_app(vec![test_track(1, "first track")]);
+
+    app.load_key_bindings(&conn).unwrap();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(app.current.is_some());
+    assert!(!app.command_mode);
+    assert!(db::key_bindings(&conn).unwrap().is_empty());
+}
+
+#[test]
+fn stale_reserved_action_mapping_is_ignored_and_deleted() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    db::save_key_binding(
+        &conn,
+        &db::SavedKeyBinding {
+            action: "command-mode".to_string(),
+            key: "none:char:o".to_string(),
+        },
+    )
+    .unwrap();
+    db::save_key_binding(
+        &conn,
+        &db::SavedKeyBinding {
+            action: "activate".to_string(),
+            key: "none:char:m".to_string(),
+        },
+    )
+    .unwrap();
+    db::save_key_binding(
+        &conn,
+        &db::SavedKeyBinding {
+            action: "escape".to_string(),
+            key: "none:char:n".to_string(),
+        },
+    )
+    .unwrap();
+    let mut app = test_app(vec![test_track(1, "first track")]);
+
+    app.load_key_bindings(&conn).unwrap();
+
+    assert!(app.key_bindings.is_empty());
+    assert!(db::key_bindings(&conn).unwrap().is_empty());
+}
+
+#[test]
+fn keymap_reset_command_clears_custom_bindings() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    let mut app = test_app(vec![test_track(1, "first track")]);
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+    app.selected_keymap_row = keymap_row_for_action(KeyAction::ToggleInfo).unwrap();
+    app.apply_selection_state();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(!db::key_bindings(&conn).unwrap().is_empty());
+
+    app.command = String::from("keymap-reset");
+    app.execute_command(&conn);
+
+    assert!(db::key_bindings(&conn).unwrap().is_empty());
+    assert!(app.key_bindings.is_empty());
+    assert_eq!(app.message, "keymap reset to defaults");
+}
+
+#[test]
+fn restore_filter_command_toggles_persistent_setting() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    app.filter = String::from("artist:eno");
+
+    app.command = String::from("restore-filter");
+    app.execute_command(&conn);
+
+    assert!(!app.restore_filter);
+    assert!(!db::restore_filter_enabled(&conn).unwrap());
+    assert_eq!(app.message, "restore filter off");
+
+    app.command = String::from("restore-filter on");
+    app.execute_command(&conn);
+
+    assert!(app.restore_filter);
+    assert!(db::restore_filter_enabled(&conn).unwrap());
+    assert_eq!(
+        db::saved_filter(&conn).unwrap().as_deref(),
+        Some("artist:eno")
+    );
+}
+
+#[test]
+fn restore_track_command_toggles_persistent_setting() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    let mut app = test_app(vec![test_track(1, "first track")]);
+
+    app.command = String::from("restore-track");
+    app.execute_command(&conn);
+
+    assert!(!app.restore_track);
+    assert!(!db::restore_track_enabled(&conn).unwrap());
+    assert_eq!(app.message, "restore track off");
+
+    app.command = String::from("restore-track on");
+    app.execute_command(&conn);
+
+    assert!(app.restore_track);
+    assert!(db::restore_track_enabled(&conn).unwrap());
+}
+
+#[test]
+fn keymap_pane_resets_mapping_to_default() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    let mut app = test_app(vec![test_track(1, "first track")]);
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+    app.selected_keymap_row = keymap_row_for_action(KeyAction::ToggleInfo).unwrap();
+    app.apply_selection_state();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(db::key_bindings(&conn).unwrap().is_empty());
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(!app.keymap_panel_open);
+
+    app.info_panel_visible = true;
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.info_panel_visible);
+}
+
+#[test]
+fn keymap_command_toggles_keymap_pane() {
+    let conn = test_conn();
+    let mut app = test_app(vec![test_track(1, "first track")]);
+
+    app.command = String::from("keymap");
+    app.execute_command(&conn);
+
+    assert!(app.keymap_panel_open);
+    assert_eq!(app.focus, FocusPane::Keymap);
+    assert_eq!(app.message, "keymap panel");
+}
+
+#[test]
+fn keymap_pane_uses_shared_bottom_slot() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    let mut app = test_app(vec![test_track(1, "first track")]);
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.keymap_panel_open);
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(app.playlist_panel_open);
+    assert!(!app.keymap_panel_open);
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(app.keymap_panel_open);
+    assert!(!app.playlist_panel_open);
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(!app.keymap_panel_open);
+    assert!(app.info_panel_visible);
+    assert_eq!(app.focus, FocusPane::Tree);
+}
+
+#[test]
+fn tab_cycles_to_keymap_pane_when_open() {
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    let conn = test_conn();
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.focus, FocusPane::Tree);
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.focus, FocusPane::Tracks);
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.focus, FocusPane::Keymap);
+}
+
+#[test]
+fn up_still_moves_after_k_becomes_keymap_toggle() {
+    let mut app = test_app(vec![
+        test_track(1, "first track"),
+        test_track(2, "second track"),
+    ]);
+    let conn = test_conn();
+    app.focus = FocusPane::Tracks;
+    app.selected_track_row = 2;
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.keymap_panel_open);
+
+    app.focus = FocusPane::Tracks;
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+        .unwrap();
+
+    assert_eq!(app.selected_playable_track_index(), Some(0));
+}
+
+#[test]
+fn j_is_unbound_by_default() {
+    let mut app = test_app(vec![
+        test_track(1, "first track"),
+        test_track(2, "second track"),
+    ]);
+    let conn = test_conn();
+    app.focus = FocusPane::Tracks;
+    app.selected_track_row = 1;
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.selected_playable_track_index(), Some(0));
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.selected_playable_track_index(), Some(1));
+}
+
+#[test]
 fn info_panel_toggle_preserves_command_info_overlay() {
     let mut app = test_app(vec![test_track(1, "first track")]);
-    let conn = Connection::open_in_memory().unwrap();
+    let conn = test_conn();
 
     app.handle_key(&conn, KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))
         .unwrap();
@@ -965,7 +1503,7 @@ fn artist_add_and_remove_apply_to_all_artist_tracks() {
 #[test]
 fn escape_clears_command_output_before_filter() {
     let mut app = test_app(vec![test_track(1, "keep one"), test_track(2, "skip this")]);
-    let conn = Connection::open_in_memory().unwrap();
+    let conn = test_conn();
     app.filter = String::from("keep");
     app.command_output = vec![
         String::from("library roots"),
@@ -987,7 +1525,7 @@ fn normal_navigation_clears_command_output() {
         test_track(1, "first track"),
         test_track(2, "second track"),
     ]);
-    let conn = Connection::open_in_memory().unwrap();
+    let conn = test_conn();
     app.command_output = vec![
         String::from("library roots"),
         String::from("[x] /tmp/music"),
@@ -1141,7 +1679,7 @@ fn second_scan_command_reports_active_background_scan() {
 #[test]
 fn tab_completes_command_names() {
     let mut app = test_app(vec![test_track(1, "first track")]);
-    let conn = Connection::open_in_memory().unwrap();
+    let conn = test_conn();
     app.command_mode = true;
     app.command = String::from("lib");
 
@@ -1157,7 +1695,7 @@ fn tab_completes_filesystem_paths_for_add() {
     let music = parent.path().join("MusicRoot");
     fs::create_dir(&music).unwrap();
     let mut app = test_app(vec![test_track(1, "first track")]);
-    let conn = Connection::open_in_memory().unwrap();
+    let conn = test_conn();
     app.command_mode = true;
     app.command = format!("add {}/Mu", parent.path().display());
 
@@ -1443,7 +1981,7 @@ fn album_headers_keep_scanned_years() {
 #[test]
 fn tab_confirms_filter_and_focuses_library() {
     let mut app = test_app(vec![test_track(1, "keep one"), test_track(2, "skip this")]);
-    let conn = Connection::open_in_memory().unwrap();
+    let conn = test_conn();
     app.focus = FocusPane::Tracks;
     app.filter_mode = true;
     app.filter = "keep".to_string();
@@ -1463,7 +2001,7 @@ fn tab_confirms_filter_and_focuses_library() {
 #[test]
 fn enter_confirms_filter_and_focuses_library() {
     let mut app = test_app(vec![test_track(1, "keep one"), test_track(2, "skip this")]);
-    let conn = Connection::open_in_memory().unwrap();
+    let conn = test_conn();
     app.focus = FocusPane::Tracks;
     app.filter_mode = true;
     app.filter = "keep".to_string();
@@ -1474,12 +2012,50 @@ fn enter_confirms_filter_and_focuses_library() {
     assert!(!app.filter_mode);
     assert_eq!(app.focus, FocusPane::Tree);
     assert_eq!(app.playback_sequence_indices(), &[0]);
+    assert_eq!(db::saved_filter(&conn).unwrap().as_deref(), Some("keep"));
+}
+
+#[test]
+fn app_start_restores_saved_filter_when_enabled() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    db::upsert_track(&conn, &test_track_metadata("/tmp/keep.flac", "keep one", 1)).unwrap();
+    db::upsert_track(
+        &conn,
+        &test_track_metadata("/tmp/skip.flac", "skip this", 2),
+    )
+    .unwrap();
+    db::save_filter(&conn, "keep").unwrap();
+
+    let app = App::new(&conn, &test_paths()).unwrap();
+
+    assert_eq!(app.filter, "keep");
+    assert_eq!(app.playback_sequence_indices(), vec![0]);
+}
+
+#[test]
+fn app_start_ignores_saved_filter_when_disabled() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    db::upsert_track(&conn, &test_track_metadata("/tmp/keep.flac", "keep one", 1)).unwrap();
+    db::upsert_track(
+        &conn,
+        &test_track_metadata("/tmp/skip.flac", "skip this", 2),
+    )
+    .unwrap();
+    db::save_filter(&conn, "keep").unwrap();
+    db::save_restore_filter_enabled(&conn, false).unwrap();
+
+    let app = App::new(&conn, &test_paths()).unwrap();
+
+    assert!(app.filter.is_empty());
+    assert_eq!(app.playback_sequence_indices(), vec![0, 1]);
 }
 
 #[test]
 fn escape_clears_filter_entry() {
     let mut app = test_app(vec![test_track(1, "keep one"), test_track(2, "skip this")]);
-    let conn = Connection::open_in_memory().unwrap();
+    let conn = test_conn();
     app.filter_mode = true;
     app.filter = "keep".to_string();
     app.sync_selection();
@@ -1491,12 +2067,13 @@ fn escape_clears_filter_entry() {
     assert!(app.filter.is_empty());
     assert_eq!(app.message, "filter cleared");
     assert_eq!(app.playback_sequence_indices(), &[0, 1]);
+    assert_eq!(db::saved_filter(&conn).unwrap().as_deref(), Some(""));
 }
 
 #[test]
 fn escape_clears_active_filter_outside_filter_entry() {
     let mut app = test_app(vec![test_track(1, "keep one"), test_track(2, "skip this")]);
-    let conn = Connection::open_in_memory().unwrap();
+    let conn = test_conn();
     app.filter = "keep".to_string();
     app.sync_selection();
 
@@ -1515,7 +2092,7 @@ fn escape_preserves_valid_selection_when_clearing_filter() {
     other_artist.artist = Some("Other Artist".to_string());
     other_artist.album_artist = Some("Other Artist".to_string());
     let mut app = test_app(vec![test_track(1, "first track"), other_artist]);
-    let conn = Connection::open_in_memory().unwrap();
+    let conn = test_conn();
     app.filter = "other".to_string();
     app.sync_selection();
     assert_eq!(
@@ -1695,6 +2272,20 @@ fn mouse_hit_testing_allows_playlist_info_pane() {
     assert_eq!(
         mouse_pane(60, 17, MouseLayout::new(100, 30, 2).with_info(true, false)),
         None
+    );
+}
+
+#[test]
+fn mouse_hit_testing_allows_keymap_info_pane() {
+    assert_eq!(
+        mouse_pane(
+            60,
+            17,
+            MouseLayout::new(100, 30, 2)
+                .with_info(true, false)
+                .with_keymap_info(true)
+        ),
+        Some(FocusPane::Keymap)
     );
 }
 
@@ -2002,7 +2593,7 @@ fn playlists_entry_expands_to_playlists_and_plays_tracks() {
     assert_eq!(app.selected_scope_tracks()[0].0, 1);
     assert_eq!(app.playback_sequence_indices(), vec![1]);
 
-    let conn = Connection::open_in_memory().unwrap();
+    let conn = test_conn();
     app.activate(&conn).unwrap();
 
     assert_eq!(app.current.as_ref().map(|current| current.index), Some(1));
@@ -2358,7 +2949,7 @@ fn enter_on_compilations_plays_first_compilation_track() {
     let mut compilation = test_track(2, "compilation track");
     compilation.compilation = true;
     let mut app = test_app(vec![test_track(1, "regular track"), compilation]);
-    let conn = Connection::open_in_memory().unwrap();
+    let conn = test_conn();
 
     app.activate(&conn).unwrap();
 
@@ -2496,7 +3087,7 @@ fn enter_on_artist_plays_first_listed_track() {
         test_track(1, "first track"),
         test_track(2, "second track"),
     ]);
-    let conn = Connection::open_in_memory().unwrap();
+    let conn = test_conn();
     app.sync_selection();
 
     app.activate(&conn).unwrap();
@@ -2520,29 +3111,29 @@ fn selecting_current_track_does_not_change_focus() {
 }
 
 #[test]
-fn playback_does_not_move_browser_selection() {
+fn playback_moves_active_selection_to_played_track() {
     let mut other_artist = test_track(2, "other artist track");
     other_artist.artist = Some("Other Artist".to_string());
     other_artist.album_artist = Some("Other Artist".to_string());
     let mut app = test_app(vec![test_track(1, "first track"), other_artist]);
-    let conn = Connection::open_in_memory().unwrap();
+    let conn = test_conn();
     app.sync_selection();
 
     app.play_index(&conn, 1).unwrap();
 
     assert_eq!(app.current.as_ref().map(|current| current.index), Some(1));
-    assert_eq!(app.selected_tree, 0);
+    assert_eq!(app.selected_tree, 1);
     assert_eq!(app.selected_track_row, 1);
-    assert_eq!(app.focus, FocusPane::Tree);
+    assert_eq!(app.focus, FocusPane::Tracks);
 }
 
 #[test]
-fn next_track_does_not_move_browser_selection() {
+fn next_track_moves_active_selection_to_played_track() {
     let mut other_artist = test_track(2, "other artist track");
     other_artist.artist = Some("Other Artist".to_string());
     other_artist.album_artist = Some("Other Artist".to_string());
     let mut app = test_app(vec![test_track(1, "first track"), other_artist]);
-    let conn = Connection::open_in_memory().unwrap();
+    let conn = test_conn();
     app.current = Some(PlayingTrack {
         index: 0,
         source: None,
@@ -2554,9 +3145,9 @@ fn next_track_does_not_move_browser_selection() {
     app.play_next(&conn).unwrap();
 
     assert_eq!(app.current.as_ref().map(|current| current.index), Some(1));
-    assert_eq!(app.selected_tree, 0);
+    assert_eq!(app.selected_tree, 1);
     assert_eq!(app.selected_track_row, 1);
-    assert_eq!(app.focus, FocusPane::Tree);
+    assert_eq!(app.focus, FocusPane::Tracks);
 }
 
 #[test]
@@ -2650,7 +3241,7 @@ fn uppercase_i_selects_current_track_after_lowercase_i_toggles_info() {
     other_artist.artist = Some("Other Artist".to_string());
     other_artist.album_artist = Some("Other Artist".to_string());
     let mut app = test_app(vec![test_track(1, "first track"), other_artist]);
-    let conn = Connection::open_in_memory().unwrap();
+    let conn = test_conn();
     app.current = Some(PlayingTrack {
         index: 1,
         source: None,
@@ -2720,7 +3311,7 @@ fn failed_seek_during_resume_keeps_app_paused() {
 
 #[test]
 fn play_entry_starts_player_backend() {
-    let conn = Connection::open_in_memory().unwrap();
+    let conn = test_conn();
     let mut app = test_app(vec![test_track(1, "first track")]);
 
     app.play_index(&conn, 0).unwrap();
@@ -2863,6 +3454,167 @@ fn save_browser_selection_persists_selected_artist_and_track() {
     assert_eq!(selection.media_item_id, Some(2));
 }
 
+#[test]
+fn playback_persists_last_played_track_for_restart() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    let first = test_track(1, "first track");
+    let mut second = test_track(2, "other artist track");
+    second.artist = Some("Other Artist".to_string());
+    second.album_artist = Some("Other Artist".to_string());
+    second.album = Some("Other Album".to_string());
+    let mut app = test_app(vec![first.clone(), second.clone()]);
+    app.sync_selection();
+
+    app.play_index(&conn, 1).unwrap();
+
+    assert_eq!(app.focus, FocusPane::Tracks);
+    assert_eq!(app.selected_playable_media_item_id(), Some(2));
+    let selection = db::browser_selection(&conn).unwrap().unwrap();
+    assert_eq!(selection.tree_kind, "artist");
+    assert_eq!(selection.artist.as_deref(), Some("Other Artist"));
+    assert_eq!(selection.album, None);
+    assert_eq!(selection.media_item_id, Some(2));
+
+    let mut restored = test_app(vec![first, second]);
+    assert!(restored.restore_saved_browser_selection(&selection));
+    restored.focus = FocusPane::Tracks;
+    restored.apply_selection_state();
+    assert!(matches!(
+        restored.selected_tree_entry(),
+        Some(TreeEntry::Artist { artist }) if artist == "Other Artist"
+    ));
+    assert_eq!(restored.selected_playable_media_item_id(), Some(2));
+}
+
+#[test]
+fn app_start_restores_saved_track_when_enabled() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    db::upsert_track(
+        &conn,
+        &test_track_metadata("/tmp/first.flac", "first track", 1),
+    )
+    .unwrap();
+    let second = db::upsert_track(
+        &conn,
+        &test_track_metadata("/tmp/second.flac", "second track", 2),
+    )
+    .unwrap();
+    db::save_browser_selection(
+        &conn,
+        &db::SavedBrowserSelection {
+            tree_kind: "artist".to_string(),
+            artist: Some("Artist".to_string()),
+            album: None,
+            playlist_id: None,
+            media_item_id: Some(second.media_item_id),
+        },
+    )
+    .unwrap();
+
+    let app = App::new(&conn, &test_paths()).unwrap();
+
+    assert_eq!(app.focus, FocusPane::Tracks);
+    assert_eq!(
+        app.selected_playable_media_item_id(),
+        Some(second.media_item_id)
+    );
+}
+
+#[test]
+fn app_start_ignores_saved_track_when_disabled() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    let first = db::upsert_track(
+        &conn,
+        &test_track_metadata("/tmp/first.flac", "first track", 1),
+    )
+    .unwrap();
+    let second = db::upsert_track(
+        &conn,
+        &test_track_metadata("/tmp/second.flac", "second track", 2),
+    )
+    .unwrap();
+    db::save_browser_selection(
+        &conn,
+        &db::SavedBrowserSelection {
+            tree_kind: "artist".to_string(),
+            artist: Some("Artist".to_string()),
+            album: None,
+            playlist_id: None,
+            media_item_id: Some(second.media_item_id),
+        },
+    )
+    .unwrap();
+    db::save_restore_track_enabled(&conn, false).unwrap();
+
+    let app = App::new(&conn, &test_paths()).unwrap();
+
+    assert_eq!(app.focus, FocusPane::Tree);
+    assert_eq!(
+        app.selected_playable_media_item_id(),
+        Some(first.media_item_id)
+    );
+}
+
+#[test]
+fn playback_does_not_track_restart_selection_when_disabled() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    let mut app = test_app(vec![
+        test_track(1, "first track"),
+        test_track(2, "second track"),
+    ]);
+    app.restore_track = false;
+
+    app.play_index(&conn, 1).unwrap();
+
+    assert_eq!(app.focus, FocusPane::Tree);
+    assert_eq!(app.selected_playable_media_item_id(), Some(1));
+    assert_eq!(db::browser_selection(&conn).unwrap(), None);
+}
+
+#[test]
+fn next_track_updates_restart_selection() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    let mut app = test_app(vec![
+        test_track(1, "first track"),
+        test_track(2, "second track"),
+    ]);
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: app.tracks[0].clone(),
+        last_position_ms: 0,
+        listened_ms: 0,
+    });
+
+    app.play_next(&conn).unwrap();
+
+    let selection = db::browser_selection(&conn).unwrap().unwrap();
+    assert_eq!(selection.media_item_id, Some(2));
+}
+
+#[test]
+fn shutdown_does_not_overwrite_restart_selection_with_browser_cursor() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    let first = test_track(1, "first track");
+    let mut second = test_track(2, "other artist track");
+    second.artist = Some("Other Artist".to_string());
+    second.album_artist = Some("Other Artist".to_string());
+    let mut app = test_app(vec![first, second]);
+
+    app.play_index(&conn, 1).unwrap();
+    assert_eq!(app.selected_playable_media_item_id(), Some(2));
+    app.shutdown(&conn).unwrap();
+
+    let selection = db::browser_selection(&conn).unwrap().unwrap();
+    assert_eq!(selection.media_item_id, Some(2));
+}
+
 fn test_app(tracks: Vec<LibraryTrack>) -> App {
     let mut app = App {
         paths: test_paths(),
@@ -2875,17 +3627,22 @@ fn test_app(tracks: Vec<LibraryTrack>) -> App {
         tree_state: ListState::default(),
         track_state: ListState::default(),
         playlist_state: ListState::default(),
+        keymap_state: ListState::default(),
         selected_tree: 0,
         selected_track_row: 0,
         selected_playlist_row: 0,
+        selected_keymap_row: 0,
         expanded_artists: HashSet::new(),
         compilations_expanded: false,
         playlists_expanded: false,
         expanded_playlists: HashSet::new(),
         active_playlist_id: None,
         playlist_panel_open: false,
+        keymap_panel_open: false,
         focus: FocusPane::Tree,
         filter: String::new(),
+        restore_filter: true,
+        restore_track: true,
         filter_mode: false,
         command: String::new(),
         command_mode: false,
@@ -2894,6 +3651,8 @@ fn test_app(tracks: Vec<LibraryTrack>) -> App {
         command_roots: Vec::new(),
         command_selected: 0,
         command_focus: false,
+        key_bindings: HashMap::new(),
+        keymap_capture_action: None,
         library_job: None,
         info_panel_visible: true,
         play_target: PlayTarget::Library,
@@ -3008,6 +3767,14 @@ fn playlist_text(app: &App) -> String {
         .map(|entry| playlist_entry_text(app, entry))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn keymap_text(app: &App) -> String {
+    lines_text(&keymap_lines(app, 80))
+}
+
+fn test_conn() -> Connection {
+    db::open_in_memory_for_tests().unwrap()
 }
 
 fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
