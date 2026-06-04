@@ -170,6 +170,8 @@ impl App {
     }
 
     pub(super) fn handle_key(&mut self, conn: &Connection, key: KeyEvent) -> Result<bool> {
+        self.dismiss_startup_info();
+
         if matches!(key.code, KeyCode::Char('c')) && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.shutdown(conn)?;
             return Ok(true);
@@ -352,14 +354,15 @@ impl App {
         terminal_width: u16,
         terminal_height: u16,
     ) -> bool {
+        let dismissed_startup_info = self.dismiss_startup_info();
         if self.filter_mode || self.command_mode || self.command_focus {
-            return false;
+            return dismissed_startup_info;
         }
 
         let direction = match mouse.kind {
             MouseEventKind::ScrollDown => 1,
             MouseEventKind::ScrollUp => -1,
-            _ => return false,
+            _ => return dismissed_startup_info,
         };
 
         let layout = MouseLayout {
@@ -372,7 +375,7 @@ impl App {
             keymap_info_visible: self.keymap_panel_open,
         };
         let Some(pane) = mouse_pane(mouse.column, mouse.row, layout) else {
-            return false;
+            return dismissed_startup_info;
         };
         self.clear_command_output();
         self.move_pane_selection(pane, direction, MOUSE_SCROLL_LINES);
@@ -386,5 +389,14 @@ impl App {
             self.clear_filter(conn)?;
         }
         Ok(())
+    }
+
+    fn dismiss_startup_info(&mut self) -> bool {
+        if self.startup_info_visible {
+            self.startup_info_visible = false;
+            true
+        } else {
+            false
+        }
     }
 }

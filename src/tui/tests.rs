@@ -1574,6 +1574,47 @@ fn metadata_pane_shows_selected_track_details() {
 }
 
 #[test]
+fn startup_info_pane_shows_application_intro_until_interaction() {
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    app.startup_info_visible = true;
+
+    let lines = metadata_lines(&app, 80);
+
+    assert_eq!(line_text(&lines[0]), "");
+    assert_eq!(line_text(&lines[1]), " GMUS");
+    assert_eq!(
+        line_text(&lines[2]),
+        " a CMUS inspired terminal music player"
+    );
+    assert_eq!(line_text(&lines[3]), " authors: Clayton Grey with Codex");
+    assert_eq!(
+        lines[1].spans[0].style,
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    );
+    assert_eq!(
+        lines[2].spans[0].style,
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::ITALIC)
+    );
+}
+
+#[test]
+fn first_key_interaction_dismisses_startup_info() {
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    let conn = test_conn();
+    app.startup_info_visible = true;
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(!app.startup_info_visible);
+    assert!(lines_text(&metadata_lines(&app, 80)).contains("selected track"));
+}
+
+#[test]
 fn scan_commands_start_background_job_before_finishing() {
     let data_dir = tempdir().unwrap();
     let db_path = data_dir.path().join("gmus.sqlite3");
@@ -3655,6 +3696,7 @@ fn test_app(tracks: Vec<LibraryTrack>) -> App {
         keymap_capture_action: None,
         library_job: None,
         info_panel_visible: true,
+        startup_info_visible: false,
         play_target: PlayTarget::Library,
         continuous: true,
         repeat: false,

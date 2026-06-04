@@ -704,6 +704,10 @@ fn command_list_lines(width: usize, style: Style) -> Vec<Line<'static>> {
 }
 
 pub(super) fn metadata_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    if app.startup_info_visible {
+        return startup_info_lines(width);
+    }
+
     let Some(track) = app
         .selected_playable_track_index()
         .and_then(|index| app.tracks.get(index))
@@ -735,6 +739,28 @@ pub(super) fn metadata_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         metadata_track_position_pair(track, width),
         metadata_pair("length", db::format_duration(track.duration_ms), width),
         metadata_pair("plays", track.play_count.to_string(), width),
+    ]
+}
+
+fn startup_info_lines(width: usize) -> Vec<Line<'static>> {
+    vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            truncate_to_width(" GMUS", width),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            truncate_to_width(" a CMUS inspired terminal music player", width),
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::ITALIC),
+        )),
+        Line::from(Span::styled(
+            truncate_to_width(" authors: Clayton Grey with Codex", width),
+            Style::default().fg(Color::DarkGray),
+        )),
     ]
 }
 
