@@ -1,14 +1,31 @@
 # GMUS
 
-GMUS is my take on an alternative to CMUS with some additional ammentities and UX adjustments based on my sensitibilities. It changes things to a unified interfaced based around the main CMUS library view with additional views to show metadata and manage playlists. Additionally, this provided an opportunity to explore how AI co-development has continued to evolve.
+GMUS is a cmus-inspired terminal music player with a unified library browser,
+metadata view, playlist manager, command bar, and local playback history. It
+keeps the fast keyboard feel of cmus while adding richer filtering, persistent
+UI preferences, editable hotkeys, macOS media integration, and a SQLite-backed
+library/history store.
 
-- adds a quick-to-use filtering mechanism
-- an alternative stacked layout for narrow windows
-- improved feedback with more in-app command visibiility
-- reworking of hotkeys
-- support for media playback keys though an OS integration
+## Features
 
-## Install And Build
+- Artist, album, compilation, and playlist browsing in a two-pane terminal UI
+- Text search plus fielded filters for title, artist, album, genre, year,
+  play count, library root, path, and more
+- Playlists with duplicate entries, playlist-local ordering, and add/remove
+  shortcuts from library or playlist views
+- Editable keymap pane with persisted custom hotkeys and reserved recovery keys
+- Persistent restart state for the last played track, confirmed filter, keymap,
+  and pane-size adjustments
+- Rodio/Symphonia playback for common formats including MP3, FLAC, AAC/M4A,
+  ALAC, AIFF, CAF, Ogg Vorbis, and WAV
+- Cover art extraction and caching for metadata, CLI inspection, and macOS
+  integrations
+- macOS Now Playing metadata, media-key handling, and optional track-change
+  artwork notifications
+- CLI commands for scanning, playback, cover-art lookup, play-history recording,
+  and database statistics
+
+## Install and Build
 
 GMUS is built with stable Rust:
 
@@ -74,30 +91,30 @@ identity for track-change artwork overlays. It is launched only when GMUS posts
 a track change, uses `LSUIElement` so it has no Dock or menu bar presence, and
 exits after the overlay dismisses.
 
-## Design Notes
+## Terminal Interface
 
-The app intentionally does not require tracks to belong to a fixed library. A
-track can be scanned, played, removed from a view, or moved on disk without
-throwing away its play history. The MVP uses metadata plus duration as the
-primary lightweight identity and records each play as an append-only event.
+Running `gmus` launches the TUI. Running `gmus tui PATH` scans a file or
+directory first, then opens the interface.
 
-Playback is behind a trait. The current MVP uses Rodio's pure-Rust
-Symphonia/CPAL path with common macOS library formats enabled, including MP3,
-FLAC, AAC/M4A, ALAC, AIFF, CAF, Ogg Vorbis, and WAV.
+The TUI is organized around a cmus-style browser:
 
-The TUI is moving toward the cmus library view:
+- left pane: artists, compilation groups, and playlists with expandable album
+  or playlist rows
+- right pane: album headers, playlist headers, disc dividers, durations, play
+  counts, and selectable tracks for the current library scope
+- bottom management pane: selected-track metadata, keymap editing, playlist
+  management, filter help, or inverted command help/output
+- command/filter row: shown below the bottom management pane while typing
+- status rows: current track, playback position, playback modes, and transient
+  feedback
+- narrow terminals stack the library pane above the track pane, with the bottom
+  management pane preserved
 
-- left pane: artists, with expandable album rows
-- right pane: album headers with years/durations and selectable tracks for the selected artist or album
-- bottom info pane: metadata for the selected track, keymap help, playlist management, or inverted command help/output for `:` commands
-- command/filter row: shown below the bottom info pane when active
-- bottom strip: current track, position, playback state, and transient messages
-- narrow terminals stack the artist pane above the track pane, with info still at the bottom
-
-Keyboard control:
+### Keyboard Control
 
 - `Tab`: switch between artist tree, track pane, and bottom management pane when open
 - `Up` / `Down`: move selection
+- `PageUp` / `PageDown`: move selection by a page
 - `Enter`: play the first listed track for the selected tree item, or play the selected track
 - `Space`: expand/collapse in the tree
 - `e`: expand/collapse the selected artist
@@ -107,8 +124,10 @@ Keyboard control:
 - `c`: pause/resume
 - `p`: open or focus the playlist pane
 - `k`: open or focus the keymap pane
-- In the keymap pane, `Enter` edits non-reserved mappings, `Esc` cancels editing, and `Backspace` resets it to default
-- `Enter`, `Esc`, and `:` are reserved for their default behaviors and cannot be edited or mapped to another action
+- In the keymap pane, `Enter` edits non-reserved mappings, `Esc` cancels
+  editing, and `Backspace` resets it to default
+- `Enter`, `Esc`, and `:` are reserved for their default behaviors and cannot
+  be edited or mapped to another action
 - `{` / `}`: nudge the selected pane boundary left/up or right/down
 - `+` / `=`: add the selected track, artist, album, or playlist entry to the active playlist
 - `-`: remove the selected track or playlist entry from the active playlist
@@ -131,14 +150,41 @@ left and `}` moves it right. In stacked or bottom-pane layouts, `{` moves the
 selected boundary up and `}` moves it down. With the tracks pane focused, the
 adjustment is relative to the tracks pane's own edge.
 
+The keymap pane is itself editable. Select a non-reserved row and press `Enter`
+to capture an additional key binding, or press `Backspace`/`Delete` while
+capturing to reset that action to its defaults. `Enter`, `Esc`, and `:` are
+reserved so activation, cancellation, and command entry remain recoverable.
+
+### Filtering
+
+Filters can be typed with `/` or applied through `:filter TEXT`. Bare terms
+search title, artist, album, genre, composer, root, date, play count, and path.
+Fielded terms use `field:value`, quoted values are supported, and prefixing a
+term with `-` excludes it.
+
+Useful fields:
+
+- text fields: `title`, `artist`, `album`, `albumartist`, `genre`, `composer`,
+  `root`, `path`, `date`
+- numeric fields: `year`, `plays`, `trackno`, `disc`
+- boolean field: `compilation`
+
+Numeric filters support exact values, comparisons, and ranges:
+
+```text
+genre:ambient year:2010..2020
+root:Instrumental -compilation:true plays:>5
+artist:"Brian Eno" album:apollo
+```
+
 Playback advances through the active filtered track set and selected play target
 when continuous mode is on, so next, previous, shuffle, repeat, and natural
 auto-advance stay inside the current filter.
 On restart, the browser restores the last played track at the artist level and
 restores the last confirmed filter when those restore settings are enabled.
-Both are on by default.
+Both are on by default and can be toggled from the command bar.
 
-Library commands:
+### Command Bar
 
 - `:add PATH`: scan a file or directory and add it as an active library root
 - `:remove PATH`: remove a root from the active library without deleting metadata or play history
@@ -151,17 +197,29 @@ Library commands:
 - `:keymap`: show the keymap pane
 - `:keymap-reset`: reset custom key mappings to defaults
 - `:restore-filter [on|off|toggle|status]`: toggle whether the last filter is restored on startup
-- `:restore-track [on|off|toggle|status]`: toggle whether the last played track is restored on startup
+- `:restore-track [on|off|toggle|status]`: toggle whether the last played
+  track is restored on startup
 - `:filter TEXT`: apply a filter from command mode
 - `:clear`: clear the active filter
 - `:clear-output`, `:close`, or `:hide`: close command output and return the info pane to metadata
-- `:notifications [on|off|toggle|status]`: show or hide macOS track-change overlays
+- `:notifications [on|off|toggle|status]`: show or hide macOS track-change overlays on macOS builds
 
-Most playlist commands also have short aliases in the TUI command bar: `:pl`,
-`:pl-clear`, `:pl-delete`, `:playlist-rm`, and `:pl-rm`.
+Common aliases include `:rm`, `:u`, `:roots`, `:pl`, `:pl-clear`,
+`:pl-delete`, `:playlist-rm`, `:pl-rm`, `:keys`, `:keys-reset`, `:f`,
+`:clear-filter`, and on macOS builds, `:notify`.
 
 `Esc` closes command output before falling through to filter clearing. Normal
 navigation/actions also return the info pane to selected-track metadata.
+
+## Implementation Notes
+
+GMUS intentionally does not require tracks to belong permanently to a fixed
+library. A track can be scanned, played, removed from a view, or moved on disk
+without throwing away its play history. Metadata plus duration provide a
+lightweight identity, while plays are stored as append-only events.
+
+Playback is behind a small backend trait. The default backend uses Rodio's
+pure-Rust Symphonia/CPAL path with common macOS library formats enabled.
 
 The TUI publishes owned integration events for track changes and playback state,
 and consumes integration commands such as play, pause, next, previous, and seek.
@@ -177,6 +235,5 @@ library, and TUI code can stay independent from platform APIs.
 
 Cover art is extracted and cached during scans with embedded artwork preferred
 over folder artwork. The macOS integration reuses that cached art for Now
-Playing metadata and track-change overlays. In-terminal art display is
-deferred to a future companion/widget or protocol-backed solution so the core
-TUI stays light and stable.
+Playing metadata and track-change overlays. The terminal UI stays text-focused,
+with artwork handled by CLI commands and platform integrations.
