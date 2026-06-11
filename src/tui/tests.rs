@@ -3648,6 +3648,108 @@ fn failed_seek_during_resume_keeps_app_paused() {
 }
 
 #[test]
+fn disconnected_audio_output_pauses_current_track_without_advancing() {
+    let conn = test_conn();
+    let mut app = test_app(vec![
+        test_track(1, "first track"),
+        test_track(2, "second track"),
+    ]);
+    app.player = Box::new(OutputFailedPlayer);
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: app.tracks[0].clone(),
+        last_position_ms: 49_000,
+        listened_ms: 49_000,
+    });
+
+    assert!(app.update_playback(&conn).unwrap());
+
+    assert_eq!(app.current.as_ref().unwrap().index, 0);
+    assert_eq!(app.current.as_ref().unwrap().last_position_ms, 50_000);
+    assert_eq!(app.suspended_position_ms, Some(50_000));
+    assert_eq!(app.logical_state(), PlaybackState::Paused);
+    assert_eq!(app.message, "audio output disconnected; paused");
+}
+
+#[test]
+fn stalled_audio_output_shows_inactive_until_progress_resumes() {
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    app.player = Box::new(StalledOutputPlayer { playing: false });
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: app.tracks[0].clone(),
+        last_position_ms: 50_000,
+        listened_ms: 50_000,
+    });
+
+    let stalled = line_text(&playback_line(&app, 80));
+    assert!(stalled.contains(" | 0:50 / 1:40 ["));
+
+    app.player.play().unwrap();
+
+    let resumed = line_text(&playback_line(&app, 80));
+    assert!(resumed.contains(" > 0:50 / 1:40 ["));
+}
+
+#[test]
+fn stalled_audio_output_publishes_inactive_media_state_until_progress_resumes() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    app.player = Box::new(StalledOutputPlayer { playing: false });
+    app.integration = Box::new(RecordingIntegration {
+        events: Rc::clone(&events),
+    });
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: app.tracks[0].clone(),
+        last_position_ms: 50_000,
+        listened_ms: 50_000,
+    });
+
+    app.sync_integration_playback(true);
+    app.player.play().unwrap();
+    app.sync_integration_playback(true);
+
+    assert_eq!(
+        events.borrow().as_slice(),
+        &[
+            IntegrationEvent::Playback(crate::integration::PlaybackSnapshot {
+                state: PlaybackState::Paused,
+                position_ms: 50_000,
+            }),
+            IntegrationEvent::Playback(crate::integration::PlaybackSnapshot {
+                state: PlaybackState::Playing,
+                position_ms: 50_000,
+            }),
+        ]
+    );
+}
+
+#[test]
+fn unavailable_replacement_output_keeps_app_paused() {
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    app.player = Box::new(OutputFailedPlayer);
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: app.tracks[0].clone(),
+        last_position_ms: 50_000,
+        listened_ms: 50_000,
+    });
+    app.suspended_position_ms = Some(50_000);
+
+    app.resume_current().unwrap();
+
+    assert_eq!(app.suspended_position_ms, Some(50_000));
+    assert_eq!(app.logical_state(), PlaybackState::Paused);
+    assert!(app.message.contains("could not resume"));
+    assert!(app.message.contains("no audio output available"));
+}
+
+#[test]
 fn play_entry_starts_player_backend() {
     let conn = test_conn();
     let mut app = test_app(vec![test_track(1, "first track")]);
@@ -4178,6 +4280,109 @@ impl PlayerBackend for FailingSeekPlayer {
 
     fn state(&self) -> PlaybackState {
         PlaybackState::Playing
+    }
+}
+
+struct OutputFailedPlayer;
+
+impl PlayerBackend for OutputFailedPlayer {
+    fn load_and_play(&mut self, _path: &Path) -> Result<()> {
+        anyhow::bail!("no audio output available")
+    }
+
+    fn play(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    fn pause(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    fn seek(&mut self, _position: Duration) -> Result<()> {
+        Ok(())
+    }
+
+    fn set_rate(&mut self, _rate: f32) -> Result<()> {
+        Ok(())
+    }
+
+    fn rate(&self) -> f32 {
+        1.0
+    }
+
+    fn sleep_until_end(&self) {}
+
+    fn position(&self) -> Duration {
+        Duration::from_millis(50_000)
+    }
+
+    fn is_finished(&self) -> bool {
+        false
+    }
+
+    fn output_failed(&self) -> bool {
+        true
+    }
+
+    fn state(&self) -> PlaybackState {
+        PlaybackState::Stopped
+    }
+}
+
+struct StalledOutputPlayer {
+    playing: bool,
+}
+
+impl PlayerBackend for StalledOutputPlayer {
+    fn load_and_play(&mut self, _path: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    fn play(&mut self) -> Result<()> {
+        self.playing = true;
+        Ok(())
+    }
+
+    fn pause(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    fn seek(&mut self, _position: Duration) -> Result<()> {
+        Ok(())
+    }
+
+    fn set_rate(&mut self, _rate: f32) -> Result<()> {
+        Ok(())
+    }
+
+    fn rate(&self) -> f32 {
+        1.0
+    }
+
+    fn sleep_until_end(&self) {}
+
+    fn position(&self) -> Duration {
+        Duration::from_millis(50_000)
+    }
+
+    fn is_finished(&self) -> bool {
+        false
+    }
+
+    fn state(&self) -> PlaybackState {
+        if self.playing {
+            PlaybackState::Playing
+        } else {
+            PlaybackState::Paused
+        }
     }
 }
 

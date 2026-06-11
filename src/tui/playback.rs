@@ -196,7 +196,11 @@ impl App {
         };
 
         let path = current.track.path.clone();
-        self.player.load_and_play(Path::new(&path))?;
+        if let Err(error) = self.player.load_and_play(Path::new(&path)) {
+            self.message = format!("could not resume {path}: {error:#}");
+            self.sync_integration_playback(true);
+            return Ok(());
+        }
         if position_ms > 0 {
             if let Err(error) = self
                 .player
@@ -379,6 +383,18 @@ impl App {
         }
 
         self.capture_current_progress();
+        if self.player.output_failed() {
+            let position_ms = self.player.position().as_millis() as i64;
+            self.player.stop()?;
+            if let Some(current) = &mut self.current {
+                current.align_position(position_ms);
+            }
+            self.suspended_position_ms = Some(position_ms);
+            self.message = String::from("audio output disconnected; paused");
+            self.sync_integration_playback(true);
+            return Ok(true);
+        }
+
         let mut changed = false;
 
         if self.current.is_some() && self.player.is_finished() {

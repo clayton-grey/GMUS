@@ -154,7 +154,7 @@ fn main() -> Result<()> {
             player.sleep_until_end();
 
             let mut played_ms = player.position().as_millis() as i64;
-            if player.is_finished() {
+            if player.is_finished() && !player.output_failed() {
                 if let Some(duration_ms) = track.duration_ms {
                     played_ms = played_ms.max(duration_ms);
                 }

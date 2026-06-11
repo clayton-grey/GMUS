@@ -24,6 +24,9 @@ pub trait PlayerBackend {
     fn sleep_until_end(&self);
     fn position(&self) -> Duration;
     fn is_finished(&self) -> bool;
+    fn output_failed(&self) -> bool {
+        false
+    }
     fn state(&self) -> PlaybackState;
 }
 
@@ -151,16 +154,50 @@ mod tests {
 
 #[cfg(feature = "playback-rodio")]
 mod rodio_backend {
+    use std::cell::Cell;
     use std::fs::File;
     use std::path::Path;
-    use std::time::Duration;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
-    use anyhow::{Context, Result};
+    use anyhow::{bail, Context, Result};
     use rodio::{
         ChannelCount, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, SampleRate, Source,
     };
 
     use super::{PlaybackState, PlayerBackend};
+
+    const OUTPUT_STALL_THRESHOLD: Duration = Duration::from_millis(1_500);
+
+    struct ProgressWatch {
+        position: Cell<Duration>,
+        changed_at: Cell<Instant>,
+    }
+
+    impl ProgressWatch {
+        fn new() -> Self {
+            Self {
+                position: Cell::new(Duration::ZERO),
+                changed_at: Cell::new(Instant::now()),
+            }
+        }
+
+        fn reset(&self, position: Duration) {
+            self.position.set(position);
+            self.changed_at.set(Instant::now());
+        }
+
+        fn is_stalled_at(&self, position: Duration, now: Instant) -> bool {
+            if position != self.position.get() {
+                self.position.set(position);
+                self.changed_at.set(now);
+                false
+            } else {
+                now.duration_since(self.changed_at.get()) >= OUTPUT_STALL_THRESHOLD
+            }
+        }
+    }
 
     pub struct LazyRodioPlayer {
         inner: Option<RodioPlayer>,
@@ -245,6 +282,12 @@ mod rodio_backend {
                 .unwrap_or(true)
         }
 
+        fn output_failed(&self) -> bool {
+            self.inner
+                .as_ref()
+                .is_some_and(PlayerBackend::output_failed)
+        }
+
         fn state(&self) -> PlaybackState {
             self.inner
                 .as_ref()
@@ -260,6 +303,8 @@ mod rodio_backend {
         playback_position_anchor: Duration,
         track_position_anchor: Duration,
         rate: f32,
+        output_failed: Arc<AtomicBool>,
+        progress_watch: ProgressWatch,
     }
 
     impl RodioPlayer {
@@ -268,7 +313,7 @@ mod rodio_backend {
                 .with_context(|| format!("opening audio file {}", path.display()))?;
             let source = Decoder::try_from(file)
                 .with_context(|| format!("decoding audio file {}", path.display()))?;
-            let sink = open_sink(source.channels(), source.sample_rate())?;
+            let (sink, output_failed) = open_sink(source.channels(), source.sample_rate())?;
             let player = Player::connect_new(sink.mixer());
             player.set_speed(rate);
             player.append(source);
@@ -280,7 +325,13 @@ mod rodio_backend {
                 playback_position_anchor: Duration::ZERO,
                 track_position_anchor: Duration::ZERO,
                 rate,
+                output_failed,
+                progress_watch: ProgressWatch::new(),
             })
+        }
+
+        fn has_output_failed(&self) -> bool {
+            self.output_failed.load(Ordering::Acquire)
         }
     }
 
@@ -295,6 +346,7 @@ mod rodio_backend {
         fn play(&mut self) -> Result<()> {
             self.player.play();
             self.state = PlaybackState::Playing;
+            self.progress_watch.reset(self.player.get_pos());
             Ok(())
         }
 
@@ -306,18 +358,21 @@ mod rodio_backend {
 
         fn stop(&mut self) -> Result<()> {
             self.player.stop();
-            self.player.sleep_until_end();
             self.state = PlaybackState::Stopped;
             Ok(())
         }
 
         fn seek(&mut self, position: Duration) -> Result<()> {
+            if self.has_output_failed() {
+                bail!("audio output disconnected");
+            }
             let playback_position = playback_position_for_track_position(position, self.rate);
             self.player
                 .try_seek(playback_position)
                 .with_context(|| format!("seeking to {} ms", position.as_millis()))?;
             self.playback_position_anchor = playback_position;
             self.track_position_anchor = position;
+            self.progress_watch.reset(playback_position);
             Ok(())
         }
 
@@ -328,6 +383,7 @@ mod rodio_backend {
             self.playback_position_anchor = playback_position;
             self.track_position_anchor = track_position;
             self.rate = rate;
+            self.progress_watch.reset(playback_position);
             Ok(())
         }
 
@@ -336,7 +392,9 @@ mod rodio_backend {
         }
 
         fn sleep_until_end(&self) {
-            self.player.sleep_until_end();
+            while !self.player.empty() && !self.has_output_failed() {
+                std::thread::sleep(Duration::from_millis(25));
+            }
         }
 
         fn position(&self) -> Duration {
@@ -352,10 +410,19 @@ mod rodio_backend {
             self.player.empty()
         }
 
+        fn output_failed(&self) -> bool {
+            self.has_output_failed()
+        }
+
         fn state(&self) -> PlaybackState {
-            if self.player.empty() {
+            if self.has_output_failed() || self.player.empty() {
                 PlaybackState::Stopped
-            } else if self.player.is_paused() {
+            } else if self.player.is_paused()
+                || (self.state == PlaybackState::Playing
+                    && self
+                        .progress_watch
+                        .is_stalled_at(self.player.get_pos(), Instant::now()))
+            {
                 PlaybackState::Paused
             } else {
                 self.state
@@ -363,15 +430,23 @@ mod rodio_backend {
         }
     }
 
-    fn open_sink(channels: ChannelCount, sample_rate: SampleRate) -> Result<MixerDeviceSink> {
+    fn open_sink(
+        channels: ChannelCount,
+        sample_rate: SampleRate,
+    ) -> Result<(MixerDeviceSink, Arc<AtomicBool>)> {
+        let output_failed = Arc::new(AtomicBool::new(false));
+        let callback_output_failed = Arc::clone(&output_failed);
         let mut sink = DeviceSinkBuilder::from_default_device()
             .context("opening the default macOS audio output device")?
             .with_channels(channels)
             .with_sample_rate(sample_rate)
+            .with_error_callback(move |_error| {
+                callback_output_failed.store(true, Ordering::Release);
+            })
             .open_sink_or_fallback()
             .context("opening a macOS audio output stream")?;
         sink.log_on_drop(false);
-        Ok(sink)
+        Ok((sink, output_failed))
     }
 
     fn playback_position_for_track_position(position: Duration, rate: f32) -> Duration {
@@ -394,7 +469,7 @@ mod rodio_backend {
 
         use super::{
             playback_position_for_track_position, track_position_from_playback, LazyRodioPlayer,
-            PlayerBackend,
+            PlayerBackend, ProgressWatch, OUTPUT_STALL_THRESHOLD,
         };
 
         #[test]
@@ -435,6 +510,16 @@ mod rodio_backend {
                 ),
                 Duration::from_secs(19)
             );
+        }
+
+        #[test]
+        fn progress_watch_recovers_when_audio_position_moves_again() {
+            let watch = ProgressWatch::new();
+            let start = watch.changed_at.get();
+
+            assert!(!watch.is_stalled_at(Duration::ZERO, start));
+            assert!(watch.is_stalled_at(Duration::ZERO, start + OUTPUT_STALL_THRESHOLD));
+            assert!(!watch.is_stalled_at(Duration::from_secs(1), start + OUTPUT_STALL_THRESHOLD));
         }
     }
 }
