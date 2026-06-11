@@ -4,8 +4,8 @@ use ratatui::Frame;
 
 use super::keymap::keymap_items;
 use super::layout::{
-    info_panel_height_with_offset, library_pane_percent, BOTTOM_STATUS_ROWS, LIST_SCROLL_PADDING,
-    NARROW_TREE_PERCENT, STACKED_PANE_WIDTH, WIDE_TREE_PERCENT,
+    info_panel_height_with_offset, library_pane_percent, uses_stacked_browser_layout,
+    BOTTOM_STATUS_ROWS, LIST_SCROLL_PADDING, NARROW_TREE_PERCENT, WIDE_TREE_PERCENT,
 };
 use super::lines::{
     command_border_style, command_info_lines, command_info_title, command_pane_style,
@@ -66,7 +66,7 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
 }
 
 fn render_browser_panes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    if area.width < STACKED_PANE_WIDTH {
+    if uses_stacked_browser_layout(area.width, app.column_layout_width) {
         render_stacked_browser_panes(frame, app, area);
     } else {
         render_wide_browser_panes(frame, app, area);

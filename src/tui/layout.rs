@@ -1,5 +1,5 @@
 pub(super) const LIST_SCROLL_PADDING: usize = 3;
-pub(super) const STACKED_PANE_WIDTH: u16 = 75;
+pub(super) const DEFAULT_COLUMN_LAYOUT_WIDTH: u16 = 75;
 pub(super) const WIDE_TREE_PERCENT: u16 = 33;
 pub(super) const NARROW_TREE_PERCENT: u16 = 34;
 pub(super) const BOTTOM_STATUS_ROWS: u16 = 2;
@@ -16,6 +16,10 @@ const LIBRARY_PANE_MAX_PERCENT: i16 = 70;
 
 pub(super) fn percent_floor(value: u16, percent: u16) -> u16 {
     ((u32::from(value) * u32::from(percent)) / 100) as u16
+}
+
+pub(super) fn uses_stacked_browser_layout(width: u16, column_layout_width: u16) -> bool {
+    width <= column_layout_width
 }
 
 pub(super) fn library_pane_percent(base_percent: u16, offset: i16) -> u16 {

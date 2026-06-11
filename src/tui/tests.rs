@@ -467,6 +467,67 @@ fn rate_command_accepts_percent_and_reset() {
 }
 
 #[test]
+fn column_layout_width_command_persists_and_resets_layout_threshold() {
+    let conn = test_conn();
+    let mut app = test_app(Vec::new());
+
+    assert_eq!(app.column_layout_width, 75);
+
+    app.command = String::from("column-layout-width 92");
+    app.execute_command(&conn);
+
+    assert_eq!(app.column_layout_width, 92);
+    assert_eq!(db::column_layout_width(&conn, 75).unwrap(), 92);
+    assert_eq!(app.message, "column layout width 92 (columns above 92)");
+
+    app.command = String::from("column-layout-width status");
+    app.execute_command(&conn);
+
+    assert_eq!(app.message, "column layout width 92 (columns above 92)");
+
+    app.command = String::from("column-layout-width reset");
+    app.execute_command(&conn);
+
+    assert_eq!(app.column_layout_width, 75);
+    assert_eq!(db::column_layout_width(&conn, 75).unwrap(), 75);
+}
+
+#[test]
+fn column_layout_width_command_rejects_invalid_values_and_old_names() {
+    let conn = test_conn();
+    let mut app = test_app(Vec::new());
+
+    for command in [
+        "column-layout-width 0",
+        "column-layout-width wide",
+        "column-layout-width 65536",
+    ] {
+        app.command = command.to_string();
+        app.execute_command(&conn);
+
+        assert_eq!(app.column_layout_width, 75);
+        assert_eq!(
+            app.message,
+            "usage: :column-layout-width [WIDTH | reset | status]"
+        );
+    }
+
+    for command in ["column-width 92", "columns 92", "layout-width 92"] {
+        app.command = command.to_string();
+        app.execute_command(&conn);
+
+        assert_eq!(app.column_layout_width, 75);
+        assert_eq!(
+            app.message,
+            format!(
+                "unknown command: {}",
+                command.split_whitespace().next().unwrap()
+            )
+        );
+    }
+}
+
+#[test]
 fn rate_command_rejects_invalid_values_without_changing_rate() {
     let conn = test_conn();
     let mut app = test_app(Vec::new());
@@ -677,6 +738,7 @@ fn command_help_lists_available_commands() {
 
     assert!(text.contains("commands: add remove update library playlist"));
     assert!(text.contains("playlist-clear playlist-delete keymap keymap-reset"));
+    assert!(text.contains("column-layout-width"));
     assert!(text.contains("restore-filter"));
     assert!(text.contains("restore-track"));
     assert!(text.contains("filter"));
@@ -827,11 +889,13 @@ fn app_start_restores_pane_layout_offsets() {
         },
     )
     .unwrap();
+    db::save_column_layout_width(&conn, 96).unwrap();
 
     let app = App::new(&conn, &test_paths()).unwrap();
 
     assert_eq!(app.library_pane_percent_offset, 4);
     assert_eq!(app.info_pane_height_offset, 3);
+    assert_eq!(app.column_layout_width, 96);
 }
 
 #[test]
@@ -2527,6 +2591,10 @@ fn narrow_mouse_hit_testing_uses_stacked_panes() {
         Some(FocusPane::Tracks)
     );
     assert_eq!(mouse_pane(10, 28, MouseLayout::new(74, 30, 2)), None);
+    assert_eq!(
+        mouse_pane(10, 20, MouseLayout::new(75, 30, 2)),
+        Some(FocusPane::Tracks)
+    );
 }
 
 #[test]
@@ -2542,6 +2610,34 @@ fn wide_mouse_hit_testing_uses_split_panes() {
     assert_eq!(
         mouse_pane(90, 20, MouseLayout::new(100, 30, 2)),
         Some(FocusPane::Tracks)
+    );
+}
+
+#[test]
+fn mouse_hit_testing_uses_configured_column_layout_width() {
+    assert_eq!(
+        mouse_pane(
+            10,
+            20,
+            MouseLayout::new(100, 30, 2).with_column_layout_width(120)
+        ),
+        Some(FocusPane::Tracks)
+    );
+    assert_eq!(
+        mouse_pane(
+            10,
+            1,
+            MouseLayout::new(75, 30, 2).with_column_layout_width(75)
+        ),
+        Some(FocusPane::Tree)
+    );
+    assert_eq!(
+        mouse_pane(
+            10,
+            20,
+            MouseLayout::new(76, 30, 2).with_column_layout_width(75)
+        ),
+        Some(FocusPane::Tree)
     );
 }
 
@@ -4100,6 +4196,7 @@ fn test_app(tracks: Vec<LibraryTrack>) -> App {
         startup_info_visible: false,
         library_pane_percent_offset: 0,
         info_pane_height_offset: 0,
+        column_layout_width: layout::DEFAULT_COLUMN_LAYOUT_WIDTH,
         play_target: PlayTarget::Library,
         continuous: true,
         repeat: false,

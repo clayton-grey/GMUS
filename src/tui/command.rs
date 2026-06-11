@@ -10,8 +10,11 @@ use unicode_width::UnicodeWidthStr;
 use crate::integration::IntegrationEvent;
 use crate::{db, library};
 
+use super::layout::DEFAULT_COLUMN_LAYOUT_WIDTH;
 use super::{App, CommandOutputKind};
 
+pub(super) const COLUMN_LAYOUT_WIDTH_USAGE: &str =
+    "usage: :column-layout-width [WIDTH | reset | status]";
 pub(super) const RATE_USAGE: &str = "usage: :rate [0.25..4.0 | 25..400 | 25%..400% | reset]";
 
 #[cfg(not(all(target_os = "macos", feature = "macos-media-session")))]
@@ -28,6 +31,7 @@ pub(super) const COMMAND_NAMES: &[&str] = &[
     "playlist-delete",
     "keymap",
     "keymap-reset",
+    "column-layout-width",
     "rate",
     "restore-filter",
     "restore-track",
@@ -38,7 +42,7 @@ pub(super) const COMMAND_NAMES: &[&str] = &[
 ];
 
 #[cfg(not(all(target_os = "macos", feature = "macos-media-session")))]
-const BASE_COMMAND_NAMES: [&str; 15] = [
+const BASE_COMMAND_NAMES: [&str; 16] = [
     "add",
     "remove",
     "update",
@@ -48,6 +52,7 @@ const BASE_COMMAND_NAMES: [&str; 15] = [
     "playlist-delete",
     "keymap",
     "keymap-reset",
+    "column-layout-width",
     "rate",
     "restore-filter",
     "restore-track",
@@ -601,6 +606,7 @@ impl App {
                 self.reset_key_bindings(conn)?;
                 Ok(String::from("keymap reset to defaults"))
             }
+            "column-layout-width" => self.command_column_layout_width(conn, rest),
             "rate" => self.command_rate(rest),
             "restore-filter" => self.command_restore_filter(conn, rest),
             "restore-track" => self.command_restore_track(conn, rest),
@@ -639,6 +645,31 @@ impl App {
         };
         self.player.set_rate(rate)?;
         Ok(playback_rate_message(rate))
+    }
+
+    fn command_column_layout_width(
+        &mut self,
+        conn: &Connection,
+        raw_value: &str,
+    ) -> Result<String> {
+        let value = raw_value.trim();
+        if value.is_empty() || value.eq_ignore_ascii_case("status") {
+            return Ok(column_layout_width_message(self.column_layout_width));
+        }
+
+        let width = if value.eq_ignore_ascii_case("reset") || value.eq_ignore_ascii_case("default")
+        {
+            DEFAULT_COLUMN_LAYOUT_WIDTH
+        } else {
+            let Some(width) = value.parse::<u16>().ok().filter(|width| *width > 0) else {
+                return Ok(String::from(COLUMN_LAYOUT_WIDTH_USAGE));
+            };
+            width
+        };
+
+        self.column_layout_width = width;
+        db::save_column_layout_width(conn, width)?;
+        Ok(column_layout_width_message(width))
     }
 
     #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
@@ -791,4 +822,8 @@ impl App {
         }
         Ok(())
     }
+}
+
+fn column_layout_width_message(width: u16) -> String {
+    format!("column layout width {width} (columns above {width})")
 }

@@ -197,6 +197,7 @@ Both are on by default and can be toggled from the command bar.
 - `:playlist-delete NAME`: delete a playlist
 - `:keymap`: show the keymap pane
 - `:keymap-reset`: reset custom key mappings to defaults
+- `:column-layout-width [WIDTH|reset|status]`: set the widest terminal width that uses stacked browser panes; columns begin one column above it, and the default is `75`
 - `:rate [RATE|PERCENT|reset]`: show or change playback rate, for example `:rate 0.75`, `:rate 75`, or `:rate 75%`
 - `:restore-filter [on|off|toggle|status]`: toggle whether the last filter is restored on startup
 - `:restore-track [on|off|toggle|status]`: toggle whether the last played

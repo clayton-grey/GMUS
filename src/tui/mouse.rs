@@ -1,6 +1,6 @@
 use super::layout::{
-    info_panel_height_with_offset, library_pane_percent, percent_floor, NARROW_TREE_PERCENT,
-    STACKED_PANE_WIDTH, WIDE_TREE_PERCENT,
+    info_panel_height_with_offset, library_pane_percent, percent_floor,
+    uses_stacked_browser_layout, NARROW_TREE_PERCENT, WIDE_TREE_PERCENT,
 };
 use super::FocusPane;
 
@@ -15,6 +15,7 @@ pub(super) struct MouseLayout {
     pub(super) keymap_info_visible: bool,
     pub(super) library_pane_percent_offset: i16,
     pub(super) info_pane_height_offset: i16,
+    pub(super) column_layout_width: u16,
 }
 
 #[cfg(test)]
@@ -34,6 +35,7 @@ impl MouseLayout {
             keymap_info_visible: false,
             library_pane_percent_offset: 0,
             info_pane_height_offset: 0,
+            column_layout_width: super::layout::DEFAULT_COLUMN_LAYOUT_WIDTH,
         }
     }
 
@@ -60,6 +62,11 @@ impl MouseLayout {
     ) -> Self {
         self.library_pane_percent_offset = library_pane_percent_offset;
         self.info_pane_height_offset = info_pane_height_offset;
+        self
+    }
+
+    pub(super) fn with_column_layout_width(mut self, width: u16) -> Self {
+        self.column_layout_width = width;
         self
     }
 }
@@ -94,7 +101,7 @@ pub(super) fn mouse_pane(column: u16, row: u16, layout: MouseLayout) -> Option<F
         return None;
     }
 
-    if layout.terminal_width < STACKED_PANE_WIDTH {
+    if uses_stacked_browser_layout(layout.terminal_width, layout.column_layout_width) {
         let tree_percent =
             library_pane_percent(NARROW_TREE_PERCENT, layout.library_pane_percent_offset);
         let tree_height = percent_floor(browser_height, tree_percent).max(1);

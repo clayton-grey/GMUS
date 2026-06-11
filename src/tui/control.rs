@@ -416,6 +416,7 @@ impl App {
             keymap_info_visible: self.keymap_panel_open,
             library_pane_percent_offset: self.library_pane_percent_offset,
             info_pane_height_offset: self.info_pane_height_offset,
+            column_layout_width: self.column_layout_width,
         };
         let Some(pane) = mouse_pane(mouse.column, mouse.row, layout) else {
             return dismissed_startup_info;

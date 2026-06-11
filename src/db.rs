@@ -589,6 +589,17 @@ pub fn save_restore_track_enabled(conn: &Connection, enabled: bool) -> Result<()
     save_app_setting_bool(conn, "restore-track", enabled)
 }
 
+pub fn column_layout_width(conn: &Connection, default: u16) -> Result<u16> {
+    Ok(app_setting_value(conn, "column-layout-width")?
+        .and_then(|value| value.trim().parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default))
+}
+
+pub fn save_column_layout_width(conn: &Connection, width: u16) -> Result<()> {
+    save_app_setting(conn, "column-layout-width", &width.to_string())
+}
+
 pub fn pane_layout(conn: &Connection) -> Result<SavedPaneLayout> {
     Ok(SavedPaneLayout {
         library_percent_offset: app_setting_i16(conn, "library-pane-percent-offset", 0)?,
@@ -1631,6 +1642,18 @@ mod tests {
         save_pane_layout(&conn, layout).unwrap();
 
         assert_eq!(pane_layout(&conn).unwrap(), layout);
+    }
+
+    #[test]
+    fn column_layout_width_round_trips_through_app_settings() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        assert_eq!(column_layout_width(&conn, 75).unwrap(), 75);
+
+        save_column_layout_width(&conn, 92).unwrap();
+
+        assert_eq!(column_layout_width(&conn, 75).unwrap(), 92);
     }
 
     #[test]

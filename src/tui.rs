@@ -106,6 +106,7 @@ struct App {
     startup_info_visible: bool,
     library_pane_percent_offset: i16,
     info_pane_height_offset: i16,
+    column_layout_width: u16,
     play_target: PlayTarget,
     continuous: bool,
     repeat: bool,
@@ -176,6 +177,10 @@ impl App {
             startup_info_visible: true,
             library_pane_percent_offset: pane_layout.library_percent_offset,
             info_pane_height_offset: pane_layout.info_height_offset,
+            column_layout_width: db::column_layout_width(
+                conn,
+                layout::DEFAULT_COLUMN_LAYOUT_WIDTH,
+            )?,
             play_target: PlayTarget::Library,
             continuous: true,
             repeat: false,
