@@ -21,7 +21,8 @@ use super::lines::{
     album_header_line, command_help_lines, command_info_lines, command_info_title,
     disc_divider_line, filter_info_lines, filter_line, input_line, metadata_lines,
     now_playing_line, now_playing_row_style, pane_active, pane_highlight_style, playback_line,
-    playlist_entry_text, playlist_header_line, playlist_track_line, track_line, tree_item_line,
+    playlist_entry_text, playlist_header_line, playlist_track_line, rate_info_lines, rate_line,
+    track_line, tree_item_line,
 };
 use super::mouse::{mouse_pane, MouseLayout};
 use super::renderer::{render, render_playlist_info_pane};
@@ -209,6 +210,31 @@ fn playback_line_shows_time_bar_and_play_modes() {
         line.spans[line.spans.len() - 1].style,
         Style::default().fg(Color::White)
     );
+    assert!(!text.contains("(100%)"));
+}
+
+#[test]
+fn playback_line_shows_rate_and_resizes_progress_bar() {
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: app.tracks[0].clone(),
+        last_position_ms: 50_000,
+        listened_ms: 0,
+    });
+    app.suspended_position_ms = Some(50_000);
+
+    let normal = line_text(&playback_line(&app, 80));
+    app.player.set_rate(0.75).unwrap();
+    let rated = line_text(&playback_line(&app, 80));
+
+    assert!(rated.contains("0:50 / 1:40 (75%) ["));
+    assert_eq!(display_width(&rated), 80);
+    assert_eq!(
+        playback_bar_width(&normal) - playback_bar_width(&rated),
+        display_width(" (75%)")
+    );
 }
 
 #[test]
@@ -241,6 +267,25 @@ fn playback_line_uses_bar_marker_when_not_playing() {
         line.spans[line.spans.len() - 1].style,
         Style::default().fg(Color::DarkGray)
     );
+}
+
+#[test]
+fn active_tick_interval_tracks_playback_rate() {
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: app.tracks[0].clone(),
+        last_position_ms: 0,
+        listened_ms: 0,
+    });
+    app.player.play().unwrap();
+
+    app.player.set_rate(0.75).unwrap();
+    assert_eq!(app.tick_interval().as_millis(), 1_333);
+
+    app.player.set_rate(1.25).unwrap();
+    assert_eq!(app.tick_interval().as_millis(), 800);
 }
 
 #[test]
@@ -310,8 +355,11 @@ fn key_controls_match_cmus_style_bindings() {
 
     app.handle_key(&conn, KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
         .unwrap();
+    assert!(app.rate_mode);
     assert!(app.repeat);
 
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
     app.handle_key(&conn, KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
         .unwrap();
     assert!(app.shuffle);
@@ -375,6 +423,124 @@ fn command_mode_executes_playlist_commands() {
     app.execute_command(&conn);
     assert!(app.message.starts_with("deleted playlist Road"));
     assert!(app.playlists.is_empty());
+}
+
+#[test]
+fn rate_command_changes_and_reports_playback_rate() {
+    let conn = test_conn();
+    let mut app = test_app(Vec::new());
+
+    app.command = String::from("rate 0.75");
+    app.execute_command(&conn);
+
+    assert_eq!(app.player.rate(), 0.75);
+    assert_eq!(app.message, "playback rate 0.75x");
+
+    app.command = String::from("rate");
+    app.execute_command(&conn);
+
+    assert_eq!(app.message, "playback rate 0.75x");
+}
+
+#[test]
+fn rate_command_accepts_percent_and_reset() {
+    let conn = test_conn();
+    let mut app = test_app(Vec::new());
+
+    app.command = String::from("rate 125%");
+    app.execute_command(&conn);
+
+    assert_eq!(app.player.rate(), 1.25);
+    assert_eq!(app.message, "playback rate 1.25x");
+
+    app.command = String::from("rate 75");
+    app.execute_command(&conn);
+
+    assert_eq!(app.player.rate(), 0.75);
+    assert_eq!(app.message, "playback rate 0.75x");
+
+    app.command = String::from("rate reset");
+    app.execute_command(&conn);
+
+    assert_eq!(app.player.rate(), 1.0);
+    assert_eq!(app.message, "playback rate 1.00x");
+}
+
+#[test]
+fn rate_command_rejects_invalid_values_without_changing_rate() {
+    let conn = test_conn();
+    let mut app = test_app(Vec::new());
+    app.player.set_rate(0.75).unwrap();
+
+    for command in ["rate 0", "rate 10", "rate 401", "rate NaN", "rate fast"] {
+        app.command = command.to_string();
+        app.execute_command(&conn);
+
+        assert_eq!(app.player.rate(), 0.75);
+        assert_eq!(
+            app.message,
+            "usage: :rate [0.25..4.0 | 25..400 | 25%..400% | reset]"
+        );
+    }
+}
+
+#[test]
+fn rate_hotkey_opens_rate_input_and_applies_percentage() {
+    let conn = test_conn();
+    let mut app = test_app(vec![test_track(1, "first track")]);
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(app.rate_mode);
+    assert!(app.input_bar_visible());
+    assert!(app.info_area_visible());
+    assert_eq!(command_info_title(&app), "Rate");
+    assert_eq!(line_text(&rate_line(&app, 30)), " rate: 0.75 or 75_");
+    assert!(lines_text(&rate_info_lines(&app, 80, 8)).contains("75 means 75%"));
+
+    for key in ['7', '5'] {
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE))
+            .unwrap();
+    }
+    assert_eq!(line_text(&input_line(&app, 30)), " rate: 75_");
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(!app.rate_mode);
+    assert!(app.rate_input.is_empty());
+    assert_eq!(app.player.rate(), 0.75);
+    assert_eq!(app.message, "playback rate 0.75x");
+}
+
+#[test]
+fn invalid_rate_input_stays_open_and_escape_preserves_rate() {
+    let conn = test_conn();
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    app.player.set_rate(0.75).unwrap();
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+        .unwrap();
+    for key in ['5', '0', '0'] {
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE))
+            .unwrap();
+    }
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(app.rate_mode);
+    assert_eq!(app.rate_input, "500");
+    assert_eq!(app.player.rate(), 0.75);
+    assert!(lines_text(&rate_info_lines(&app, 80, 8)).contains("invalid rate"));
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(!app.rate_mode);
+    assert!(app.rate_input.is_empty());
+    assert_eq!(app.player.rate(), 0.75);
+    assert_eq!(app.message, "rate cancelled");
 }
 
 #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
@@ -1905,6 +2071,13 @@ fn playback_bar_scales_down_with_width() {
     let text = line_text(&playback_line(&app, 44));
 
     assert!(text.contains("[==--]"));
+
+    app.player.set_rate(0.75).unwrap();
+    let rated = line_text(&playback_line(&app, 44));
+
+    assert!(rated.contains("(75%)"));
+    assert!(!rated.contains('['));
+    assert_eq!(display_width(&rated), 44);
 }
 
 #[test]
@@ -2540,6 +2713,12 @@ fn command_and_filter_focus_make_both_pane_selections_inactive() {
     assert!(!pane_active(&app, FocusPane::Playlist));
 
     app.filter_mode = false;
+    app.rate_mode = true;
+    assert!(!pane_active(&app, FocusPane::Tree));
+    assert!(!pane_active(&app, FocusPane::Tracks));
+    assert!(!pane_active(&app, FocusPane::Playlist));
+
+    app.rate_mode = false;
     app.command_focus = true;
     assert!(!pane_active(&app, FocusPane::Tree));
     assert!(!pane_active(&app, FocusPane::Tracks));
@@ -3803,6 +3982,8 @@ fn test_app(tracks: Vec<LibraryTrack>) -> App {
         restore_filter: true,
         restore_track: true,
         filter_mode: false,
+        rate_input: String::new(),
+        rate_mode: false,
         command: String::new(),
         command_mode: false,
         command_output: Vec::new(),
@@ -3935,6 +4116,12 @@ fn keymap_text(app: &App) -> String {
     lines_text(&keymap_lines(app, 80))
 }
 
+fn playback_bar_width(text: &str) -> usize {
+    let start = text.find('[').unwrap();
+    let end = text[start..].find(']').unwrap() + start;
+    display_width(&text[start + 1..end])
+}
+
 fn test_conn() -> Connection {
     db::open_in_memory_for_tests().unwrap()
 }
@@ -3969,6 +4156,14 @@ impl PlayerBackend for FailingSeekPlayer {
 
     fn seek(&mut self, _position: Duration) -> Result<()> {
         anyhow::bail!("decoder refused seek")
+    }
+
+    fn set_rate(&mut self, _rate: f32) -> Result<()> {
+        Ok(())
+    }
+
+    fn rate(&self) -> f32 {
+        1.0
     }
 
     fn sleep_until_end(&self) {}

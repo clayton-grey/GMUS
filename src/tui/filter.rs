@@ -463,7 +463,7 @@ impl App {
     }
 
     pub(super) fn input_bar_visible(&self) -> bool {
-        self.command_mode || self.filter_bar_visible()
+        self.command_mode || self.rate_mode || self.filter_bar_visible()
     }
 
     pub(super) fn command_output_visible(&self) -> bool {
@@ -475,6 +475,7 @@ impl App {
             || self.command_mode
             || self.command_output_visible()
             || self.filter_mode
+            || self.rate_mode
             || self.playlist_panel_open
             || self.keymap_panel_open
     }

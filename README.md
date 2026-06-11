@@ -104,7 +104,7 @@ The TUI is organized around a cmus-style browser:
   counts, and selectable tracks for the current library scope
 - bottom management pane: selected-track metadata, keymap editing, playlist
   management, filter help, or inverted command help/output
-- command/filter row: shown below the bottom management pane while typing
+- command/filter/rate row: shown below the bottom management pane while typing
 - status rows: current track, playback position, playback modes, and transient
   feedback
 - narrow terminals stack the library pane above the track pane, with the bottom
@@ -140,6 +140,7 @@ The TUI is organized around a cmus-style browser:
 - `Ctrl-R`: refresh the library from the local database
 - `i`: show/hide the info pane
 - `I`: move the browser selection to the current track
+- `r`: type a playback rate, then `Enter` or `Tab` to apply, or `Esc` to cancel
 - `/`: type a library filter, then `Enter` or `Tab` to apply, or `Esc` to clear
 - `:`: type a command, then `Enter` to run it; `Tab` completes commands and paths
 - `q` or `Ctrl-C`: quit
@@ -196,6 +197,7 @@ Both are on by default and can be toggled from the command bar.
 - `:playlist-delete NAME`: delete a playlist
 - `:keymap`: show the keymap pane
 - `:keymap-reset`: reset custom key mappings to defaults
+- `:rate [RATE|PERCENT|reset]`: show or change playback rate, for example `:rate 0.75`, `:rate 75`, or `:rate 75%`
 - `:restore-filter [on|off|toggle|status]`: toggle whether the last filter is restored on startup
 - `:restore-track [on|off|toggle|status]`: toggle whether the last played
   track is restored on startup
@@ -207,6 +209,11 @@ Both are on by default and can be toggled from the command bar.
 Common aliases include `:rm`, `:u`, `:roots`, `:pl`, `:pl-clear`,
 `:pl-delete`, `:playlist-rm`, `:pl-rm`, `:keys`, `:keys-reset`, `:f`,
 `:clear-filter`, and on macOS builds, `:notify`.
+
+Playback rates range from `0.25x` to `4.0x` and remain active across tracks.
+Rodio changes pitch along with playback speed; it does not perform pitch-preserving
+time stretching. A non-default rate is shown beside the track time in the
+playback status row. Unmarked values above `4` are interpreted as percentages.
 
 `Esc` closes command output before falling through to filter clearing. Normal
 navigation/actions also return the info pane to selected-track metadata.

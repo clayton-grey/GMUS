@@ -86,7 +86,7 @@ impl App {
             return MEDIA_IDLE_TICK;
         }
         match self.logical_state() {
-            PlaybackState::Playing => ACTIVE_TICK,
+            PlaybackState::Playing => ACTIVE_TICK.div_f32(self.player.rate()),
             PlaybackState::Paused => MEDIA_IDLE_TICK,
             PlaybackState::Stopped => STOPPED_TICK,
         }

@@ -5,7 +5,7 @@ use ratatui::widgets::ListItem;
 use crate::db::{self, LibraryTrack};
 use crate::player::PlaybackState;
 
-use super::command::COMMAND_NAMES;
+use super::command::{parse_playback_rate, COMMAND_NAMES};
 use super::filter::FilterQuery;
 use super::formatting::{
     album_divider, display_width, fit_to_width, push_limited_span, right_aligned_line, spans_width,
@@ -21,6 +21,8 @@ pub(super) fn command_info_title(app: &App) -> &'static str {
         "Library"
     } else if app.filter_mode && !app.command_output_visible() {
         "Filter"
+    } else if app.rate_mode && !app.command_output_visible() {
+        "Rate"
     } else if app.playlist_panel_open && !app.command_mode && !app.command_output_visible() {
         "Playlists"
     } else if app.keymap_panel_open && !app.command_mode && !app.command_output_visible() {
@@ -46,6 +48,7 @@ pub(super) fn pane_highlight_style(active: bool) -> Style {
 pub(super) fn pane_active(app: &App, pane: FocusPane) -> bool {
     !app.command_mode
         && !app.filter_mode
+        && !app.rate_mode
         && !app.command_focus
         && app.focus == pane
         && (pane != FocusPane::Playlist || app.playlist_panel_open)
@@ -61,7 +64,7 @@ pub(super) fn pane_border_style(active: bool) -> Style {
 }
 
 fn input_bar_focused(app: &App) -> bool {
-    app.command_mode || app.filter_mode
+    app.command_mode || app.filter_mode || app.rate_mode
 }
 
 pub(super) fn input_bar_style(app: &App) -> Style {
@@ -467,6 +470,8 @@ pub(super) fn playback_line(app: &App, width: usize) -> Line<'static> {
 pub(super) fn input_line(app: &App, width: usize) -> Line<'static> {
     if app.command_mode {
         command_line(app, width)
+    } else if app.rate_mode {
+        rate_line(app, width)
     } else {
         filter_line(app, width)
     }
@@ -670,6 +675,42 @@ pub(super) fn filter_info_lines(app: &App, width: usize, height: u16) -> Vec<Lin
     }
 
     lines.truncate(height);
+    lines
+}
+
+pub(super) fn rate_info_lines(app: &App, width: usize, height: u16) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        " playback rate",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    if !app.rate_input.is_empty() && parse_playback_rate(&app.rate_input).is_none() {
+        lines.push(Line::from(Span::styled(
+            truncate_to_width(" invalid rate; use 0.25..4.0 or 25..400", width),
+            Style::default().fg(Color::LightRed),
+        )));
+    }
+    for (text, style) in [
+        (
+            " enter a multiplier from 0.25 to 4.0",
+            Style::default().fg(Color::Gray),
+        ),
+        (
+            " values above 4 are percentages: 75 means 75%",
+            Style::default().fg(Color::Gray),
+        ),
+        (
+            " Enter or Tab applies  Esc cancels",
+            Style::default().fg(Color::Gray),
+        ),
+    ] {
+        lines.push(Line::from(Span::styled(
+            truncate_to_width(text, width),
+            style,
+        )));
+    }
+    lines.truncate(usize::from(height));
     lines
 }
 
@@ -884,6 +925,30 @@ pub(super) fn filter_line(app: &App, width: usize) -> Line<'static> {
     ])
 }
 
+pub(super) fn rate_line(app: &App, width: usize) -> Line<'static> {
+    let text_width = width.saturating_sub(1);
+    let style = input_bar_style(app);
+    let rate = if app.rate_input.is_empty() {
+        Span::styled(
+            truncate_to_width(
+                "0.75 or 75_",
+                text_width.saturating_sub(display_width("rate: ")),
+            ),
+            placeholder_input_style(app),
+        )
+    } else {
+        Span::styled(
+            truncate_to_width(
+                &format!("{}_", app.rate_input),
+                text_width.saturating_sub(display_width("rate: ")),
+            ),
+            style,
+        )
+    };
+
+    Line::from(vec![Span::raw(" "), Span::styled("rate: ", style), rate])
+}
+
 fn playback_flag_spans(app: &App) -> Vec<Span<'static>> {
     vec![
         Span::styled("C", active_flag_style(app.continuous)),
@@ -921,7 +986,9 @@ fn playback_progress_spans(app: &App, width: usize, right_width: usize) -> Vec<S
         .map(|current| db::format_duration(current.track.duration_ms))
         .unwrap_or_else(|| "--:--".to_string());
     let time = format!("{position} / {duration}");
-    let fixed_width = display_width(" > ") + display_width(&time) + display_width(" []");
+    let rate = playback_rate_label(app);
+    let fixed_width =
+        display_width(" > ") + display_width(&time) + display_width(&rate) + display_width(" []");
     let available_bar_width = width.saturating_sub(fixed_width + right_width + 2);
     let bar_width = if available_bar_width >= 24 {
         available_bar_width.min(56)
@@ -936,15 +1003,32 @@ fn playback_progress_spans(app: &App, width: usize, right_width: usize) -> Vec<S
         Style::default().fg(Color::DarkGray)
     };
 
-    vec![
+    let mut spans = vec![
         Span::styled(format!(" {state_marker} "), marker_style),
         Span::styled(time, Style::default().fg(Color::White)),
-        Span::raw(" "),
-        Span::styled(
-            format!("[{}]", progress_bar(app, bar_width)),
-            Style::default().fg(Color::LightMagenta),
-        ),
-    ]
+    ];
+    if !rate.is_empty() {
+        spans.push(Span::styled(rate, Style::default().fg(Color::DarkGray)));
+    }
+    if bar_width > 0 {
+        spans.extend([
+            Span::raw(" "),
+            Span::styled(
+                format!("[{}]", progress_bar(app, bar_width)),
+                Style::default().fg(Color::LightMagenta),
+            ),
+        ]);
+    }
+    spans
+}
+
+fn playback_rate_label(app: &App) -> String {
+    let percent = (app.player.rate() * 100.0).round() as i32;
+    if percent == 100 {
+        String::new()
+    } else {
+        format!(" ({percent}%)")
+    }
 }
 
 fn progress_percent(app: &App) -> i64 {

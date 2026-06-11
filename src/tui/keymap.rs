@@ -28,6 +28,7 @@ pub(super) enum KeyAction {
     GrowPane,
     CommandMode,
     FilterMode,
+    RateMode,
     PlaySelected,
     TogglePause,
     Stop,
@@ -67,6 +68,7 @@ impl KeyAction {
             Self::GrowPane => "grow-pane",
             Self::CommandMode => "command-mode",
             Self::FilterMode => "filter-mode",
+            Self::RateMode => "rate-mode",
             Self::PlaySelected => "play-selected",
             Self::TogglePause => "toggle-pause",
             Self::Stop => "stop",
@@ -106,6 +108,7 @@ impl KeyAction {
             "grow-pane" => Self::GrowPane,
             "command-mode" => Self::CommandMode,
             "filter-mode" => Self::FilterMode,
+            "rate-mode" => Self::RateMode,
             "play-selected" => Self::PlaySelected,
             "toggle-pause" => Self::TogglePause,
             "stop" => Self::Stop,
@@ -260,6 +263,7 @@ const GROW_PANE_KEYS: &[KeySpec] = &[KeySpec::new(KeyCode::Char('}'))];
 // Bare ':' is reserved because it owns the transition into the command interface.
 const COMMAND_MODE_KEYS: &[KeySpec] = &[KeySpec::new(KeyCode::Char(':'))];
 const FILTER_MODE_KEYS: &[KeySpec] = &[KeySpec::new(KeyCode::Char('/'))];
+const RATE_MODE_KEYS: &[KeySpec] = &[KeySpec::new(KeyCode::Char('r'))];
 const PLAY_SELECTED_KEYS: &[KeySpec] = &[KeySpec::new(KeyCode::Char('x'))];
 const TOGGLE_PAUSE_KEYS: &[KeySpec] = &[KeySpec::new(KeyCode::Char('c'))];
 const STOP_KEYS: &[KeySpec] = &[KeySpec::new(KeyCode::Char('v'))];
@@ -384,6 +388,12 @@ pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
         action: KeyAction::FilterMode,
         default_keys: FILTER_MODE_KEYS,
         label: "enter filter mode",
+    },
+    KeyBinding {
+        section: "Playback",
+        action: KeyAction::RateMode,
+        default_keys: RATE_MODE_KEYS,
+        label: "enter playback rate",
     },
     KeyBinding {
         section: "Playback",

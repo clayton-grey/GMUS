@@ -11,7 +11,7 @@ use super::lines::{
     command_border_style, command_info_lines, command_info_title, command_pane_style,
     filter_info_lines, input_bar_style, input_line, metadata_lines, now_playing_line,
     now_playing_row_style, pane_active, pane_border_style, pane_highlight_style, playback_line,
-    playlist_items, selected_scope_title, track_items, tree_items,
+    playlist_items, rate_info_lines, selected_scope_title, track_items, tree_items,
 };
 use super::{App, FocusPane};
 
@@ -134,8 +134,10 @@ fn render_tracks_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 fn render_info_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let command_info = app.command_mode || app.command_output_visible();
     let filter_info = !command_info && app.filter_mode;
-    let playlist_info = !command_info && !filter_info && app.playlist_panel_open;
-    let keymap_info = !command_info && !filter_info && !playlist_info && app.keymap_panel_open;
+    let rate_info = !command_info && !filter_info && app.rate_mode;
+    let playlist_info = !command_info && !filter_info && !rate_info && app.playlist_panel_open;
+    let keymap_info =
+        !command_info && !filter_info && !rate_info && !playlist_info && app.keymap_panel_open;
     let info_inner_width = usize::from(area.width.saturating_sub(2));
     let info_inner_height = area.height.saturating_sub(2);
     if playlist_info {
@@ -151,6 +153,8 @@ fn render_info_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         command_info_lines(app, info_inner_width, info_inner_height)
     } else if filter_info {
         filter_info_lines(app, info_inner_width, info_inner_height)
+    } else if rate_info {
+        rate_info_lines(app, info_inner_width, info_inner_height)
     } else {
         metadata_lines(app, info_inner_width)
     };
@@ -160,7 +164,7 @@ fn render_info_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(if command_info {
             command_border_style(app)
-        } else if filter_info {
+        } else if filter_info || rate_info {
             pane_border_style(true)
         } else {
             pane_border_style(false)

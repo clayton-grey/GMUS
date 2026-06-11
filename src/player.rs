@@ -19,6 +19,8 @@ pub trait PlayerBackend {
     fn pause(&mut self) -> Result<()>;
     fn stop(&mut self) -> Result<()>;
     fn seek(&mut self, position: Duration) -> Result<()>;
+    fn set_rate(&mut self, rate: f32) -> Result<()>;
+    fn rate(&self) -> f32;
     fn sleep_until_end(&self);
     fn position(&self) -> Duration;
     fn is_finished(&self) -> bool;
@@ -52,10 +54,21 @@ pub fn play_count_threshold_met(duration_ms: Option<i64>, played_ms: i64) -> boo
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct NullPlayer {
     state: PlaybackState,
     position: Duration,
+    rate: f32,
+}
+
+impl Default for NullPlayer {
+    fn default() -> Self {
+        Self {
+            state: PlaybackState::Stopped,
+            position: Duration::ZERO,
+            rate: 1.0,
+        }
+    }
 }
 
 impl PlayerBackend for NullPlayer {
@@ -86,6 +99,15 @@ impl PlayerBackend for NullPlayer {
         Ok(())
     }
 
+    fn set_rate(&mut self, rate: f32) -> Result<()> {
+        self.rate = rate;
+        Ok(())
+    }
+
+    fn rate(&self) -> f32 {
+        self.rate
+    }
+
     fn sleep_until_end(&self) {}
 
     fn position(&self) -> Duration {
@@ -103,7 +125,7 @@ impl PlayerBackend for NullPlayer {
 
 #[cfg(test)]
 mod tests {
-    use super::play_count_threshold_met;
+    use super::{play_count_threshold_met, NullPlayer, PlayerBackend};
 
     #[test]
     fn counts_half_of_known_duration() {
@@ -115,6 +137,15 @@ mod tests {
     fn counts_long_unknown_duration() {
         assert!(play_count_threshold_met(None, 240_000));
         assert!(!play_count_threshold_met(None, 239_999));
+    }
+
+    #[test]
+    fn null_player_remembers_playback_rate() {
+        let mut player = NullPlayer::default();
+
+        assert_eq!(player.rate(), 1.0);
+        player.set_rate(0.75).unwrap();
+        assert_eq!(player.rate(), 0.75);
     }
 }
 
@@ -131,9 +162,18 @@ mod rodio_backend {
 
     use super::{PlaybackState, PlayerBackend};
 
-    #[derive(Default)]
     pub struct LazyRodioPlayer {
         inner: Option<RodioPlayer>,
+        rate: f32,
+    }
+
+    impl Default for LazyRodioPlayer {
+        fn default() -> Self {
+            Self {
+                inner: None,
+                rate: 1.0,
+            }
+        }
     }
 
     impl PlayerBackend for LazyRodioPlayer {
@@ -141,7 +181,7 @@ mod rodio_backend {
             if let Some(mut inner) = self.inner.take() {
                 inner.stop()?;
             }
-            self.inner = Some(RodioPlayer::load_path(path)?);
+            self.inner = Some(RodioPlayer::load_path(path, self.rate)?);
             Ok(())
         }
 
@@ -171,6 +211,18 @@ mod rodio_backend {
                 inner.seek(position)?;
             }
             Ok(())
+        }
+
+        fn set_rate(&mut self, rate: f32) -> Result<()> {
+            self.rate = rate;
+            if let Some(inner) = &mut self.inner {
+                inner.set_rate(rate)?;
+            }
+            Ok(())
+        }
+
+        fn rate(&self) -> f32 {
+            self.rate
         }
 
         fn sleep_until_end(&self) {
@@ -205,30 +257,38 @@ mod rodio_backend {
         _sink: MixerDeviceSink,
         player: Player,
         state: PlaybackState,
+        playback_position_anchor: Duration,
+        track_position_anchor: Duration,
+        rate: f32,
     }
 
     impl RodioPlayer {
-        fn load_path(path: &Path) -> Result<Self> {
+        fn load_path(path: &Path, rate: f32) -> Result<Self> {
             let file = File::open(path)
                 .with_context(|| format!("opening audio file {}", path.display()))?;
             let source = Decoder::try_from(file)
                 .with_context(|| format!("decoding audio file {}", path.display()))?;
             let sink = open_sink(source.channels(), source.sample_rate())?;
             let player = Player::connect_new(sink.mixer());
+            player.set_speed(rate);
             player.append(source);
             player.play();
             Ok(Self {
                 _sink: sink,
                 player,
                 state: PlaybackState::Playing,
+                playback_position_anchor: Duration::ZERO,
+                track_position_anchor: Duration::ZERO,
+                rate,
             })
         }
     }
 
     impl PlayerBackend for RodioPlayer {
         fn load_and_play(&mut self, path: &Path) -> Result<()> {
+            let rate = self.rate();
             self.stop()?;
-            *self = Self::load_path(path)?;
+            *self = Self::load_path(path, rate)?;
             Ok(())
         }
 
@@ -252,10 +312,27 @@ mod rodio_backend {
         }
 
         fn seek(&mut self, position: Duration) -> Result<()> {
+            let playback_position = playback_position_for_track_position(position, self.rate);
             self.player
-                .try_seek(position)
+                .try_seek(playback_position)
                 .with_context(|| format!("seeking to {} ms", position.as_millis()))?;
+            self.playback_position_anchor = playback_position;
+            self.track_position_anchor = position;
             Ok(())
+        }
+
+        fn set_rate(&mut self, rate: f32) -> Result<()> {
+            let track_position = self.position();
+            let playback_position = self.player.get_pos();
+            self.player.set_speed(rate);
+            self.playback_position_anchor = playback_position;
+            self.track_position_anchor = track_position;
+            self.rate = rate;
+            Ok(())
+        }
+
+        fn rate(&self) -> f32 {
+            self.rate
         }
 
         fn sleep_until_end(&self) {
@@ -263,7 +340,12 @@ mod rodio_backend {
         }
 
         fn position(&self) -> Duration {
-            self.player.get_pos()
+            track_position_from_playback(
+                self.player.get_pos(),
+                self.playback_position_anchor,
+                self.track_position_anchor,
+                self.rate,
+            )
         }
 
         fn is_finished(&self) -> bool {
@@ -290,5 +372,69 @@ mod rodio_backend {
             .context("opening a macOS audio output stream")?;
         sink.log_on_drop(false);
         Ok(sink)
+    }
+
+    fn playback_position_for_track_position(position: Duration, rate: f32) -> Duration {
+        position.div_f32(rate)
+    }
+
+    fn track_position_from_playback(
+        playback_position: Duration,
+        playback_position_anchor: Duration,
+        track_position_anchor: Duration,
+        rate: f32,
+    ) -> Duration {
+        let elapsed = playback_position.saturating_sub(playback_position_anchor);
+        track_position_anchor.saturating_add(elapsed.mul_f32(rate))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::time::Duration;
+
+        use super::{
+            playback_position_for_track_position, track_position_from_playback, LazyRodioPlayer,
+            PlayerBackend,
+        };
+
+        #[test]
+        fn lazy_player_remembers_rate_without_active_track() {
+            let mut player = LazyRodioPlayer::default();
+
+            player.set_rate(0.75).unwrap();
+            player.stop().unwrap();
+
+            assert_eq!(player.rate(), 0.75);
+        }
+
+        #[test]
+        fn converts_between_stretched_playback_and_track_timelines() {
+            assert_eq!(
+                track_position_from_playback(
+                    Duration::from_secs(20),
+                    Duration::ZERO,
+                    Duration::ZERO,
+                    0.75,
+                ),
+                Duration::from_secs(15)
+            );
+            assert_eq!(
+                playback_position_for_track_position(Duration::from_secs(15), 0.75),
+                Duration::from_secs(20)
+            );
+        }
+
+        #[test]
+        fn track_timeline_stays_continuous_after_rate_change() {
+            assert_eq!(
+                track_position_from_playback(
+                    Duration::from_secs(28),
+                    Duration::from_secs(20),
+                    Duration::from_secs(15),
+                    0.5,
+                ),
+                Duration::from_secs(19)
+            );
+        }
     }
 }

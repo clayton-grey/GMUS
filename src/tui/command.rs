@@ -12,6 +12,8 @@ use crate::{db, library};
 
 use super::{App, CommandOutputKind};
 
+pub(super) const RATE_USAGE: &str = "usage: :rate [0.25..4.0 | 25..400 | 25%..400% | reset]";
+
 #[cfg(not(all(target_os = "macos", feature = "macos-media-session")))]
 pub(super) const COMMAND_NAMES: &[&str] = &BASE_COMMAND_NAMES;
 
@@ -26,6 +28,7 @@ pub(super) const COMMAND_NAMES: &[&str] = &[
     "playlist-delete",
     "keymap",
     "keymap-reset",
+    "rate",
     "restore-filter",
     "restore-track",
     "filter",
@@ -35,7 +38,7 @@ pub(super) const COMMAND_NAMES: &[&str] = &[
 ];
 
 #[cfg(not(all(target_os = "macos", feature = "macos-media-session")))]
-const BASE_COMMAND_NAMES: [&str; 14] = [
+const BASE_COMMAND_NAMES: [&str; 15] = [
     "add",
     "remove",
     "update",
@@ -45,6 +48,7 @@ const BASE_COMMAND_NAMES: [&str; 14] = [
     "playlist-delete",
     "keymap",
     "keymap-reset",
+    "rate",
     "restore-filter",
     "restore-track",
     "filter",
@@ -337,6 +341,26 @@ fn on_off(enabled: bool) -> &'static str {
     }
 }
 
+pub(super) fn parse_playback_rate(value: &str) -> Option<f32> {
+    let rate = if value.eq_ignore_ascii_case("reset") || value.eq_ignore_ascii_case("normal") {
+        1.0
+    } else if let Some(percent) = value.strip_suffix('%') {
+        percent.trim().parse::<f32>().ok()? / 100.0
+    } else {
+        let value = value.parse::<f32>().ok()?;
+        if value > 4.0 {
+            value / 100.0
+        } else {
+            value
+        }
+    };
+    (rate.is_finite() && (0.25..=4.0).contains(&rate)).then_some(rate)
+}
+
+pub(super) fn playback_rate_message(rate: f32) -> String {
+    format!("playback rate {rate:.2}x")
+}
+
 fn library_job_for_command(
     input: &str,
 ) -> Option<std::result::Result<library::LibraryJob, String>> {
@@ -577,6 +601,7 @@ impl App {
                 self.reset_key_bindings(conn)?;
                 Ok(String::from("keymap reset to defaults"))
             }
+            "rate" => self.command_rate(rest),
             "restore-filter" => self.command_restore_filter(conn, rest),
             "restore-track" => self.command_restore_track(conn, rest),
             "filter" | "f" => {
@@ -601,6 +626,19 @@ impl App {
             "notifications" | "notify" => self.command_notifications(rest),
             _ => Ok(format!("unknown command: {command}")),
         }
+    }
+
+    fn command_rate(&mut self, raw_value: &str) -> Result<String> {
+        let value = raw_value.trim();
+        if value.is_empty() || value.eq_ignore_ascii_case("status") {
+            return Ok(playback_rate_message(self.player.rate()));
+        }
+
+        let Some(rate) = parse_playback_rate(value) else {
+            return Ok(String::from(RATE_USAGE));
+        };
+        self.player.set_rate(rate)?;
+        Ok(playback_rate_message(rate))
     }
 
     #[cfg(all(target_os = "macos", feature = "macos-media-session"))]

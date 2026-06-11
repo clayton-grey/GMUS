@@ -4,6 +4,7 @@ use rusqlite::Connection;
 
 use crate::db::{self, SavedPaneLayout};
 
+use super::command::{parse_playback_rate, playback_rate_message, RATE_USAGE};
 use super::keymap::KeyAction;
 use super::layout::{
     clamp_info_panel_offset, clamp_library_pane_offset, info_panel_target_height,
@@ -212,6 +213,19 @@ impl App {
             return Ok(false);
         }
 
+        if self.rate_mode {
+            match key.code {
+                KeyCode::Esc => self.cancel_rate_input(),
+                KeyCode::Enter | KeyCode::Tab => self.confirm_rate_input()?,
+                KeyCode::Backspace => {
+                    self.rate_input.pop();
+                }
+                KeyCode::Char(char) => self.rate_input.push(char),
+                _ => {}
+            }
+            return Ok(false);
+        }
+
         if self.filter_mode {
             match key.code {
                 KeyCode::Esc => {
@@ -284,14 +298,24 @@ impl App {
             KeyAction::GrowPane => self.resize_focused_pane(conn, true)?,
             KeyAction::CommandMode => {
                 self.filter_mode = false;
+                self.rate_mode = false;
                 self.command_mode = true;
                 self.command.clear();
                 self.clear_command_output();
                 self.message = String::from("typing command");
             }
             KeyAction::FilterMode => {
+                self.rate_mode = false;
                 self.filter_mode = true;
                 self.message = String::from("typing filter");
+            }
+            KeyAction::RateMode => {
+                self.filter_mode = false;
+                self.command_mode = false;
+                self.rate_mode = true;
+                self.rate_input.clear();
+                self.clear_command_output();
+                self.message = String::from("typing playback rate");
             }
             KeyAction::PlaySelected => self.play_from_controls(conn)?,
             KeyAction::TogglePause => self.toggle_pause(conn)?,
@@ -342,14 +366,23 @@ impl App {
             KeyCode::Char(':') => {
                 self.clear_command_output();
                 self.filter_mode = false;
+                self.rate_mode = false;
                 self.command_mode = true;
                 self.command.clear();
                 self.message = String::from("typing command");
             }
             KeyCode::Char('/') => {
                 self.clear_command_output();
+                self.rate_mode = false;
                 self.filter_mode = true;
                 self.message = String::from("typing filter");
+            }
+            KeyCode::Char('r') => {
+                self.clear_command_output();
+                self.filter_mode = false;
+                self.rate_mode = true;
+                self.rate_input.clear();
+                self.message = String::from("typing playback rate");
             }
             _ => {}
         }
@@ -363,7 +396,7 @@ impl App {
         terminal_height: u16,
     ) -> bool {
         let dismissed_startup_info = self.dismiss_startup_info();
-        if self.filter_mode || self.command_mode || self.command_focus {
+        if self.filter_mode || self.rate_mode || self.command_mode || self.command_focus {
             return dismissed_startup_info;
         }
 
@@ -399,6 +432,32 @@ impl App {
             self.clear_filter(conn)?;
         }
         Ok(())
+    }
+
+    fn confirm_rate_input(&mut self) -> Result<()> {
+        let value = self.rate_input.trim();
+        if value.is_empty() {
+            self.rate_mode = false;
+            self.rate_input.clear();
+            self.message = playback_rate_message(self.player.rate());
+            return Ok(());
+        }
+
+        let Some(rate) = parse_playback_rate(value) else {
+            self.message = String::from(RATE_USAGE);
+            return Ok(());
+        };
+        self.player.set_rate(rate)?;
+        self.rate_mode = false;
+        self.rate_input.clear();
+        self.message = playback_rate_message(rate);
+        Ok(())
+    }
+
+    fn cancel_rate_input(&mut self) {
+        self.rate_mode = false;
+        self.rate_input.clear();
+        self.message = String::from("rate cancelled");
     }
 
     fn resize_focused_pane(&mut self, conn: &Connection, grow: bool) -> Result<()> {
