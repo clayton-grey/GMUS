@@ -6,8 +6,7 @@ use rusqlite::Connection;
 
 use crate::config::AppPaths;
 use crate::db::{self, LibraryTrack};
-use crate::integration::{self, Integration};
-use crate::player::{self, PlaybackState, PlayerBackend};
+use crate::player::{self, PlayerBackend};
 
 mod browser;
 mod command;
@@ -35,8 +34,9 @@ pub use runtime::run;
 use browser::{TrackRow, TreeEntry};
 use jobs::LibraryJobRunner;
 use keymap::{KeyAction, KeySpec};
+use media_sync::IntegrationState;
 use playback::{PlayTarget, PlaybackEntry, PlaybackSource, PlayingTrack};
-use playlist::PlaylistPanelEntry;
+use playlist::{PlaylistCache, PlaylistPanelEntry};
 use status::TransientStatus;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -66,9 +66,7 @@ struct App {
     paths: AppPaths,
     tracks: Vec<LibraryTrack>,
     playlists: Vec<db::Playlist>,
-    playlist_track_ids: HashMap<i64, Vec<i64>>,
-    playlist_track_entry_ids: HashMap<i64, Vec<i64>>,
-    playlist_track_indices: HashMap<i64, Vec<usize>>,
+    playlist_cache: PlaylistCache,
     view: ViewCache,
     tree_state: ListState,
     track_state: ListState,
@@ -115,17 +113,9 @@ struct App {
     shuffle_scope: Vec<PlaybackEntry>,
     shuffle_order: Vec<PlaybackEntry>,
     player: Box<dyn PlayerBackend>,
-    integration: Box<dyn Integration>,
+    integration: IntegrationState,
     current: Option<PlayingTrack>,
     suspended_position_ms: Option<i64>,
-    last_integration_state: Option<PlaybackState>,
-    last_integration_position_s: Option<i64>,
-    integration_error_reported: bool,
-    #[cfg_attr(
-        not(all(target_os = "macos", feature = "macos-media-session")),
-        allow(dead_code)
-    )]
-    track_notifications_visible: bool,
     transient_status: Option<TransientStatus>,
     message: String,
 }
@@ -145,9 +135,7 @@ impl App {
             paths: paths.clone(),
             tracks: db::library_tracks(conn)?,
             playlists: db::playlists(conn)?,
-            playlist_track_ids: HashMap::new(),
-            playlist_track_entry_ids: HashMap::new(),
-            playlist_track_indices: HashMap::new(),
+            playlist_cache: PlaylistCache::default(),
             view: ViewCache::default(),
             tree_state: ListState::default(),
             track_state: ListState::default(),
@@ -197,13 +185,9 @@ impl App {
             shuffle_scope: Vec::new(),
             shuffle_order: Vec::new(),
             player,
-            integration: integration::default_integration(),
+            integration: IntegrationState::default(),
             current: None,
             suspended_position_ms: None,
-            last_integration_state: None,
-            last_integration_position_s: None,
-            integration_error_reported: false,
-            track_notifications_visible: true,
             transient_status: None,
             message: String::from(
                 "Tab pane  Enter select/play  k keymap  x play  c play/pause  p playlists  v stop",

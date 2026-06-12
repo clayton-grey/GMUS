@@ -16,11 +16,15 @@ const FOLDER_ART_NAMES: &[&str] = &[
     "front.png",
 ];
 
-pub fn cache_cover_for_track(track: &TrackMetadata, art_dir: &Path) -> Result<Option<PathBuf>> {
+pub fn cache_cover_for_track(
+    track: &TrackMetadata,
+    art_dir: &Path,
+    media_item_id: i64,
+) -> Result<Option<PathBuf>> {
     if let Some(embedded) = media::read_embedded_art(&track.path)? {
         fs::create_dir_all(art_dir)
             .with_context(|| format!("creating art cache {}", art_dir.display()))?;
-        let path = art_dir.join(format!("{}.{}", track.fingerprint(), embedded.extension));
+        let path = art_dir.join(format!("{media_item_id}.{}", embedded.extension));
         write_cover_bytes_if_changed(&path, &embedded.bytes)
             .with_context(|| format!("writing embedded cover art to {}", path.display()))?;
         return Ok(Some(path));
@@ -33,7 +37,7 @@ pub fn cache_cover_for_track(track: &TrackMetadata, art_dir: &Path) -> Result<Op
             .extension()
             .and_then(|extension| extension.to_str())
             .unwrap_or("img");
-        let path = art_dir.join(format!("{}.{}", track.fingerprint(), extension));
+        let path = art_dir.join(format!("{media_item_id}.{extension}"));
         copy_cover_if_changed(&folder_art, &path).with_context(|| {
             format!(
                 "copying folder cover art from {} to {}",

@@ -356,19 +356,15 @@ impl App {
             return self
                 .playlists
                 .iter()
-                .filter_map(|playlist| self.playlist_track_indices.get(&playlist.id))
-                .flat_map(|indices| indices.iter().copied())
+                .flat_map(|playlist| self.playlist_cache.track_indices(playlist.id))
                 .filter(|index| filtered.contains(index) && seen.insert(*index))
                 .collect();
         }
         if let TreeEntry::Playlist { playlist_id, .. } = entry {
             let filtered: HashSet<usize> = self.view.filtered_indices.iter().copied().collect();
             return self
-                .playlist_track_indices
-                .get(playlist_id)
-                .into_iter()
-                .flatten()
-                .copied()
+                .playlist_cache
+                .track_indices(*playlist_id)
                 .filter(|index| filtered.contains(index))
                 .collect();
         }
@@ -392,15 +388,12 @@ impl App {
     }
 
     fn track_in_any_playlist(&self, track_index: usize) -> bool {
-        self.playlist_track_indices
-            .values()
-            .any(|indices| indices.contains(&track_index))
+        self.playlist_cache
+            .contains_track_in_any_playlist(track_index)
     }
 
     fn track_in_playlist(&self, track_index: usize, playlist_id: i64) -> bool {
-        self.playlist_track_indices
-            .get(&playlist_id)
-            .is_some_and(|indices| indices.contains(&track_index))
+        self.playlist_cache.contains_track(playlist_id, track_index)
     }
 
     pub(super) fn nearest_track_row(&self, from: usize) -> Option<usize> {

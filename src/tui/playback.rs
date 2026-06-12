@@ -432,20 +432,13 @@ impl App {
 
     pub(super) fn playlist_playback_entries(&self, playlist_id: i64) -> Vec<PlaybackEntry> {
         let filtered: HashSet<usize> = self.view.filtered_indices.iter().copied().collect();
-        let Some(entry_ids) = self.playlist_track_entry_ids.get(&playlist_id) else {
-            return Vec::new();
-        };
-        let Some(indices) = self.playlist_track_indices.get(&playlist_id) else {
-            return Vec::new();
-        };
-
-        entry_ids
-            .iter()
-            .copied()
-            .zip(indices.iter().copied())
-            .filter(|(_entry_id, track_index)| filtered.contains(track_index))
-            .map(|(playlist_track_id, track_index)| {
-                PlaybackEntry::playlist_track(playlist_id, playlist_track_id, track_index)
+        self.playlist_cache
+            .playable_entries(playlist_id)
+            .filter_map(|entry| {
+                let track_index = entry.track_index?;
+                filtered.contains(&track_index).then(|| {
+                    PlaybackEntry::playlist_track(playlist_id, entry.playlist_track_id, track_index)
+                })
             })
             .collect()
     }
@@ -687,19 +680,8 @@ impl App {
                 playlist_id,
                 playlist_track_id,
             }) => self
-                .playlist_track_entry_ids
-                .get(&playlist_id)
-                .and_then(|entry_ids| {
-                    entry_ids
-                        .iter()
-                        .position(|entry_id| *entry_id == playlist_track_id)
-                })
-                .and_then(|position| {
-                    self.playlist_track_indices
-                        .get(&playlist_id)
-                        .and_then(|indices| indices.get(position))
-                        .copied()
-                })
+                .playlist_cache
+                .track_index_for_entry(playlist_id, playlist_track_id)
                 .map(|track_index| {
                     PlaybackEntry::playlist_track(playlist_id, playlist_track_id, track_index)
                 })

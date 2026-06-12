@@ -106,7 +106,7 @@ fn main() -> Result<()> {
         Command::Art { path } => {
             let track = media::read_track(&path)?;
             let stored = db::upsert_track(&conn, &track)?;
-            match art::cache_cover_for_track(&track, &paths.art_dir)? {
+            match art::cache_cover_for_track(&track, &paths.art_dir, stored.media_item_id)? {
                 Some(cached) => {
                     db::set_cover_path(&conn, stored.media_item_id, &cached)?;
                     println!("{}", cached.display());
@@ -145,7 +145,9 @@ fn main() -> Result<()> {
         Command::Play { path } => {
             let track = media::read_track(&path)?;
             let stored = db::upsert_track(&conn, &track)?;
-            if let Some(cover_path) = art::cache_cover_for_track(&track, &paths.art_dir)? {
+            if let Some(cover_path) =
+                art::cache_cover_for_track(&track, &paths.art_dir, stored.media_item_id)?
+            {
                 db::set_cover_path(&conn, stored.media_item_id, &cover_path)?;
             }
 

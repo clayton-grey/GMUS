@@ -25,12 +25,13 @@ use super::lines::{
     track_line, tree_item_line,
 };
 use super::mouse::{mouse_pane, MouseLayout};
+use super::playlist::PlaylistCacheEntry;
 use super::renderer::{render, render_playlist_info_pane};
 use super::*;
 use crate::integration::{
     Integration, IntegrationCommand, IntegrationEvent, NoopIntegration, TrackSnapshot,
 };
-use crate::player::NullPlayer;
+use crate::player::{NullPlayer, PlaybackState};
 
 #[test]
 fn playback_sequence_respects_filter() {
@@ -668,14 +669,14 @@ fn command_mode_toggles_track_notifications() {
     let conn = test_conn();
     let events = Rc::new(RefCell::new(Vec::new()));
     let mut app = test_app(Vec::new());
-    app.integration = Box::new(RecordingIntegration {
+    app.integration.backend = Box::new(RecordingIntegration {
         events: Rc::clone(&events),
     });
 
     app.command = String::from("notifications off");
     app.execute_command(&conn);
 
-    assert!(!app.track_notifications_visible);
+    assert!(!app.integration.track_notifications_visible);
     assert_eq!(app.message, "track notifications hidden");
     assert_eq!(
         events.borrow().as_slice(),
@@ -685,7 +686,7 @@ fn command_mode_toggles_track_notifications() {
     app.command = String::from("notifications toggle");
     app.execute_command(&conn);
 
-    assert!(app.track_notifications_visible);
+    assert!(app.integration.track_notifications_visible);
     assert_eq!(app.message, "track notifications visible");
 }
 
@@ -1592,10 +1593,48 @@ fn enter_on_playlist_panel_header_plays_first_playlist_track() {
         app.current.as_ref().and_then(|current| current.source),
         Some(PlaybackSource::PlaylistTrack {
             playlist_id: playlist.id,
-            playlist_track_id: app.playlist_track_entry_ids[&playlist.id][0]
+            playlist_track_id: app
+                .playlist_cache
+                .playable_entries(playlist.id)
+                .next()
+                .unwrap()
+                .playlist_track_id
         })
     );
     assert!(!app.expanded_playlists.contains(&playlist.id));
+}
+
+#[test]
+fn playlist_cache_counts_unavailable_entries_but_only_exposes_playable_tracks() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    let first = db::upsert_track(
+        &conn,
+        &test_track_metadata("/tmp/first.flac", "first track", 1),
+    )
+    .unwrap();
+    let second = db::upsert_track(
+        &conn,
+        &test_track_metadata("/tmp/second.flac", "second track", 2),
+    )
+    .unwrap();
+    let playlist = db::create_playlist(&conn, "Mix").unwrap();
+    db::add_tracks_to_playlist(
+        &conn,
+        playlist.id,
+        &[first.media_item_id, second.media_item_id],
+    )
+    .unwrap();
+    let mut app = test_app(vec![test_track(first.media_item_id, "first track")]);
+    app.playlists = db::playlists(&conn).unwrap();
+    app.refresh_playlist_tracks(&conn).unwrap();
+    app.expanded_playlists.insert(playlist.id);
+    app.sync_selection();
+
+    assert_eq!(app.playlist_cache.len(playlist.id), 2);
+    assert_eq!(app.playlist_cache.playable_entries(playlist.id).count(), 1);
+    assert_eq!(app.view.playlist_entries.len(), 2);
+    assert!(playlist_entry_text(&app, &app.view.playlist_entries[0]).contains("Mix (2)"));
 }
 
 #[test]
@@ -1605,9 +1644,7 @@ fn space_on_playlist_panel_header_still_toggles_expansion() {
         id: 7,
         name: "Road".to_string(),
     }];
-    app.playlist_track_ids.insert(7, vec![1]);
-    app.playlist_track_entry_ids.insert(7, vec![11]);
-    app.playlist_track_indices.insert(7, vec![0]);
+    set_playlist_cache(&mut app, 7, vec![1], vec![11], vec![0]);
     app.active_playlist_id = Some(7);
     app.playlist_panel_open = true;
     app.focus = FocusPane::Playlist;
@@ -1711,9 +1748,7 @@ fn playlist_track_numbers_are_playlist_relative() {
         id: 7,
         name: "Road".to_string(),
     }];
-    app.playlist_track_ids.insert(7, vec![1, 2]);
-    app.playlist_track_entry_ids.insert(7, vec![11, 12]);
-    app.playlist_track_indices.insert(7, vec![0, 1]);
+    set_playlist_cache(&mut app, 7, vec![1, 2], vec![11, 12], vec![0, 1]);
     app.active_playlist_id = Some(7);
     app.expanded_playlists.insert(7);
     app.playlist_panel_open = true;
@@ -1734,9 +1769,7 @@ fn collapsing_playlist_panel_from_track_selects_playlist_parent() {
         id: 7,
         name: "Road".to_string(),
     }];
-    app.playlist_track_ids.insert(7, vec![1]);
-    app.playlist_track_entry_ids.insert(7, vec![11]);
-    app.playlist_track_indices.insert(7, vec![0]);
+    set_playlist_cache(&mut app, 7, vec![1], vec![11], vec![0]);
     app.active_playlist_id = Some(7);
     app.expanded_playlists.insert(7);
     app.playlist_panel_open = true;
@@ -2649,9 +2682,13 @@ fn mouse_scroll_moves_playlist_pane_without_changing_focus() {
         id: 7,
         name: "Road".to_string(),
     }];
-    app.playlist_track_ids.insert(7, (1..=6).collect());
-    app.playlist_track_entry_ids.insert(7, (11..=16).collect());
-    app.playlist_track_indices.insert(7, (0..6).collect());
+    set_playlist_cache(
+        &mut app,
+        7,
+        (1..=6).collect(),
+        (11..=16).collect(),
+        (0..6).collect(),
+    );
     app.active_playlist_id = Some(7);
     app.expanded_playlists.insert(7);
     app.playlist_panel_open = true;
@@ -3096,9 +3133,7 @@ fn playlists_entry_expands_to_playlists_and_plays_tracks() {
         id: 7,
         name: "Road".to_string(),
     }];
-    app.playlist_track_ids.insert(7, vec![2]);
-    app.playlist_track_entry_ids.insert(7, vec![11]);
-    app.playlist_track_indices.insert(7, vec![1]);
+    set_playlist_cache(&mut app, 7, vec![2], vec![11], vec![1]);
     app.sync_selection();
 
     assert!(matches!(
@@ -3134,9 +3169,7 @@ fn collapsing_playlists_from_playlist_selects_playlists_parent() {
         id: 7,
         name: "Road".to_string(),
     }];
-    app.playlist_track_ids.insert(7, vec![1]);
-    app.playlist_track_entry_ids.insert(7, vec![11]);
-    app.playlist_track_indices.insert(7, vec![0]);
+    set_playlist_cache(&mut app, 7, vec![1], vec![11], vec![0]);
     app.playlists_expanded = true;
     app.sync_selection();
     app.selected_tree = app
@@ -3165,9 +3198,7 @@ fn playlist_tree_track_pane_uses_playlist_row_style() {
         id: 7,
         name: "Road".to_string(),
     }];
-    app.playlist_track_ids.insert(7, vec![1, 2]);
-    app.playlist_track_entry_ids.insert(7, vec![11, 12]);
-    app.playlist_track_indices.insert(7, vec![0, 1]);
+    set_playlist_cache(&mut app, 7, vec![1, 2], vec![11, 12], vec![0, 1]);
     app.playlists_expanded = true;
     app.sync_selection();
     app.selected_tree = app
@@ -3203,9 +3234,7 @@ fn duplicate_playlist_entries_mark_only_the_active_occurrence() {
         id: 7,
         name: "Road".to_string(),
     }];
-    app.playlist_track_ids.insert(7, vec![1, 1]);
-    app.playlist_track_entry_ids.insert(7, vec![11, 12]);
-    app.playlist_track_indices.insert(7, vec![0, 0]);
+    set_playlist_cache(&mut app, 7, vec![1, 1], vec![11, 12], vec![0, 0]);
     app.current = Some(PlayingTrack {
         index: 0,
         source: Some(PlaybackSource::PlaylistTrack {
@@ -3231,9 +3260,7 @@ fn duplicate_playlist_playback_advances_by_entry_identity() {
         id: 7,
         name: "Road".to_string(),
     }];
-    app.playlist_track_ids.insert(7, vec![1, 1]);
-    app.playlist_track_entry_ids.insert(7, vec![11, 12]);
-    app.playlist_track_indices.insert(7, vec![0, 0]);
+    set_playlist_cache(&mut app, 7, vec![1, 1], vec![11, 12], vec![0, 0]);
     app.playlists_expanded = true;
     app.sync_selection();
     app.selected_tree = app
@@ -3272,9 +3299,7 @@ fn preserving_browser_selection_keeps_duplicate_playlist_entry_identity() {
         id: 7,
         name: "Road".to_string(),
     }];
-    app.playlist_track_ids.insert(7, vec![1, 1]);
-    app.playlist_track_entry_ids.insert(7, vec![11, 12]);
-    app.playlist_track_indices.insert(7, vec![0, 0]);
+    set_playlist_cache(&mut app, 7, vec![1, 1], vec![11, 12], vec![0, 0]);
     app.playlists_expanded = true;
     app.sync_selection();
     app.selected_tree = app
@@ -3303,9 +3328,7 @@ fn playlist_playback_does_not_mark_library_track_row_current() {
         id: 7,
         name: "Road".to_string(),
     }];
-    app.playlist_track_ids.insert(7, vec![1]);
-    app.playlist_track_entry_ids.insert(7, vec![11]);
-    app.playlist_track_indices.insert(7, vec![0]);
+    set_playlist_cache(&mut app, 7, vec![1], vec![11], vec![0]);
     app.current = Some(PlayingTrack {
         index: 0,
         source: Some(PlaybackSource::PlaylistTrack {
@@ -3331,9 +3354,7 @@ fn playlist_playback_marks_playlist_tree_not_artist_tree() {
         id: 7,
         name: "Road".to_string(),
     }];
-    app.playlist_track_ids.insert(7, vec![1]);
-    app.playlist_track_entry_ids.insert(7, vec![11]);
-    app.playlist_track_indices.insert(7, vec![0]);
+    set_playlist_cache(&mut app, 7, vec![1], vec![11], vec![0]);
     app.current = Some(PlayingTrack {
         index: 0,
         source: Some(PlaybackSource::PlaylistTrack {
@@ -3362,9 +3383,7 @@ fn library_playback_does_not_mark_playlist_track_row_current() {
         id: 7,
         name: "Road".to_string(),
     }];
-    app.playlist_track_ids.insert(7, vec![1]);
-    app.playlist_track_entry_ids.insert(7, vec![11]);
-    app.playlist_track_indices.insert(7, vec![0]);
+    set_playlist_cache(&mut app, 7, vec![1], vec![11], vec![0]);
     app.current = Some(PlayingTrack {
         index: 0,
         source: None,
@@ -3387,9 +3406,7 @@ fn library_playback_marks_artist_tree_not_playlist_tree() {
         id: 7,
         name: "Road".to_string(),
     }];
-    app.playlist_track_ids.insert(7, vec![1]);
-    app.playlist_track_entry_ids.insert(7, vec![11]);
-    app.playlist_track_indices.insert(7, vec![0]);
+    set_playlist_cache(&mut app, 7, vec![1], vec![11], vec![0]);
     app.current = Some(PlayingTrack {
         index: 0,
         source: None,
@@ -3427,12 +3444,8 @@ fn top_level_playlists_track_pane_groups_by_playlist() {
             name: "Night".to_string(),
         },
     ];
-    app.playlist_track_ids.insert(7, vec![1, 2]);
-    app.playlist_track_entry_ids.insert(7, vec![11, 12]);
-    app.playlist_track_indices.insert(7, vec![0, 1]);
-    app.playlist_track_ids.insert(8, vec![3, 1]);
-    app.playlist_track_entry_ids.insert(8, vec![21, 22]);
-    app.playlist_track_indices.insert(8, vec![2, 0]);
+    set_playlist_cache(&mut app, 7, vec![1, 2], vec![11, 12], vec![0, 1]);
+    set_playlist_cache(&mut app, 8, vec![3, 1], vec![21, 22], vec![2, 0]);
     app.sync_selection();
 
     assert!(matches!(
@@ -3919,7 +3932,7 @@ fn stalled_audio_output_publishes_inactive_media_state_until_progress_resumes() 
     let events = Rc::new(RefCell::new(Vec::new()));
     let mut app = test_app(vec![test_track(1, "first track")]);
     app.player = Box::new(StalledOutputPlayer { playing: false });
-    app.integration = Box::new(RecordingIntegration {
+    app.integration.backend = Box::new(RecordingIntegration {
         events: Rc::clone(&events),
     });
     app.current = Some(PlayingTrack {
@@ -4085,7 +4098,7 @@ fn failed_replacement_track_load_publishes_stopped_integration_snapshot() {
         test_track(2, "replacement track"),
     ]);
     app.player = Box::new(OutputFailedPlayer);
-    app.integration = Box::new(RecordingIntegration {
+    app.integration.backend = Box::new(RecordingIntegration {
         events: Rc::clone(&events),
     });
     app.current = Some(PlayingTrack {
@@ -4132,7 +4145,7 @@ fn relative_seek_while_paused_uses_suspended_position() {
 #[test]
 fn repeated_integration_failures_do_not_keep_overwriting_messages() {
     let mut app = test_app(vec![test_track(1, "first track")]);
-    app.integration = Box::new(FailingIntegration);
+    app.integration.backend = Box::new(FailingIntegration);
     app.current = Some(PlayingTrack {
         index: 0,
         source: None,
@@ -4156,7 +4169,7 @@ fn track_changed_event_uses_owned_track_snapshot() {
     let mut track = test_track(1, "first track");
     track.cover_path = Some(String::from("/tmp/cover.jpg"));
     let mut app = test_app(vec![track]);
-    app.integration = Box::new(RecordingIntegration {
+    app.integration.backend = Box::new(RecordingIntegration {
         events: Rc::clone(&events),
     });
     app.current = Some(PlayingTrack {
@@ -4411,9 +4424,7 @@ fn test_app(tracks: Vec<LibraryTrack>) -> App {
         paths: test_paths(),
         tracks,
         playlists: Vec::new(),
-        playlist_track_ids: HashMap::new(),
-        playlist_track_entry_ids: HashMap::new(),
-        playlist_track_indices: HashMap::new(),
+        playlist_cache: PlaylistCache::default(),
         view: ViewCache::default(),
         tree_state: ListState::default(),
         track_state: ListState::default(),
@@ -4460,19 +4471,41 @@ fn test_app(tracks: Vec<LibraryTrack>) -> App {
         shuffle_scope: Vec::new(),
         shuffle_order: Vec::new(),
         player: Box::new(NullPlayer::default()),
-        integration: Box::new(NoopIntegration),
+        integration: IntegrationState::new(Box::new(NoopIntegration)),
         current: None,
         suspended_position_ms: None,
-        last_integration_state: None,
-        last_integration_position_s: None,
-        integration_error_reported: false,
-        track_notifications_visible: true,
         transient_status: None,
         message: String::new(),
     };
     app.rebuild_search_cache();
     app.sync_selection();
     app
+}
+
+fn set_playlist_cache(
+    app: &mut App,
+    playlist_id: i64,
+    media_item_ids: Vec<i64>,
+    playlist_track_ids: Vec<i64>,
+    track_indices: Vec<usize>,
+) {
+    assert_eq!(media_item_ids.len(), playlist_track_ids.len());
+    assert_eq!(media_item_ids.len(), track_indices.len());
+    app.playlist_cache.insert(
+        playlist_id,
+        media_item_ids
+            .into_iter()
+            .zip(playlist_track_ids)
+            .zip(track_indices)
+            .map(
+                |((media_item_id, playlist_track_id), track_index)| PlaylistCacheEntry {
+                    playlist_track_id,
+                    media_item_id,
+                    track_index: Some(track_index),
+                },
+            )
+            .collect(),
+    );
 }
 
 fn test_paths() -> AppPaths {

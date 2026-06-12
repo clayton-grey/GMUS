@@ -51,7 +51,7 @@ fn run_loop(
     loop {
         let now = Instant::now();
         if now >= next_integration_tick {
-            app.integration.tick();
+            app.integration.backend.tick();
             let handled_integration_command = app.handle_integration_commands(conn)?;
             needs_draw |= handled_integration_command;
             if handled_integration_command {

@@ -524,11 +524,7 @@ pub(super) fn playlist_entry_text(app: &App, entry: &PlaylistPanelEntry) -> Stri
             } else {
                 "  "
             };
-            let count = app
-                .playlist_track_ids
-                .get(playlist_id)
-                .map(Vec::len)
-                .unwrap_or(0);
+            let count = app.playlist_cache.len(*playlist_id);
             format!(" {marker} {active}{name} ({count})")
         }
         PlaylistPanelEntry::Track {

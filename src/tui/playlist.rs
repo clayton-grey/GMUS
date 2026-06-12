@@ -22,11 +22,87 @@ pub(super) enum PlaylistPanelEntry {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PlaylistCacheEntry {
+    pub(super) playlist_track_id: i64,
+    pub(super) media_item_id: i64,
+    pub(super) track_index: Option<usize>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct PlaylistCache {
+    entries: HashMap<i64, Vec<PlaylistCacheEntry>>,
+}
+
+impl PlaylistCache {
+    pub(super) fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    pub(super) fn insert(&mut self, playlist_id: i64, entries: Vec<PlaylistCacheEntry>) {
+        self.entries.insert(playlist_id, entries);
+    }
+
+    pub(super) fn len(&self, playlist_id: i64) -> usize {
+        self.entries.get(&playlist_id).map_or(0, Vec::len)
+    }
+
+    pub(super) fn playable_entries(
+        &self,
+        playlist_id: i64,
+    ) -> impl Iterator<Item = &PlaylistCacheEntry> {
+        self.entries
+            .get(&playlist_id)
+            .into_iter()
+            .flatten()
+            .filter(|entry| entry.track_index.is_some())
+    }
+
+    pub(super) fn track_indices(&self, playlist_id: i64) -> impl Iterator<Item = usize> + '_ {
+        self.playable_entries(playlist_id)
+            .filter_map(|entry| entry.track_index)
+    }
+
+    pub(super) fn contains_track(&self, playlist_id: i64, track_index: usize) -> bool {
+        self.track_indices(playlist_id)
+            .any(|index| index == track_index)
+    }
+
+    pub(super) fn contains_track_in_any_playlist(&self, track_index: usize) -> bool {
+        self.entries
+            .keys()
+            .copied()
+            .any(|playlist_id| self.contains_track(playlist_id, track_index))
+    }
+
+    pub(super) fn track_index_for_entry(
+        &self,
+        playlist_id: i64,
+        playlist_track_id: i64,
+    ) -> Option<usize> {
+        self.entries
+            .get(&playlist_id)?
+            .iter()
+            .find(|entry| entry.playlist_track_id == playlist_track_id)?
+            .track_index
+    }
+
+    pub(super) fn media_item_id_for_entry(
+        &self,
+        playlist_id: i64,
+        playlist_track_id: i64,
+    ) -> Option<i64> {
+        self.entries
+            .get(&playlist_id)?
+            .iter()
+            .find(|entry| entry.playlist_track_id == playlist_track_id)
+            .map(|entry| entry.media_item_id)
+    }
+}
+
 impl App {
     pub(super) fn refresh_playlist_tracks(&mut self, conn: &Connection) -> Result<()> {
-        self.playlist_track_ids.clear();
-        self.playlist_track_entry_ids.clear();
-        self.playlist_track_indices.clear();
+        self.playlist_cache.clear();
         let media_index: HashMap<i64, usize> = self
             .tracks
             .iter()
@@ -36,21 +112,15 @@ impl App {
 
         for playlist in &self.playlists {
             let entries = db::playlist_tracks(conn, playlist.id)?;
-            let ids = entries
+            let cached_entries = entries
                 .iter()
-                .map(|entry| entry.media_item_id)
+                .map(|entry| PlaylistCacheEntry {
+                    playlist_track_id: entry.id,
+                    media_item_id: entry.media_item_id,
+                    track_index: media_index.get(&entry.media_item_id).copied(),
+                })
                 .collect::<Vec<_>>();
-            let mut entry_ids = Vec::new();
-            let mut indices = Vec::new();
-            for entry in &entries {
-                if let Some(index) = media_index.get(&entry.media_item_id).copied() {
-                    entry_ids.push(entry.id);
-                    indices.push(index);
-                }
-            }
-            self.playlist_track_ids.insert(playlist.id, ids);
-            self.playlist_track_entry_ids.insert(playlist.id, entry_ids);
-            self.playlist_track_indices.insert(playlist.id, indices);
+            self.playlist_cache.insert(playlist.id, cached_entries);
         }
 
         if self
@@ -84,26 +154,19 @@ impl App {
                     name: playlist.name.clone(),
                 });
             if self.expanded_playlists.contains(&playlist.id) {
-                if let (Some(entry_ids), Some(indices)) = (
-                    self.playlist_track_entry_ids.get(&playlist.id),
-                    self.playlist_track_indices.get(&playlist.id),
-                ) {
-                    self.view.playlist_entries.extend(
-                        entry_ids
-                            .iter()
-                            .copied()
-                            .zip(indices.iter().copied())
-                            .enumerate()
-                            .map(|(position, (playlist_track_id, track_index))| {
-                                PlaylistPanelEntry::Track {
-                                    playlist_id: playlist.id,
-                                    playlist_track_id,
-                                    position: position + 1,
-                                    track_index,
-                                }
-                            }),
-                    );
-                }
+                self.view.playlist_entries.extend(
+                    self.playlist_cache
+                        .playable_entries(playlist.id)
+                        .enumerate()
+                        .map(|(position, entry)| PlaylistPanelEntry::Track {
+                            playlist_id: playlist.id,
+                            playlist_track_id: entry.playlist_track_id,
+                            position: position + 1,
+                            track_index: entry
+                                .track_index
+                                .expect("playable playlist entries have a track index"),
+                        }),
+                );
             }
         }
     }
@@ -481,9 +544,14 @@ impl App {
         else {
             return None;
         };
-        self.tracks
-            .get(*track_index)
-            .map(|track| (*playlist_id, *playlist_track_id, track.media_item_id))
+        self.playlist_cache
+            .media_item_id_for_entry(*playlist_id, *playlist_track_id)
+            .or_else(|| {
+                self.tracks
+                    .get(*track_index)
+                    .map(|track| track.media_item_id)
+            })
+            .map(|media_item_id| (*playlist_id, *playlist_track_id, media_item_id))
     }
 
     pub(super) fn playlist_name(&self, playlist_id: i64) -> String {

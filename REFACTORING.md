@@ -15,20 +15,61 @@ than the immediate reliability payoff justified.
 - Fixed filtered album summaries and playlist focus/selection edge cases.
 - Centralized TUI input-mode transitions and shared display-width formatting.
 
+## Completed In The Second Pass
+
+- Replaced the three parallel playlist maps with a typed playlist cache that
+  keeps entry IDs, media IDs, and optional current-library indices together.
+- Preserved unavailable playlist entries in counts while excluding them from
+  rendering and playback.
+- Grouped the media integration backend and synchronization bookkeeping into
+  one `IntegrationState`.
+- Kept `db` as the public facade while extracting persisted UI settings,
+  browser state, pane layout, and key bindings into `db::settings`.
+- Added migration coverage for legacy key-binding tables.
+
+## Completed In The Third Pass
+
+- Made `media_items.id` the durable identity and changed metadata fingerprints
+  into non-unique duplicate-candidate keys.
+- Made track upserts path-first, preserving identity and history across
+  same-path metadata changes while keeping matching present files distinct.
+- Added deterministic repair for legacy media items with multiple present
+  locations; location-linked events follow their location while ambiguous
+  playlists, aggregate-only playback history, and browser selection remain on
+  the original identity.
+- Enforced one present location per media item in SQLite and separated legacy
+  location splitting from historical-path reuse so a newly appearing file
+  cannot inherit the renamed track's events.
+- Moved artwork cache keys from metadata fingerprints to durable media IDs.
+- Added ordered, immediate, transactional schema migrations with a frozen
+  version-one compatibility bootstrap, foreign-key validation, and schema
+  version rejection for older binaries.
+- Added immutable version-one fixtures covering unversioned and sparse schemas,
+  legacy playlist/keymap shapes, concurrent file-backed upgrades,
+  deterministic identity splitting, idempotence, integrity, invalid versions,
+  and rollback after a late failure.
+- Tightened rename reconciliation to exactly one missing candidate with matching
+  file size and modification time, kept artwork ownership identity-local, and
+  refreshed saved browser hierarchy when merging.
+
 ## Next Structural Pass
 
-- Group the large TUI `App` state into browser, playlist, input, playback, and
-  integration state objects while preserving the existing coordinator API.
-- Replace the three parallel playlist maps with one typed playlist cache so
-  entry IDs, media IDs, and track indices cannot drift.
-- Keep `db` as a facade while splitting migrations, settings, playlists,
-  catalog, and history into focused implementation modules.
+- Continue grouping the large TUI `App` state into browser, playlist, input,
+  playback, and layout state objects while preserving the coordinator API.
+- Continue splitting `db` facade implementation into migrations, playlists,
+  catalog, and history modules.
 - Split the large TUI test module by concern after the state boundaries settle.
 
 ## Later Reliability And Performance Work
 
+- Replace conservative rename matching based on metadata, file size, and
+  modification time with stable filesystem identity evidence.
 - Define an explicit best-effort policy for nested filesystem read failures
   during scans, not only metadata and artwork failures.
+- Give background library jobs explicit owned shutdown semantics instead of
+  detaching worker threads.
+- Define explicit complete, partial, and unavailable scan outcomes, including
+  deleted single-file roots and unavailable volumes.
 - Skip metadata and artwork parsing for unchanged files during rescans.
 - Revisit playback listened-time accounting after long event-loop stalls.
 - Preserve non-UTF-8 filesystem paths without lossy string conversion.

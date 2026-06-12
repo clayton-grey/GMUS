@@ -128,7 +128,7 @@ fn scan_inner(
         Ok(track) => {
             let stored = db::upsert_track(conn, &track)?;
             report.tracks_stored += 1;
-            match art::cache_cover_for_track(&track, &paths.art_dir) {
+            match art::cache_cover_for_track(&track, &paths.art_dir, stored.media_item_id) {
                 Ok(Some(cover_path)) => {
                     db::set_cover_path(conn, stored.media_item_id, &cover_path)?;
                     report.art_cached += 1;

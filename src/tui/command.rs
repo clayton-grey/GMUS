@@ -675,12 +675,13 @@ impl App {
             "" | "status" => return Ok(self.notification_status_message()),
             "on" | "yes" | "true" | "show" | "visible" => true,
             "off" | "no" | "false" | "hide" | "hidden" => false,
-            "toggle" => !self.track_notifications_visible,
+            "toggle" => !self.integration.track_notifications_visible,
             _ => return Ok(String::from("usage: :notifications [on|off|toggle|status]")),
         };
 
-        self.track_notifications_visible = visible;
+        self.integration.track_notifications_visible = visible;
         self.integration
+            .backend
             .publish_event(&IntegrationEvent::TrackNotificationsVisible(visible))?;
         Ok(self.notification_status_message())
     }
@@ -689,7 +690,7 @@ impl App {
     fn notification_status_message(&self) -> String {
         format!(
             "track notifications {}",
-            if self.track_notifications_visible {
+            if self.integration.track_notifications_visible {
                 "visible"
             } else {
                 "hidden"

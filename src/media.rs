@@ -37,7 +37,7 @@ pub struct TrackMetadata {
 }
 
 impl TrackMetadata {
-    pub fn fingerprint(&self) -> String {
+    pub fn duplicate_key(&self) -> String {
         let mut basis = Vec::new();
         if self.title.is_some() || self.artist.is_some() || self.album.is_some() {
             basis.extend_from_slice(b"tags:v2");
@@ -256,19 +256,19 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_distinguishes_tag_field_delimiter_collisions() {
+    fn duplicate_key_distinguishes_tag_field_delimiter_collisions() {
         let first = tagged_track(Some("artist:album"), Some("title"), Some(120_000));
         let second = tagged_track(Some("artist"), Some("album:title"), Some(120_000));
 
-        assert_ne!(first.fingerprint(), second.fingerprint());
+        assert_ne!(first.duplicate_key(), second.duplicate_key());
     }
 
     #[test]
-    fn fingerprint_distinguishes_title_duration_boundary_collisions() {
+    fn duplicate_key_distinguishes_title_duration_boundary_collisions() {
         let first = tagged_track(Some("artist"), Some("title1"), Some(23));
         let second = tagged_track(Some("artist"), Some("title"), Some(123));
 
-        assert_ne!(first.fingerprint(), second.fingerprint());
+        assert_ne!(first.duplicate_key(), second.duplicate_key());
     }
 
     #[test]

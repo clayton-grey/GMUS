@@ -7,7 +7,19 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::media::TrackMetadata;
 
-const SCHEMA_VERSION: i64 = 1;
+mod migrations;
+mod settings;
+
+use migrations::migrate;
+#[cfg(test)]
+use migrations::{user_version, SCHEMA_VERSION};
+pub use settings::{
+    browser_selection, column_layout_width, delete_key_binding, delete_key_binding_key,
+    delete_key_bindings, key_bindings, pane_layout, restore_filter_enabled, restore_track_enabled,
+    save_browser_selection, save_column_layout_width, save_filter, save_key_binding,
+    save_pane_layout, save_restore_filter_enabled, save_restore_track_enabled, saved_filter,
+    SavedBrowserSelection, SavedKeyBinding, SavedPaneLayout,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct StoredTrack {
@@ -39,27 +51,6 @@ pub struct Playlist {
 pub struct PlaylistTrack {
     pub id: i64,
     pub media_item_id: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SavedBrowserSelection {
-    pub tree_kind: String,
-    pub artist: Option<String>,
-    pub album: Option<String>,
-    pub playlist_id: Option<i64>,
-    pub media_item_id: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SavedKeyBinding {
-    pub action: String,
-    pub key: String,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SavedPaneLayout {
-    pub library_percent_offset: i16,
-    pub info_height_offset: i16,
 }
 
 #[derive(Debug, Clone)]
@@ -126,182 +117,6 @@ pub(crate) fn open_in_memory_for_tests() -> Result<Connection> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     migrate(&conn)?;
     Ok(conn)
-}
-
-fn migrate(conn: &Connection) -> Result<()> {
-    let version = user_version(conn)?;
-    if version > SCHEMA_VERSION {
-        anyhow::bail!(
-            "database schema version {version} is newer than this GMUS build supports ({SCHEMA_VERSION})"
-        );
-    }
-
-    let tx = conn.unchecked_transaction()?;
-    migrate_v1(&tx)?;
-    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    tx.commit()?;
-    Ok(())
-}
-
-fn user_version(conn: &Connection) -> Result<i64> {
-    conn.pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(Into::into)
-}
-
-fn migrate_v1(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS media_items (
-            id              INTEGER PRIMARY KEY,
-            fingerprint     TEXT NOT NULL UNIQUE,
-            title           TEXT,
-            artist          TEXT,
-            album           TEXT,
-            album_artist    TEXT,
-            album_year      INTEGER,
-            release_date    TEXT,
-            composer        TEXT,
-            genre           TEXT,
-            cover_path      TEXT,
-            track_number    INTEGER,
-            track_total     INTEGER,
-            disc_number     INTEGER,
-            disc_total      INTEGER,
-            duration_ms     INTEGER,
-            compilation     INTEGER NOT NULL DEFAULT 0,
-            first_seen_at   INTEGER NOT NULL,
-            updated_at      INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS locations (
-            id              INTEGER PRIMARY KEY,
-            media_item_id   INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
-            path            TEXT NOT NULL UNIQUE,
-            file_size       INTEGER,
-            modified_at     INTEGER,
-            seen_at         INTEGER NOT NULL,
-            missing         INTEGER NOT NULL DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS play_events (
-            id              INTEGER PRIMARY KEY,
-            media_item_id   INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
-            location_id     INTEGER REFERENCES locations(id) ON DELETE SET NULL,
-            played_at       INTEGER NOT NULL,
-            duration_ms     INTEGER NOT NULL DEFAULT 0,
-            completed       INTEGER NOT NULL DEFAULT 0,
-            source          TEXT NOT NULL DEFAULT 'local'
-        );
-
-        CREATE TABLE IF NOT EXISTS media_stats (
-            media_item_id   INTEGER PRIMARY KEY REFERENCES media_items(id) ON DELETE CASCADE,
-            play_count      INTEGER NOT NULL DEFAULT 0,
-            last_played_at  INTEGER,
-            total_play_ms   INTEGER NOT NULL DEFAULT 0,
-            skip_count      INTEGER NOT NULL DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS library_roots (
-            id              INTEGER PRIMARY KEY,
-            path            TEXT NOT NULL UNIQUE,
-            active          INTEGER NOT NULL DEFAULT 1,
-            added_at        INTEGER NOT NULL,
-            updated_at      INTEGER NOT NULL,
-            last_scanned_at INTEGER
-        );
-
-        CREATE TABLE IF NOT EXISTS playlists (
-            id              INTEGER PRIMARY KEY,
-            name            TEXT NOT NULL UNIQUE COLLATE NOCASE,
-            created_at      INTEGER NOT NULL,
-            updated_at      INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS playlist_tracks (
-            id              INTEGER PRIMARY KEY,
-            playlist_id     INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
-            media_item_id   INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
-            position        INTEGER NOT NULL,
-            added_at        INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS app_browser_selection (
-            id              INTEGER PRIMARY KEY CHECK (id = 1),
-            tree_kind       TEXT NOT NULL,
-            artist          TEXT,
-            album           TEXT,
-            playlist_id     INTEGER,
-            media_item_id   INTEGER,
-            updated_at      INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS app_key_bindings (
-            action          TEXT NOT NULL,
-            key             TEXT NOT NULL,
-            updated_at      INTEGER NOT NULL,
-            PRIMARY KEY (action, key)
-        );
-
-        CREATE TABLE IF NOT EXISTS app_settings (
-            key             TEXT PRIMARY KEY,
-            value           TEXT NOT NULL,
-            updated_at      INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS app_filter_state (
-            id              INTEGER PRIMARY KEY CHECK (id = 1),
-            filter          TEXT NOT NULL,
-            updated_at      INTEGER NOT NULL
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_locations_media_item
-            ON locations(media_item_id);
-        CREATE INDEX IF NOT EXISTS idx_play_events_media_item
-            ON play_events(media_item_id, played_at);
-        CREATE INDEX IF NOT EXISTS idx_media_items_artist_album
-            ON media_items(album_artist, artist, album);
-        CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist_position
-            ON playlist_tracks(playlist_id, position);
-        "#,
-    )?;
-    ensure_column(conn, "media_items", "cover_path", "TEXT")?;
-    ensure_column(conn, "media_items", "album_year", "INTEGER")?;
-    ensure_column(conn, "media_items", "release_date", "TEXT")?;
-    ensure_column(conn, "media_items", "composer", "TEXT")?;
-    ensure_column(conn, "media_items", "genre", "TEXT")?;
-    ensure_column(conn, "media_items", "track_total", "INTEGER")?;
-    ensure_column(conn, "media_items", "disc_total", "INTEGER")?;
-    ensure_column(
-        conn,
-        "media_items",
-        "compilation",
-        "INTEGER NOT NULL DEFAULT 0",
-    )?;
-    ensure_playlist_tracks_allow_duplicates(conn)?;
-    ensure_key_bindings_allow_duplicates(conn)?;
-    conn.execute_batch(
-        r#"
-        CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist_position
-            ON playlist_tracks(playlist_id, position);
-        "#,
-    )?;
-    Ok(())
-}
-
-fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    for row in rows {
-        if row? == column {
-            return Ok(());
-        }
-    }
-
-    conn.execute(
-        &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
-        [],
-    )?;
-    Ok(())
 }
 
 pub fn upsert_library_root(conn: &Connection, path: &Path) -> Result<()> {
@@ -465,232 +280,6 @@ pub fn playlist_tracks(conn: &Connection, playlist_id: i64) -> Result<Vec<Playli
         tracks.push(row?);
     }
     Ok(tracks)
-}
-
-pub fn browser_selection(conn: &Connection) -> Result<Option<SavedBrowserSelection>> {
-    conn.query_row(
-        r#"
-        SELECT tree_kind, artist, album, playlist_id, media_item_id
-        FROM app_browser_selection
-        WHERE id = 1
-        "#,
-        [],
-        |row| {
-            Ok(SavedBrowserSelection {
-                tree_kind: row.get(0)?,
-                artist: row.get(1)?,
-                album: row.get(2)?,
-                playlist_id: row.get(3)?,
-                media_item_id: row.get(4)?,
-            })
-        },
-    )
-    .optional()
-    .map_err(Into::into)
-}
-
-pub fn save_browser_selection(conn: &Connection, selection: &SavedBrowserSelection) -> Result<()> {
-    let now = now_unix();
-    conn.execute(
-        r#"
-        INSERT INTO app_browser_selection (
-            id, tree_kind, artist, album, playlist_id, media_item_id, updated_at
-        ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
-        ON CONFLICT(id) DO UPDATE SET
-            tree_kind = excluded.tree_kind,
-            artist = excluded.artist,
-            album = excluded.album,
-            playlist_id = excluded.playlist_id,
-            media_item_id = excluded.media_item_id,
-            updated_at = excluded.updated_at
-        "#,
-        params![
-            selection.tree_kind.as_str(),
-            selection.artist.as_deref(),
-            selection.album.as_deref(),
-            selection.playlist_id,
-            selection.media_item_id,
-            now
-        ],
-    )?;
-    Ok(())
-}
-
-pub fn key_bindings(conn: &Connection) -> Result<Vec<SavedKeyBinding>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT action, key
-        FROM app_key_bindings
-        ORDER BY action, key
-        "#,
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(SavedKeyBinding {
-            action: row.get(0)?,
-            key: row.get(1)?,
-        })
-    })?;
-
-    let mut bindings = Vec::new();
-    for row in rows {
-        bindings.push(row?);
-    }
-    Ok(bindings)
-}
-
-pub fn save_key_binding(conn: &Connection, binding: &SavedKeyBinding) -> Result<()> {
-    let now = now_unix();
-    conn.execute(
-        r#"
-        INSERT INTO app_key_bindings (action, key, updated_at)
-        VALUES (?1, ?2, ?3)
-        ON CONFLICT(action, key) DO UPDATE SET
-            updated_at = excluded.updated_at
-        "#,
-        params![binding.action.as_str(), binding.key.as_str(), now],
-    )?;
-    Ok(())
-}
-
-pub fn delete_key_binding(conn: &Connection, action: &str) -> Result<()> {
-    conn.execute(
-        "DELETE FROM app_key_bindings WHERE action = ?1",
-        params![action],
-    )?;
-    Ok(())
-}
-
-pub fn delete_key_bindings(conn: &Connection) -> Result<()> {
-    conn.execute("DELETE FROM app_key_bindings", [])?;
-    Ok(())
-}
-
-pub fn delete_key_binding_key(conn: &Connection, action: &str, key: &str) -> Result<()> {
-    conn.execute(
-        "DELETE FROM app_key_bindings WHERE action = ?1 AND key = ?2",
-        params![action, key],
-    )?;
-    Ok(())
-}
-
-pub fn restore_filter_enabled(conn: &Connection) -> Result<bool> {
-    app_setting_bool(conn, "restore-filter", true)
-}
-
-pub fn save_restore_filter_enabled(conn: &Connection, enabled: bool) -> Result<()> {
-    save_app_setting_bool(conn, "restore-filter", enabled)
-}
-
-pub fn restore_track_enabled(conn: &Connection) -> Result<bool> {
-    app_setting_bool(conn, "restore-track", true)
-}
-
-pub fn save_restore_track_enabled(conn: &Connection, enabled: bool) -> Result<()> {
-    save_app_setting_bool(conn, "restore-track", enabled)
-}
-
-pub fn column_layout_width(conn: &Connection, default: u16) -> Result<u16> {
-    Ok(app_setting_value(conn, "column-layout-width")?
-        .and_then(|value| value.trim().parse().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default))
-}
-
-pub fn save_column_layout_width(conn: &Connection, width: u16) -> Result<()> {
-    save_app_setting(conn, "column-layout-width", &width.to_string())
-}
-
-pub fn pane_layout(conn: &Connection) -> Result<SavedPaneLayout> {
-    Ok(SavedPaneLayout {
-        library_percent_offset: app_setting_i16(conn, "library-pane-percent-offset", 0)?,
-        info_height_offset: app_setting_i16(conn, "info-pane-height-offset", 0)?,
-    })
-}
-
-pub fn save_pane_layout(conn: &Connection, layout: SavedPaneLayout) -> Result<()> {
-    save_app_setting_i16(
-        conn,
-        "library-pane-percent-offset",
-        layout.library_percent_offset,
-    )?;
-    save_app_setting_i16(conn, "info-pane-height-offset", layout.info_height_offset)?;
-    Ok(())
-}
-
-pub fn saved_filter(conn: &Connection) -> Result<Option<String>> {
-    conn.query_row(
-        "SELECT filter FROM app_filter_state WHERE id = 1",
-        [],
-        |row| row.get(0),
-    )
-    .optional()
-    .map_err(Into::into)
-}
-
-pub fn save_filter(conn: &Connection, filter: &str) -> Result<()> {
-    let now = now_unix();
-    conn.execute(
-        r#"
-        INSERT INTO app_filter_state (id, filter, updated_at)
-        VALUES (1, ?1, ?2)
-        ON CONFLICT(id) DO UPDATE SET
-            filter = excluded.filter,
-            updated_at = excluded.updated_at
-        "#,
-        params![filter, now],
-    )?;
-    Ok(())
-}
-
-fn app_setting_value(conn: &Connection, key: &str) -> Result<Option<String>> {
-    conn.query_row(
-        "SELECT value FROM app_settings WHERE key = ?1",
-        params![key],
-        |row| row.get(0),
-    )
-    .optional()
-    .map_err(Into::into)
-}
-
-fn app_setting_bool(conn: &Connection, key: &str, default: bool) -> Result<bool> {
-    let value = app_setting_value(conn, key)?;
-    let Some(value) = value else {
-        return Ok(default);
-    };
-    Ok(matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    ))
-}
-
-fn app_setting_i16(conn: &Connection, key: &str, default: i16) -> Result<i16> {
-    Ok(app_setting_value(conn, key)?
-        .and_then(|value| value.trim().parse().ok())
-        .unwrap_or(default))
-}
-
-fn save_app_setting_bool(conn: &Connection, key: &str, enabled: bool) -> Result<()> {
-    let value = if enabled { "1" } else { "0" };
-    save_app_setting(conn, key, value)
-}
-
-fn save_app_setting_i16(conn: &Connection, key: &str, value: i16) -> Result<()> {
-    save_app_setting(conn, key, &value.to_string())
-}
-
-fn save_app_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
-    let now = now_unix();
-    conn.execute(
-        r#"
-        INSERT INTO app_settings (key, value, updated_at)
-        VALUES (?1, ?2, ?3)
-        ON CONFLICT(key) DO UPDATE SET
-            value = excluded.value,
-            updated_at = excluded.updated_at
-        "#,
-        params![key, value, now],
-    )?;
-    Ok(())
 }
 
 pub fn add_tracks_to_playlist(
@@ -872,46 +461,6 @@ fn ensure_playlist_tracks_allow_duplicates(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn ensure_key_bindings_allow_duplicates(conn: &Connection) -> Result<()> {
-    let mut stmt = conn.prepare("PRAGMA table_info(app_key_bindings)")?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
-    })?;
-    let mut action_pk = 0;
-    let mut key_pk = 0;
-    for row in rows {
-        let (column, pk) = row?;
-        match column.as_str() {
-            "action" => action_pk = pk,
-            "key" => key_pk = pk,
-            _ => {}
-        }
-    }
-    if action_pk == 1 && key_pk == 2 {
-        return Ok(());
-    }
-
-    conn.execute_batch(
-        r#"
-        ALTER TABLE app_key_bindings RENAME TO app_key_bindings_old;
-
-        CREATE TABLE app_key_bindings (
-            action          TEXT NOT NULL,
-            key             TEXT NOT NULL,
-            updated_at      INTEGER NOT NULL,
-            PRIMARY KEY (action, key)
-        );
-
-        INSERT OR IGNORE INTO app_key_bindings (action, key, updated_at)
-        SELECT action, key, updated_at
-        FROM app_key_bindings_old;
-
-        DROP TABLE app_key_bindings_old;
-        "#,
-    )?;
-    Ok(())
-}
-
 fn touch_playlist(conn: &Connection, playlist_id: i64) -> Result<()> {
     conn.execute(
         "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
@@ -952,62 +501,17 @@ fn playlist_track_entry_ids(conn: &Connection, playlist_id: i64) -> Result<Vec<i
 pub fn upsert_track(conn: &Connection, track: &TrackMetadata) -> Result<StoredTrack> {
     let tx = conn.unchecked_transaction()?;
     let now = now_unix();
-    let fingerprint = track.fingerprint();
-
-    tx.execute(
-        r#"
-        INSERT INTO media_items (
-            fingerprint, title, artist, album, album_artist, album_year, release_date,
-            composer, genre, track_number, track_total, disc_number, disc_total,
-            duration_ms, compilation, first_seen_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16)
-        ON CONFLICT(fingerprint) DO UPDATE SET
-            title = excluded.title,
-            artist = excluded.artist,
-            album = excluded.album,
-            album_artist = excluded.album_artist,
-            album_year = excluded.album_year,
-            release_date = excluded.release_date,
-            composer = excluded.composer,
-            genre = excluded.genre,
-            track_number = excluded.track_number,
-            track_total = excluded.track_total,
-            disc_number = excluded.disc_number,
-            disc_total = excluded.disc_total,
-            duration_ms = excluded.duration_ms,
-            compilation = excluded.compilation,
-            updated_at = excluded.updated_at
-        "#,
-        params![
-            fingerprint,
-            track.title,
-            track.artist,
-            track.album,
-            track.album_artist,
-            track.album_year,
-            track.release_date,
-            track.composer,
-            track.genre,
-            track.track_number,
-            track.track_total,
-            track.disc_number,
-            track.disc_total,
-            track.duration_ms,
-            i64::from(track.compilation),
-            now
-        ],
-    )?;
-
-    let media_item_id: i64 = tx.query_row(
-        "SELECT id FROM media_items WHERE fingerprint = ?1",
-        params![fingerprint],
-        |row| row.get(0),
-    )?;
-
     let path = track.path.to_string_lossy();
-    if let Some(existing_media_item_id) = media_item_id_for_path(&tx, &path)? {
-        merge_media_item(&tx, media_item_id, existing_media_item_id)?;
-    }
+    let media_item_id = match location_identity_for_path(&tx, &path)? {
+        Some((location_id, media_item_id))
+            if media_item_has_other_present_location(&tx, media_item_id, location_id)? =>
+        {
+            detach_location(&tx, location_id, media_item_id)?
+        }
+        Some((_location_id, media_item_id)) => media_item_id,
+        None => insert_media_item(&tx, track, now)?,
+    };
+    update_media_item(&tx, media_item_id, track, now)?;
 
     tx.execute(
         r#"
@@ -1046,14 +550,202 @@ pub fn upsert_track(conn: &Connection, track: &TrackMetadata) -> Result<StoredTr
     })
 }
 
-fn media_item_id_for_path(conn: &Connection, path: &str) -> Result<Option<i64>> {
+fn insert_media_item(conn: &Connection, track: &TrackMetadata, now: i64) -> Result<i64> {
+    conn.execute(
+        r#"
+        INSERT INTO media_items (
+            duplicate_key, title, artist, album, album_artist, album_year, release_date,
+            composer, genre, track_number, track_total, disc_number, disc_total,
+            duration_ms, compilation, first_seen_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16)
+        "#,
+        params![
+            track.duplicate_key(),
+            track.title,
+            track.artist,
+            track.album,
+            track.album_artist,
+            track.album_year,
+            track.release_date,
+            track.composer,
+            track.genre,
+            track.track_number,
+            track.track_total,
+            track.disc_number,
+            track.disc_total,
+            track.duration_ms,
+            i64::from(track.compilation),
+            now
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn update_media_item(
+    conn: &Connection,
+    media_item_id: i64,
+    track: &TrackMetadata,
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        r#"
+        UPDATE media_items
+        SET duplicate_key = ?1,
+            title = ?2,
+            artist = ?3,
+            album = ?4,
+            album_artist = ?5,
+            album_year = ?6,
+            release_date = ?7,
+            composer = ?8,
+            genre = ?9,
+            track_number = ?10,
+            track_total = ?11,
+            disc_number = ?12,
+            disc_total = ?13,
+            duration_ms = ?14,
+            compilation = ?15,
+            updated_at = ?16
+        WHERE id = ?17
+        "#,
+        params![
+            track.duplicate_key(),
+            track.title,
+            track.artist,
+            track.album,
+            track.album_artist,
+            track.album_year,
+            track.release_date,
+            track.composer,
+            track.genre,
+            track.track_number,
+            track.track_total,
+            track.disc_number,
+            track.disc_total,
+            track.duration_ms,
+            i64::from(track.compilation),
+            now,
+            media_item_id
+        ],
+    )?;
+    Ok(())
+}
+
+fn location_identity_for_path(conn: &Connection, path: &str) -> Result<Option<(i64, i64)>> {
     conn.query_row(
-        "SELECT media_item_id FROM locations WHERE path = ?1",
+        "SELECT id, media_item_id FROM locations WHERE path = ?1",
         params![path],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .optional()
     .map_err(Into::into)
+}
+
+fn media_item_has_other_present_location(
+    conn: &Connection,
+    media_item_id: i64,
+    location_id: i64,
+) -> Result<bool> {
+    conn.query_row(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM locations
+            WHERE media_item_id = ?1 AND id != ?2 AND missing = 0
+        )
+        "#,
+        params![media_item_id, location_id],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+pub(super) fn detach_location(
+    conn: &Connection,
+    location_id: i64,
+    media_item_id: i64,
+) -> Result<i64> {
+    detach_location_with_event_policy(conn, location_id, media_item_id, false)
+}
+
+pub(super) fn split_legacy_location(
+    conn: &Connection,
+    location_id: i64,
+    media_item_id: i64,
+) -> Result<i64> {
+    detach_location_with_event_policy(conn, location_id, media_item_id, true)
+}
+
+fn detach_location_with_event_policy(
+    conn: &Connection,
+    location_id: i64,
+    media_item_id: i64,
+    events_follow_location: bool,
+) -> Result<i64> {
+    let stats_residual = media_stats_row(conn, media_item_id)?
+        .unwrap_or_default()
+        .residual_after(&play_event_stats_row(conn, media_item_id)?);
+    conn.execute(
+        r#"
+        INSERT INTO media_items (
+            duplicate_key, title, artist, album, album_artist, album_year, release_date,
+            composer, genre, cover_path, track_number, track_total, disc_number, disc_total,
+            duration_ms, compilation, first_seen_at, updated_at
+        )
+        SELECT
+            duplicate_key, title, artist, album, album_artist, album_year, release_date,
+            composer, genre, NULL, track_number, track_total, disc_number, disc_total,
+            duration_ms, compilation, first_seen_at, updated_at
+        FROM media_items
+        WHERE id = ?1
+        "#,
+        params![media_item_id],
+    )?;
+    let detached_media_item_id = conn.last_insert_rowid();
+    if events_follow_location {
+        conn.execute(
+            "UPDATE play_events SET media_item_id = ?1 WHERE location_id = ?2",
+            params![detached_media_item_id, location_id],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE play_events SET location_id = NULL WHERE location_id = ?1 AND media_item_id = ?2",
+            params![location_id, media_item_id],
+        )?;
+    }
+    conn.execute(
+        "UPDATE locations SET media_item_id = ?1 WHERE id = ?2",
+        params![detached_media_item_id, location_id],
+    )?;
+    rebuild_media_stats(conn, media_item_id)?;
+    rebuild_media_stats(conn, detached_media_item_id)?;
+    add_media_stats(conn, media_item_id, &stats_residual)?;
+    Ok(detached_media_item_id)
+}
+
+fn rebuild_media_stats(conn: &Connection, media_item_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM media_stats WHERE media_item_id = ?1",
+        params![media_item_id],
+    )?;
+    conn.execute(
+        r#"
+        INSERT INTO media_stats (
+            media_item_id, play_count, last_played_at, total_play_ms, skip_count
+        )
+        SELECT
+            media_item_id,
+            SUM(completed),
+            MAX(CASE WHEN completed = 1 THEN played_at END),
+            SUM(duration_ms),
+            SUM(CASE WHEN completed = 0 THEN 1 ELSE 0 END)
+        FROM play_events
+        WHERE media_item_id = ?1
+        GROUP BY media_item_id
+        "#,
+        params![media_item_id],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1137,6 +829,20 @@ pub fn merge_similar_media_items(conn: &Connection) -> Result<usize> {
                     FROM locations
                     WHERE locations.media_item_id = media_items.id
                         AND locations.missing = 0
+                ),
+                (
+                    SELECT file_size
+                    FROM locations
+                    WHERE locations.media_item_id = media_items.id
+                    ORDER BY locations.missing ASC, locations.seen_at DESC, locations.id DESC
+                    LIMIT 1
+                ),
+                (
+                    SELECT modified_at
+                    FROM locations
+                    WHERE locations.media_item_id = media_items.id
+                    ORDER BY locations.missing ASC, locations.seen_at DESC, locations.id DESC
+                    LIMIT 1
                 )
             FROM media_items
             ORDER BY id
@@ -1156,6 +862,8 @@ pub fn merge_similar_media_items(conn: &Connection) -> Result<usize> {
                 duration_ms: row.get(7)?,
                 library_root: row.get(8)?,
                 present_locations: row.get(9)?,
+                file_size: row.get(10)?,
+                modified_at: row.get(11)?,
             })
         })?;
 
@@ -1170,25 +878,30 @@ pub fn merge_similar_media_items(conn: &Connection) -> Result<usize> {
     let mut merged = 0;
     for candidates in groups
         .into_values()
-        .filter(|candidates| candidates.len() > 1)
+        .filter(|candidates| candidates.len() == 2)
     {
         let mut present = candidates
             .iter()
             .filter(|candidate| candidate.present_locations > 0);
-        let Some(canonical_id) = present.next().map(|candidate| candidate.id) else {
+        let Some(canonical) = present.next() else {
             continue;
         };
         if present.next().is_some() {
             continue;
         }
-
-        for duplicate in candidates
-            .into_iter()
-            .filter(|candidate| candidate.present_locations == 0)
+        let Some(duplicate) = candidates
+            .iter()
+            .find(|candidate| candidate.present_locations == 0)
+        else {
+            continue;
+        };
+        if canonical.file_signature().is_none()
+            || canonical.file_signature() != duplicate.file_signature()
         {
-            merge_media_item(&tx, canonical_id, duplicate.id)?;
-            merged += 1;
+            continue;
         }
+        merge_media_item(&tx, canonical.id, duplicate.id)?;
+        merged += 1;
     }
     tx.commit()?;
     Ok(merged)
@@ -1206,6 +919,8 @@ struct MergeCandidate {
     duration_ms: Option<i64>,
     library_root: String,
     present_locations: i64,
+    file_size: Option<i64>,
+    modified_at: Option<i64>,
 }
 
 impl MergeCandidate {
@@ -1222,6 +937,10 @@ impl MergeCandidate {
             self.library_root
         ))
     }
+
+    fn file_signature(&self) -> Option<(i64, i64)> {
+        Some((self.file_size?, self.modified_at?))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1232,11 +951,52 @@ struct MediaStatsRow {
     skip_count: i64,
 }
 
+impl MediaStatsRow {
+    fn residual_after(&self, event_stats: &Self) -> Self {
+        Self {
+            play_count: self
+                .play_count
+                .saturating_sub(event_stats.play_count)
+                .max(0),
+            last_played_at: match (self.last_played_at, event_stats.last_played_at) {
+                (Some(stats), Some(events)) if stats > events => Some(stats),
+                (Some(stats), None) => Some(stats),
+                _ => None,
+            },
+            total_play_ms: self
+                .total_play_ms
+                .saturating_sub(event_stats.total_play_ms)
+                .max(0),
+            skip_count: self
+                .skip_count
+                .saturating_sub(event_stats.skip_count)
+                .max(0),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.play_count == 0
+            && self.last_played_at.is_none()
+            && self.total_play_ms == 0
+            && self.skip_count == 0
+    }
+}
+
 fn merge_media_item(conn: &Connection, canonical_id: i64, duplicate_id: i64) -> Result<()> {
     if canonical_id == duplicate_id {
         return Ok(());
     }
 
+    conn.execute(
+        r#"
+        UPDATE media_items
+        SET first_seen_at = MIN(first_seen_at, (
+                SELECT first_seen_at FROM media_items WHERE id = ?2
+            ))
+        WHERE id = ?1
+        "#,
+        params![canonical_id, duplicate_id],
+    )?;
     conn.execute(
         r#"
         INSERT INTO media_stats (media_item_id)
@@ -1288,6 +1048,24 @@ fn merge_media_item(conn: &Connection, canonical_id: i64, duplicate_id: i64) -> 
         params![canonical_id, duplicate_id],
     )?;
     conn.execute(
+        r#"
+        UPDATE app_browser_selection
+        SET media_item_id = ?1,
+            artist = (
+                SELECT COALESCE(album_artist, artist)
+                FROM media_items
+                WHERE id = ?1
+            ),
+            album = (
+                SELECT album
+                FROM media_items
+                WHERE id = ?1
+            )
+        WHERE media_item_id = ?2
+        "#,
+        params![canonical_id, duplicate_id],
+    )?;
+    conn.execute(
         "DELETE FROM media_stats WHERE media_item_id = ?1",
         params![duplicate_id],
     )?;
@@ -1317,6 +1095,60 @@ fn media_stats_row(conn: &Connection, media_item_id: i64) -> Result<Option<Media
     )
     .optional()
     .map_err(Into::into)
+}
+
+fn play_event_stats_row(conn: &Connection, media_item_id: i64) -> Result<MediaStatsRow> {
+    conn.query_row(
+        r#"
+        SELECT
+            COALESCE(SUM(completed), 0),
+            MAX(CASE WHEN completed = 1 THEN played_at END),
+            COALESCE(SUM(duration_ms), 0),
+            COALESCE(SUM(CASE WHEN completed = 0 THEN 1 ELSE 0 END), 0)
+        FROM play_events
+        WHERE media_item_id = ?1
+        "#,
+        params![media_item_id],
+        |row| {
+            Ok(MediaStatsRow {
+                play_count: row.get(0)?,
+                last_played_at: row.get(1)?,
+                total_play_ms: row.get(2)?,
+                skip_count: row.get(3)?,
+            })
+        },
+    )
+    .map_err(Into::into)
+}
+
+fn add_media_stats(conn: &Connection, media_item_id: i64, stats: &MediaStatsRow) -> Result<()> {
+    if stats.is_empty() {
+        return Ok(());
+    }
+    conn.execute(
+        r#"
+        INSERT INTO media_stats (
+            media_item_id, play_count, last_played_at, total_play_ms, skip_count
+        ) VALUES (?1, ?2, ?3, ?4, ?5)
+        ON CONFLICT(media_item_id) DO UPDATE SET
+            play_count = media_stats.play_count + excluded.play_count,
+            last_played_at = CASE
+                WHEN media_stats.last_played_at IS NULL THEN excluded.last_played_at
+                WHEN excluded.last_played_at IS NULL THEN media_stats.last_played_at
+                ELSE MAX(media_stats.last_played_at, excluded.last_played_at)
+            END,
+            total_play_ms = media_stats.total_play_ms + excluded.total_play_ms,
+            skip_count = media_stats.skip_count + excluded.skip_count
+        "#,
+        params![
+            media_item_id,
+            stats.play_count,
+            stats.last_played_at,
+            stats.total_play_ms,
+            stats.skip_count
+        ],
+    )?;
+    Ok(())
 }
 
 fn normalize_identity_part(value: Option<&str>) -> Option<String> {
@@ -1551,7 +1383,7 @@ fn path_matches_root_sql(path: &str, root: &str) -> String {
     )
 }
 
-fn now_unix() -> i64 {
+pub(super) fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
@@ -1562,10 +1394,13 @@ fn now_unix() -> i64 {
 mod tests {
     use super::*;
     use crate::media::TrackMetadata;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use tempfile::tempdir;
 
     #[test]
     fn migrate_sets_schema_user_version() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn = migration_test_connection();
 
         migrate(&conn).unwrap();
 
@@ -1574,13 +1409,314 @@ mod tests {
 
     #[test]
     fn migrate_rejects_newer_schema_version() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn = migration_test_connection();
         conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
             .unwrap();
 
         let error = migrate(&conn).unwrap_err();
 
         assert!(error.to_string().contains("newer than this GMUS build"));
+    }
+
+    #[test]
+    fn migrate_rejects_negative_schema_version_without_mutation() {
+        let conn = migration_test_connection();
+        conn.pragma_update(None, "user_version", -1).unwrap();
+
+        let error = migrate(&conn).unwrap_err();
+
+        assert!(error.to_string().contains("schema version -1 is invalid"));
+        assert_eq!(user_version(&conn).unwrap(), -1);
+        assert_eq!(count(&conn, "sqlite_schema").unwrap(), 0);
+        assert!(foreign_keys_enabled(&conn));
+    }
+
+    #[test]
+    fn migration_is_idempotent_after_reaching_latest_version() {
+        let conn = migration_test_connection();
+        migrate(&conn).unwrap();
+        let schema_before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_schema", [], |row| row.get(0))
+            .unwrap();
+
+        migrate(&conn).unwrap();
+
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM sqlite_schema", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            schema_before
+        );
+        assert!(foreign_keys_enabled(&conn));
+    }
+
+    #[test]
+    fn migration_rolls_back_schema_and_version_after_late_failure() {
+        let conn = migration_test_connection();
+        load_original_v1_schema(&conn);
+        conn.execute_batch(
+            r#"
+            INSERT INTO media_items (
+                id, fingerprint, title, first_seen_at, updated_at
+            ) VALUES (1, 'legacy', 'Legacy', 1, 1);
+            CREATE INDEX idx_media_items_duplicate_key ON locations(path);
+            "#,
+        )
+        .unwrap();
+
+        let error = migrate(&conn).unwrap_err();
+
+        assert!(error.to_string().contains("already exists"));
+        assert_eq!(user_version(&conn).unwrap(), 1);
+        assert!(table_has_column(&conn, "media_items", "fingerprint"));
+        assert!(!table_has_column(&conn, "media_items", "duplicate_key"));
+        assert_eq!(count(&conn, "media_items").unwrap(), 1);
+        assert!(foreign_keys_enabled(&conn));
+    }
+
+    #[test]
+    fn migration_splits_legacy_multiple_present_locations_deterministically() {
+        let conn = migration_test_connection();
+        load_original_v1_schema(&conn);
+        conn.execute_batch(
+            r#"
+            INSERT INTO media_items (
+                id, fingerprint, title, artist, album, cover_path, track_number, duration_ms,
+                first_seen_at, updated_at
+            ) VALUES (1, 'same', 'Same Track', 'Artist', 'Album', '/tmp/1.jpg', 1, 120000, 1, 1);
+            INSERT INTO locations (
+                id, media_item_id, path, file_size, modified_at, seen_at, missing
+            ) VALUES
+                (1, 1, '/tmp/music/one.flac', 10, 1, 1, 0),
+                (2, 1, '/tmp/music/two.flac', 10, 1, 1, 0),
+                (3, 1, '/tmp/music/old.flac', 10, 1, 1, 1);
+            INSERT INTO play_events (
+                id, media_item_id, location_id, played_at, duration_ms, completed
+            ) VALUES
+                (1, 1, 1, 10, 100, 1),
+                (2, 1, 2, 20, 50, 0),
+                (3, 1, NULL, 30, 25, 1);
+            INSERT INTO media_stats (
+                media_item_id, play_count, last_played_at, total_play_ms, skip_count
+            ) VALUES (1, 7, 99, 700, 3);
+            INSERT INTO playlists (id, name, created_at, updated_at)
+            VALUES (1, 'Mix', 1, 1);
+            INSERT INTO playlist_tracks (id, playlist_id, media_item_id, position, added_at)
+            VALUES (1, 1, 1, 0, 1);
+            INSERT INTO app_browser_selection (
+                id, tree_kind, media_item_id, updated_at
+            ) VALUES (1, 'track', 1, 1);
+            "#,
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let second_media_item_id: i64 = conn
+            .query_row(
+                "SELECT media_item_id FROM locations WHERE id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(second_media_item_id, 1);
+        assert_eq!(
+            conn.query_row(
+                "SELECT cover_path FROM media_items WHERE id = ?1",
+                params![second_media_item_id],
+                |row| row.get::<_, Option<String>>(0)
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT media_item_id FROM locations WHERE id = 1",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT media_item_id FROM locations WHERE id = 3",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT media_item_id FROM play_events WHERE location_id = 2",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            second_media_item_id
+        );
+        assert_eq!(media_stats_row(&conn, 1).unwrap().unwrap().play_count, 7);
+        assert_eq!(
+            media_stats_row(&conn, second_media_item_id)
+                .unwrap()
+                .unwrap()
+                .skip_count,
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT SUM(play_count), MAX(last_played_at), SUM(total_play_ms), SUM(skip_count) FROM media_stats",
+                [],
+                |row| Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            )
+            .unwrap(),
+            (7, 99, 700, 3)
+        );
+        assert_eq!(playlist_track_ids(&conn, 1).unwrap(), vec![1]);
+        assert_eq!(
+            browser_selection(&conn).unwrap().unwrap().media_item_id,
+            Some(1)
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM media_items WHERE duplicate_key = 'same'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+        assert!(foreign_key_violation(&conn).is_none());
+        assert!(foreign_keys_enabled(&conn));
+        assert_eq!(integrity_check(&conn), "ok");
+        assert!(conn
+            .execute(
+                "INSERT INTO locations (media_item_id, path, seen_at, missing) VALUES (1, '/tmp/music/third.flac', 1, 0)",
+                [],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn migration_repairs_sparse_version_one_schema_before_exact_upgrade() {
+        let conn = migration_test_connection();
+        load_original_v1_schema(&conn);
+        conn.execute_batch(
+            r#"
+            DROP TABLE app_browser_selection;
+            DROP TABLE app_key_bindings;
+            DROP TABLE app_settings;
+            DROP TABLE app_filter_state;
+            "#,
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        assert!(table_has_column(
+            &conn,
+            "app_browser_selection",
+            "media_item_id"
+        ));
+        assert!(table_has_column(&conn, "app_key_bindings", "key"));
+        assert!(table_has_column(&conn, "app_settings", "value"));
+        assert!(table_has_column(&conn, "app_filter_state", "filter"));
+        assert!(foreign_key_violation(&conn).is_none());
+    }
+
+    #[test]
+    fn file_backed_version_one_fixture_reopens_at_latest_version() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("gmus.sqlite3");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+            load_original_v1_schema(&conn);
+            conn.execute_batch(
+                r#"
+                INSERT INTO media_items (
+                    id, fingerprint, title, first_seen_at, updated_at
+                ) VALUES (1, 'legacy', 'Legacy', 1, 1);
+                INSERT INTO locations (
+                    id, media_item_id, path, seen_at, missing
+                ) VALUES (1, 1, '/tmp/legacy.flac', 1, 0);
+                "#,
+            )
+            .unwrap();
+        }
+
+        let conn = open(&path).unwrap();
+
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(library_tracks(&conn).unwrap().len(), 1);
+        assert!(table_has_column(&conn, "media_items", "duplicate_key"));
+        assert!(foreign_keys_enabled(&conn));
+        assert_eq!(integrity_check(&conn), "ok");
+    }
+
+    #[test]
+    fn unversioned_historical_schema_upgrades_to_latest_version() {
+        let conn = migration_test_connection();
+        load_original_v1_schema(&conn);
+        conn.pragma_update(None, "user_version", 0).unwrap();
+        conn.execute_batch(
+            r#"
+            INSERT INTO media_items (
+                id, fingerprint, title, first_seen_at, updated_at
+            ) VALUES (1, 'legacy', 'Legacy', 1, 1);
+            INSERT INTO locations (
+                id, media_item_id, path, seen_at, missing
+            ) VALUES (1, 1, '/tmp/legacy.flac', 1, 0);
+            "#,
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(library_tracks(&conn).unwrap().len(), 1);
+        assert!(foreign_key_violation(&conn).is_none());
+    }
+
+    #[test]
+    fn concurrent_file_backed_migrations_serialize() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("gmus.sqlite3");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+            load_original_v1_schema(&conn);
+        }
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    let conn = open(&path).unwrap();
+                    assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+                    assert_eq!(integrity_check(&conn), "ok");
+                })
+            })
+            .collect::<Vec<_>>();
+
+        barrier.wait();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let conn = open(&path).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert!(foreign_key_violation(&conn).is_none());
     }
 
     #[test]
@@ -1625,6 +1761,49 @@ mod tests {
 
         delete_key_binding(&conn, &second.action).unwrap();
         assert!(key_bindings(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn migrate_key_bindings_preserves_existing_rows_and_allows_multiple_keys() {
+        let conn = migration_test_connection();
+        load_original_v1_schema(&conn);
+        conn.execute_batch(
+            r#"
+            DROP TABLE app_key_bindings;
+            CREATE TABLE app_key_bindings (
+                action          TEXT PRIMARY KEY,
+                key             TEXT NOT NULL,
+                updated_at      INTEGER NOT NULL
+            );
+            INSERT INTO app_key_bindings (action, key, updated_at)
+            VALUES ('toggle-info', 'none:char:i', 1);
+            "#,
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+        save_key_binding(
+            &conn,
+            &SavedKeyBinding {
+                action: "toggle-info".to_string(),
+                key: "none:char:o".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            key_bindings(&conn).unwrap(),
+            vec![
+                SavedKeyBinding {
+                    action: "toggle-info".to_string(),
+                    key: "none:char:i".to_string(),
+                },
+                SavedKeyBinding {
+                    action: "toggle-info".to_string(),
+                    key: "none:char:o".to_string(),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1987,16 +2166,20 @@ mod tests {
 
     #[test]
     fn migrate_playlist_tracks_preserves_existing_rows_and_allows_duplicates() {
-        let conn = Connection::open_in_memory().unwrap();
-        migrate(&conn).unwrap();
-        let first = upsert_track(
-            &conn,
-            &test_track_metadata("/tmp/music/one.flac", "One", 1, 120_000),
-        )
-        .unwrap();
-        let playlist = create_playlist(&conn, "Mix").unwrap();
+        let conn = migration_test_connection();
+        load_original_v1_schema(&conn);
         conn.execute_batch(
             r#"
+            INSERT INTO media_items (
+                id, fingerprint, title, artist, album, track_number, duration_ms,
+                first_seen_at, updated_at
+            ) VALUES (1, 'one', 'One', 'Artist', 'Album', 1, 120000, 1, 1);
+            INSERT INTO locations (
+                id, media_item_id, path, file_size, modified_at, seen_at, missing
+            ) VALUES (1, 1, '/tmp/music/one.flac', 10, 1, 1, 0);
+            INSERT INTO playlists (id, name, created_at, updated_at)
+            VALUES (1, 'Mix', 1, 1);
+
             DROP INDEX IF EXISTS idx_playlist_tracks_playlist_position;
             DROP TABLE playlist_tracks;
             CREATE TABLE playlist_tracks (
@@ -2011,18 +2194,15 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO playlist_tracks (playlist_id, media_item_id, position, added_at) VALUES (?1, ?2, 0, 1)",
-            params![playlist.id, first.media_item_id],
+            params![1, 1],
         )
         .unwrap();
 
         migrate(&conn).unwrap();
-        let added = add_tracks_to_playlist(&conn, playlist.id, &[first.media_item_id]).unwrap();
+        let added = add_tracks_to_playlist(&conn, 1, &[1]).unwrap();
 
         assert_eq!(added, 1);
-        assert_eq!(
-            playlist_track_ids(&conn, playlist.id).unwrap(),
-            vec![first.media_item_id, first.media_item_id]
-        );
+        assert_eq!(playlist_track_ids(&conn, 1).unwrap(), vec![1, 1]);
     }
 
     #[test]
@@ -2064,9 +2244,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         let old = test_track_metadata("/tmp/music/wrong-name.flac", "Same Track", 1, 120_000);
-        let mut renamed =
-            test_track_metadata("/tmp/music/right-name.flac", "Same Track", 1, 121_000);
-        renamed.modified_at = Some(2);
+        let renamed = test_track_metadata("/tmp/music/right-name.flac", "Same Track", 1, 121_000);
 
         let old_stored = upsert_track(&conn, &old).unwrap();
         record_play(
@@ -2097,11 +2275,28 @@ mod tests {
         let old = test_track_metadata("/tmp/music/wrong-name.flac", "Same Track", 1, 120_000);
         let mut renamed =
             test_track_metadata("/tmp/music/right-name.flac", "Same Track", 1, 121_000);
-        renamed.modified_at = Some(2);
+        renamed.artist = Some("artist".to_string());
 
         let old_stored = upsert_track(&conn, &old).unwrap();
         let playlist = create_playlist(&conn, "Mix").unwrap();
         add_tracks_to_playlist(&conn, playlist.id, &[old_stored.media_item_id]).unwrap();
+        set_cover_path(
+            &conn,
+            old_stored.media_item_id,
+            Path::new("/tmp/old-id-cover.jpg"),
+        )
+        .unwrap();
+        save_browser_selection(
+            &conn,
+            &SavedBrowserSelection {
+                tree_kind: "track".to_string(),
+                artist: Some("Artist".to_string()),
+                album: Some("Album".to_string()),
+                playlist_id: None,
+                media_item_id: Some(old_stored.media_item_id),
+            },
+        )
+        .unwrap();
         mark_locations_missing_under_root(&conn, Path::new("/tmp/music")).unwrap();
         let renamed_stored = upsert_track(&conn, &renamed).unwrap();
 
@@ -2111,6 +2306,19 @@ mod tests {
         assert_eq!(
             playlist_track_ids(&conn, playlist.id).unwrap(),
             vec![renamed_stored.media_item_id]
+        );
+        let selection = browser_selection(&conn).unwrap().unwrap();
+        assert_eq!(selection.media_item_id, Some(renamed_stored.media_item_id));
+        assert_eq!(selection.artist.as_deref(), Some("artist"));
+        assert_eq!(selection.album.as_deref(), Some("Album"));
+        assert_eq!(
+            conn.query_row(
+                "SELECT cover_path FROM media_items WHERE id = ?1",
+                params![renamed_stored.media_item_id],
+                |row| row.get::<_, Option<String>>(0)
+            )
+            .unwrap(),
+            None
         );
     }
 
@@ -2129,6 +2337,122 @@ mod tests {
         assert_eq!(merged, 0);
         assert_eq!(stats(&conn).unwrap().media_items, 2);
         assert_eq!(library_tracks(&conn).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn matching_duplicate_keys_never_merge_distinct_present_paths() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let first = test_track_metadata("/tmp/music/first.flac", "Same Track", 1, 120_000);
+        let mut second = first.clone();
+        second.path = "/tmp/music/second.flac".into();
+
+        let first_stored = upsert_track(&conn, &first).unwrap();
+        let second_stored = upsert_track(&conn, &second).unwrap();
+        let merged = merge_similar_media_items(&conn).unwrap();
+        second.track_number = Some(2);
+        let retagged_second = upsert_track(&conn, &second).unwrap();
+        let tracks = library_tracks(&conn).unwrap();
+
+        assert_ne!(first_stored.media_item_id, second_stored.media_item_id);
+        assert_eq!(second_stored.media_item_id, retagged_second.media_item_id);
+        assert_eq!(merged, 0);
+        assert_eq!(stats(&conn).unwrap().media_items, 2);
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|track| track.track_number)
+                .collect::<Vec<_>>(),
+            vec![Some(1), Some(2)]
+        );
+    }
+
+    #[test]
+    fn merge_similar_media_items_requires_matching_file_signature() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let first = test_track_metadata("/tmp/music/first.flac", "Same Track", 1, 120_000);
+        let mut second = first.clone();
+        second.path = "/tmp/music/second.flac".into();
+        second.modified_at = Some(2);
+
+        let first_stored = upsert_track(&conn, &first).unwrap();
+        let second_stored = upsert_track(&conn, &second).unwrap();
+        mark_locations_missing_under_root(&conn, Path::new("/tmp/music")).unwrap();
+        upsert_track(&conn, &first).unwrap();
+
+        assert_eq!(merge_similar_media_items(&conn).unwrap(), 0);
+        assert_eq!(stats(&conn).unwrap().media_items, 2);
+        assert_ne!(first_stored.media_item_id, second_stored.media_item_id);
+    }
+
+    #[test]
+    fn reappearing_historical_path_detaches_from_still_present_rename() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let old = test_track_metadata("/tmp/music/old.flac", "Same Track", 1, 120_000);
+        let mut renamed = old.clone();
+        renamed.path = "/tmp/music/renamed.flac".into();
+
+        let old_stored = upsert_track(&conn, &old).unwrap();
+        record_play(
+            &conn,
+            old_stored.media_item_id,
+            old_stored.location_id,
+            120_000,
+            true,
+        )
+        .unwrap();
+        mark_locations_missing_under_root(&conn, Path::new("/tmp/music")).unwrap();
+        let renamed_stored = upsert_track(&conn, &renamed).unwrap();
+        assert_eq!(merge_similar_media_items(&conn).unwrap(), 1);
+        set_cover_path(
+            &conn,
+            renamed_stored.media_item_id,
+            Path::new("/tmp/renamed-cover.jpg"),
+        )
+        .unwrap();
+
+        let reappeared_stored = upsert_track(&conn, &old).unwrap();
+
+        assert_ne!(
+            reappeared_stored.media_item_id,
+            renamed_stored.media_item_id
+        );
+        assert_eq!(merge_similar_media_items(&conn).unwrap(), 0);
+        assert_eq!(library_tracks(&conn).unwrap().len(), 2);
+        assert_eq!(
+            media_stats_row(&conn, renamed_stored.media_item_id)
+                .unwrap()
+                .unwrap()
+                .play_count,
+            1
+        );
+        assert_eq!(
+            media_stats_row(&conn, reappeared_stored.media_item_id)
+                .unwrap()
+                .unwrap()
+                .play_count,
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT media_item_id, location_id FROM play_events",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
+            )
+            .unwrap(),
+            (renamed_stored.media_item_id, None)
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT cover_path FROM media_items WHERE id = ?1",
+                params![reappeared_stored.media_item_id],
+                |row| row.get::<_, Option<String>>(0)
+            )
+            .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -2179,7 +2503,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_track_preserves_history_when_same_path_fingerprint_changes() {
+    fn upsert_track_preserves_identity_and_history_when_same_path_metadata_changes() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         let original = test_track_metadata("/tmp/music/song.flac", "Same Track", 1, 120_000);
@@ -2202,7 +2526,8 @@ mod tests {
         let retagged_stored = upsert_track(&conn, &retagged).unwrap();
         let tracks = library_tracks(&conn).unwrap();
 
-        assert_ne!(original_stored.media_item_id, retagged_stored.media_item_id);
+        assert_eq!(original_stored.media_item_id, retagged_stored.media_item_id);
+        assert_eq!(original_stored.location_id, retagged_stored.location_id);
         assert_eq!(stats(&conn).unwrap().media_items, 1);
         assert_eq!(stats(&conn).unwrap().completed_plays, 1);
         assert_eq!(tracks.len(), 1);
@@ -2213,6 +2538,46 @@ mod tests {
             playlist_track_ids(&conn, playlist.id).unwrap(),
             vec![retagged_stored.media_item_id]
         );
+    }
+
+    fn table_has_column(conn: &Connection, table: &str, column: &str) -> bool {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        let found = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .any(|name| name.unwrap() == column);
+        found
+    }
+
+    fn foreign_key_violation(conn: &Connection) -> Option<(String, i64, String)> {
+        conn.query_row("PRAGMA foreign_key_check", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .optional()
+        .unwrap()
+    }
+
+    fn migration_test_connection() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        conn
+    }
+
+    fn load_original_v1_schema(conn: &Connection) {
+        conn.execute_batch(include_str!("db/test_fixtures/v1.sql"))
+            .unwrap();
+    }
+
+    fn foreign_keys_enabled(conn: &Connection) -> bool {
+        conn.pragma_query_value(None, "foreign_keys", |row| row.get(0))
+            .unwrap()
+    }
+
+    fn integrity_check(conn: &Connection) -> String {
+        conn.pragma_query_value(None, "integrity_check", |row| row.get(0))
+            .unwrap()
     }
 
     fn test_track_metadata(
