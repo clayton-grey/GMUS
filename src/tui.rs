@@ -132,6 +132,14 @@ struct App {
 
 impl App {
     fn new(conn: &Connection, paths: &AppPaths) -> Result<Self> {
+        Self::new_with_player(conn, paths, player::default_player_backend()?)
+    }
+
+    fn new_with_player(
+        conn: &Connection,
+        paths: &AppPaths,
+        player: Box<dyn PlayerBackend>,
+    ) -> Result<Self> {
         let pane_layout = db::pane_layout(conn)?;
         let mut app = Self {
             paths: paths.clone(),
@@ -188,7 +196,7 @@ impl App {
             shuffle_seed: 0x476d_7573_2026_0528,
             shuffle_scope: Vec::new(),
             shuffle_order: Vec::new(),
-            player: player::default_player_backend()?,
+            player,
             integration: integration::default_integration(),
             current: None,
             suspended_position_ms: None,

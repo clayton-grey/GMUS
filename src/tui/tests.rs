@@ -891,7 +891,7 @@ fn app_start_restores_pane_layout_offsets() {
     .unwrap();
     db::save_column_layout_width(&conn, 96).unwrap();
 
-    let app = App::new(&conn, &test_paths()).unwrap();
+    let app = test_app_from_db(&conn);
 
     assert_eq!(app.library_pane_percent_offset, 4);
     assert_eq!(app.info_pane_height_offset, 3);
@@ -2403,7 +2403,7 @@ fn app_start_restores_saved_filter_when_enabled() {
     .unwrap();
     db::save_filter(&conn, "keep").unwrap();
 
-    let app = App::new(&conn, &test_paths()).unwrap();
+    let app = test_app_from_db(&conn);
 
     assert_eq!(app.filter, "keep");
     assert_eq!(app.playback_sequence_indices(), vec![0]);
@@ -2422,7 +2422,7 @@ fn app_start_ignores_saved_filter_when_disabled() {
     db::save_filter(&conn, "keep").unwrap();
     db::save_restore_filter_enabled(&conn, false).unwrap();
 
-    let app = App::new(&conn, &test_paths()).unwrap();
+    let app = test_app_from_db(&conn);
 
     assert!(app.filter.is_empty());
     assert_eq!(app.playback_sequence_indices(), vec![0, 1]);
@@ -4049,7 +4049,7 @@ fn app_start_restores_saved_track_when_enabled() {
     )
     .unwrap();
 
-    let app = App::new(&conn, &test_paths()).unwrap();
+    let app = test_app_from_db(&conn);
 
     assert_eq!(app.focus, FocusPane::Tracks);
     assert_eq!(
@@ -4085,7 +4085,7 @@ fn app_start_ignores_saved_track_when_disabled() {
     .unwrap();
     db::save_restore_track_enabled(&conn, false).unwrap();
 
-    let app = App::new(&conn, &test_paths()).unwrap();
+    let app = test_app_from_db(&conn);
 
     assert_eq!(app.focus, FocusPane::Tree);
     assert_eq!(
@@ -4226,6 +4226,10 @@ fn test_paths() -> AppPaths {
         db_path: PathBuf::from("/tmp/gmus-test/gmus.sqlite3"),
         art_dir: PathBuf::from("/tmp/gmus-test/art"),
     }
+}
+
+fn test_app_from_db(conn: &Connection) -> App {
+    App::new_with_player(conn, &test_paths(), Box::new(NullPlayer::default())).unwrap()
 }
 
 fn wait_for_library_job(app: &mut App, conn: &Connection) -> bool {
