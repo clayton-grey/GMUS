@@ -467,7 +467,7 @@ impl App {
     }
 
     pub(super) fn command_output_visible(&self) -> bool {
-        !self.command_output.is_empty()
+        self.command_output.is_visible()
     }
 
     pub(super) fn info_area_visible(&self) -> bool {
@@ -481,7 +481,7 @@ impl App {
     }
 
     pub(super) fn command_output_height(&self) -> u16 {
-        (self.command_output.len() as u16).min(COMMAND_OUTPUT_MAX_ROWS)
+        self.command_output.height(COMMAND_OUTPUT_MAX_ROWS)
     }
 
     pub(super) fn reserved_bottom_rows(&self) -> u16 {

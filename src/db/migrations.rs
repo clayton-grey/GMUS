@@ -1,8 +1,9 @@
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
+use super::playlists::ensure_playlist_tracks_allow_duplicates;
 use super::settings::ensure_key_bindings_allow_duplicates;
-use super::{ensure_playlist_tracks_allow_duplicates, split_legacy_location};
+use super::split_legacy_location;
 
 pub(super) const SCHEMA_VERSION: i64 = 2;
 

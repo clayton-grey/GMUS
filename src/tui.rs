@@ -32,6 +32,7 @@ mod tests;
 pub use runtime::run;
 
 use browser::{TrackRow, TreeEntry};
+use command::CommandOutputState;
 use jobs::LibraryJobRunner;
 use keymap::{KeyAction, KeySpec};
 use media_sync::IntegrationState;
@@ -92,11 +93,7 @@ struct App {
     rate_mode: bool,
     command: String,
     command_mode: bool,
-    command_output: Vec<String>,
-    command_output_kind: CommandOutputKind,
-    command_roots: Vec<db::LibraryRoot>,
-    command_selected: usize,
-    command_focus: bool,
+    command_output: CommandOutputState,
     key_bindings: HashMap<KeyAction, Vec<KeySpec>>,
     keymap_capture_action: Option<KeyAction>,
     library_job: Option<LibraryJobRunner>,
@@ -161,11 +158,7 @@ impl App {
             rate_mode: false,
             command: String::new(),
             command_mode: false,
-            command_output: Vec::new(),
-            command_output_kind: CommandOutputKind::Text,
-            command_roots: Vec::new(),
-            command_selected: 0,
-            command_focus: false,
+            command_output: CommandOutputState::default(),
             key_bindings: HashMap::new(),
             keymap_capture_action: None,
             library_job: None,

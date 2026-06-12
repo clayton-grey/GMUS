@@ -17,6 +17,110 @@ pub(super) const COLUMN_LAYOUT_WIDTH_USAGE: &str =
     "usage: :column-layout-width [WIDTH | reset | status]";
 pub(super) const RATE_USAGE: &str = "usage: :rate [0.25..4.0 | 25..400 | 25%..400% | reset]";
 
+pub(super) struct CommandOutputState {
+    lines: Vec<String>,
+    kind: CommandOutputKind,
+    roots: Vec<db::LibraryRoot>,
+    selected: usize,
+    focus: bool,
+}
+
+impl Default for CommandOutputState {
+    fn default() -> Self {
+        Self {
+            lines: Vec::new(),
+            kind: CommandOutputKind::Text,
+            roots: Vec::new(),
+            selected: 0,
+            focus: false,
+        }
+    }
+}
+
+impl CommandOutputState {
+    pub(super) fn lines(&self) -> &[String] {
+        &self.lines
+    }
+
+    pub(super) fn kind(&self) -> CommandOutputKind {
+        self.kind
+    }
+
+    pub(super) fn roots(&self) -> &[db::LibraryRoot] {
+        &self.roots
+    }
+
+    pub(super) fn selected_index(&self) -> usize {
+        self.selected
+    }
+
+    pub(super) fn selected_root(&self) -> Option<&db::LibraryRoot> {
+        self.roots.get(self.selected)
+    }
+
+    pub(super) fn is_focused(&self) -> bool {
+        self.focus
+    }
+
+    pub(super) fn is_visible(&self) -> bool {
+        !self.lines.is_empty()
+    }
+
+    pub(super) fn height(&self, max_rows: u16) -> u16 {
+        (self.lines.len() as u16).min(max_rows)
+    }
+
+    fn show_text(&mut self, lines: Vec<String>) {
+        self.lines = lines;
+        self.kind = CommandOutputKind::Text;
+        self.roots.clear();
+        self.selected = 0;
+        self.focus = false;
+    }
+
+    fn show_library_roots(&mut self, roots: Vec<db::LibraryRoot>, selected_path: Option<&str>) {
+        let active_count = roots.iter().filter(|root| root.active).count();
+        let mut lines = vec![format!(
+            "library roots ({active_count} active / {} total)",
+            roots.len()
+        )];
+        lines.extend(
+            roots
+                .iter()
+                .map(|root| format!("{} {}", if root.active { "[x]" } else { "[ ]" }, root.path)),
+        );
+
+        self.selected = selected_path
+            .and_then(|path| roots.iter().position(|root| root.path == path))
+            .unwrap_or(0)
+            .min(roots.len().saturating_sub(1));
+        self.focus = !roots.is_empty();
+        self.kind = CommandOutputKind::LibraryRoots;
+        self.roots = roots;
+        self.lines = lines;
+    }
+
+    fn clear(&mut self) -> bool {
+        if self.lines.is_empty() && self.roots.is_empty() && !self.focus {
+            return false;
+        }
+        *self = Self::default();
+        true
+    }
+
+    pub(super) fn move_selection(&mut self, direction: i32, amount: usize) {
+        if self.roots.is_empty() {
+            self.selected = 0;
+            return;
+        }
+        if direction >= 0 {
+            self.selected = (self.selected + amount).min(self.roots.len() - 1);
+        } else {
+            self.selected = self.selected.saturating_sub(amount);
+        }
+    }
+}
+
 #[cfg(not(all(target_os = "macos", feature = "macos-media-session")))]
 pub(super) const COMMAND_NAMES: &[&str] = &BASE_COMMAND_NAMES;
 
@@ -435,46 +539,15 @@ fn unquote_command_arg(value: &str) -> &str {
 
 impl App {
     pub(super) fn show_command_output(&mut self, lines: Vec<String>) {
-        self.command_output = lines;
-        self.command_output_kind = CommandOutputKind::Text;
-        self.command_roots.clear();
-        self.command_selected = 0;
-        self.command_focus = false;
+        self.command_output.show_text(lines);
     }
 
     fn show_library_roots(&mut self, roots: Vec<db::LibraryRoot>, selected_path: Option<&str>) {
-        let active_count = roots.iter().filter(|root| root.active).count();
-        let mut output = vec![format!(
-            "library roots ({active_count} active / {} total)",
-            roots.len()
-        )];
-        output.extend(
-            roots
-                .iter()
-                .map(|root| format!("{} {}", if root.active { "[x]" } else { "[ ]" }, root.path)),
-        );
-
-        self.command_selected = selected_path
-            .and_then(|path| roots.iter().position(|root| root.path == path))
-            .unwrap_or(0)
-            .min(roots.len().saturating_sub(1));
-        self.command_focus = !roots.is_empty();
-        self.command_output_kind = CommandOutputKind::LibraryRoots;
-        self.command_roots = roots;
-        self.command_output = output;
+        self.command_output.show_library_roots(roots, selected_path);
     }
 
     pub(super) fn clear_command_output(&mut self) -> bool {
-        if self.command_output.is_empty() && self.command_roots.is_empty() && !self.command_focus {
-            false
-        } else {
-            self.command_output.clear();
-            self.command_output_kind = CommandOutputKind::Text;
-            self.command_roots.clear();
-            self.command_selected = 0;
-            self.command_focus = false;
-            true
-        }
+        self.command_output.clear()
     }
 
     #[cfg(test)]
@@ -782,7 +855,8 @@ impl App {
         self.show_library_roots(roots, None);
 
         let active: Vec<&str> = self
-            .command_roots
+            .command_output
+            .roots()
             .iter()
             .filter(|root| root.active)
             .map(|root| root.path.as_str())
@@ -795,10 +869,10 @@ impl App {
     }
 
     pub(super) fn toggle_selected_library_root(&mut self, conn: &Connection) -> Result<()> {
-        if self.command_output_kind != CommandOutputKind::LibraryRoots {
+        if self.command_output.kind() != CommandOutputKind::LibraryRoots {
             return Ok(());
         }
-        let Some(root) = self.command_roots.get(self.command_selected).cloned() else {
+        let Some(root) = self.command_output.selected_root().cloned() else {
             self.message = String::from("no library root selected");
             return Ok(());
         };

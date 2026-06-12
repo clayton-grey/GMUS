@@ -17,7 +17,7 @@ use super::{
 };
 
 pub(super) fn command_info_title(app: &App) -> &'static str {
-    if app.command_output_kind == CommandOutputKind::LibraryRoots {
+    if app.command_output.kind() == CommandOutputKind::LibraryRoots {
         "Library"
     } else if app.filter_mode && !app.command_output_visible() {
         "Filter"
@@ -49,7 +49,7 @@ pub(super) fn pane_active(app: &App, pane: FocusPane) -> bool {
     !app.command_mode
         && !app.filter_mode
         && !app.rate_mode
-        && !app.command_focus
+        && !app.command_output.is_focused()
         && app.focus == pane
         && (pane != FocusPane::Playlist || app.playlist_panel_open)
         && (pane != FocusPane::Keymap || app.keymap_panel_open)
@@ -479,7 +479,7 @@ pub(super) fn input_line(app: &App, width: usize) -> Line<'static> {
 
 pub(super) fn command_info_lines(app: &App, width: usize, height: u16) -> Vec<Line<'static>> {
     let style = command_pane_style(app);
-    if app.command_output_kind == CommandOutputKind::LibraryRoots {
+    if app.command_output.kind() == CommandOutputKind::LibraryRoots {
         library_root_lines(app, width, height, style)
     } else if app.command_output_visible() {
         command_output_lines(app, width, height.min(app.command_output_height()), style)
@@ -550,7 +550,7 @@ fn library_root_lines(app: &App, width: usize, height: u16, style: Style) -> Vec
         return Vec::new();
     }
 
-    let roots = &app.command_roots;
+    let roots = app.command_output.roots();
     if roots.is_empty() {
         return command_output_lines(app, width, height as u16, style);
     }
@@ -572,11 +572,11 @@ fn library_root_lines(app: &App, width: usize, height: u16, style: Style) -> Vec
         return lines;
     }
 
-    let selected = app.command_selected.min(roots.len() - 1);
+    let selected = app.command_output.selected_index().min(roots.len() - 1);
     let offset = selected.saturating_add(1).saturating_sub(root_slots);
     for (index, root) in roots.iter().enumerate().skip(offset).take(root_slots) {
         let content = format!(" {} {}", if root.active { "[x]" } else { "[ ]" }, root.path);
-        let selected_row = app.command_focus && index == selected;
+        let selected_row = app.command_output.is_focused() && index == selected;
         let row_style = if selected_row {
             pane_highlight_style(true)
         } else {
@@ -597,13 +597,14 @@ fn command_output_lines(app: &App, width: usize, height: u16, style: Style) -> V
     if height == 0 {
         return Vec::new();
     }
-    let hidden = if app.command_output.len() > height {
-        app.command_output.len() - (height - 1)
+    let output = app.command_output.lines();
+    let hidden = if output.len() > height {
+        output.len() - (height - 1)
     } else {
         0
     };
     let mut lines = Vec::new();
-    for (index, text) in app.command_output.iter().take(height).enumerate() {
+    for (index, text) in output.iter().take(height).enumerate() {
         let content = if hidden > 0 && index + 1 == height {
             format!(" ... {hidden} more")
         } else {

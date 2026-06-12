@@ -34,17 +34,7 @@ impl App {
     }
 
     pub(super) fn move_command_selection(&mut self, direction: i32, amount: usize) {
-        if self.command_roots.is_empty() {
-            self.command_selected = 0;
-            return;
-        }
-
-        if direction >= 0 {
-            self.command_selected =
-                (self.command_selected + amount).min(self.command_roots.len() - 1);
-        } else {
-            self.command_selected = self.command_selected.saturating_sub(amount);
-        }
+        self.command_output.move_selection(direction, amount);
     }
 
     pub(super) fn move_pane_selection(&mut self, pane: FocusPane, direction: i32, amount: usize) {
@@ -248,7 +238,7 @@ impl App {
             return Ok(false);
         }
 
-        if self.command_focus {
+        if self.command_output.is_focused() {
             return self.handle_command_focus_key(conn, key);
         }
 
@@ -383,7 +373,11 @@ impl App {
         terminal_height: u16,
     ) -> bool {
         let dismissed_startup_info = self.dismiss_startup_info();
-        if self.filter_mode || self.rate_mode || self.command_mode || self.command_focus {
+        if self.filter_mode
+            || self.rate_mode
+            || self.command_mode
+            || self.command_output.is_focused()
+        {
             return dismissed_startup_info;
         }
 

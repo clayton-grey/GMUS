@@ -52,12 +52,23 @@ than the immediate reliability payoff justified.
   file size and modification time, kept artwork ownership identity-local, and
   refreshed saved browser hierarchy when merging.
 
+## Completed In The Fourth Pass
+
+- Kept `db` as the public facade while extracting library-root persistence,
+  playlist persistence and ordering, and playback-history recording/statistics
+  into focused modules.
+- Kept playlist legacy-shape repair private to `db::playlists` while exposing it
+  narrowly to ordered migrations.
+- Grouped command output lines, structured library roots, selection, kind, and
+  focus into one `CommandOutputState` with centralized show, clear, and movement
+  behavior.
+
 ## Next Structural Pass
 
 - Continue grouping the large TUI `App` state into browser, playlist, input,
   playback, and layout state objects while preserving the coordinator API.
-- Continue splitting `db` facade implementation into migrations, playlists,
-  catalog, and history modules.
+- Extract the cohesive catalog and identity implementation from the `db`
+  facade after its cross-table tests are ready to move with it.
 - Split the large TUI test module by concern after the state boundaries settle.
 
 ## Later Reliability And Performance Work

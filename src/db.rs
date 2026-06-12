@@ -7,12 +7,32 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::media::TrackMetadata;
 
+mod history;
 mod migrations;
+mod playlists;
+mod roots;
 mod settings;
 
+#[cfg(test)]
+use history::count;
+#[allow(unused_imports)]
+pub use history::{record_play, stats, DbStats};
 use migrations::migrate;
 #[cfg(test)]
 use migrations::{user_version, SCHEMA_VERSION};
+#[cfg(test)]
+pub use playlists::playlist_track_ids;
+#[allow(unused_imports)]
+pub use playlists::PlaylistTrack;
+pub use playlists::{
+    add_tracks_to_playlist, clear_playlist, create_playlist, delete_playlist, playlist_by_name,
+    playlist_tracks, playlists, remove_latest_tracks_from_playlist, remove_playlist_track_entries,
+    remove_tracks_from_playlist, Playlist,
+};
+pub use roots::{
+    active_library_roots, deactivate_library_root, library_roots, mark_library_root_scanned,
+    set_library_root_active, upsert_library_root, LibraryRoot,
+};
 pub use settings::{
     browser_selection, column_layout_width, delete_key_binding, delete_key_binding_key,
     delete_key_bindings, key_bindings, pane_layout, restore_filter_enabled, restore_track_enabled,
@@ -25,32 +45,6 @@ pub use settings::{
 pub struct StoredTrack {
     pub media_item_id: i64,
     pub location_id: i64,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct DbStats {
-    pub media_items: i64,
-    pub locations: i64,
-    pub play_events: i64,
-    pub completed_plays: i64,
-}
-
-#[derive(Debug, Clone)]
-pub struct LibraryRoot {
-    pub path: String,
-    pub active: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Playlist {
-    pub id: i64,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlaylistTrack {
-    pub id: i64,
-    pub media_item_id: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -117,385 +111,6 @@ pub(crate) fn open_in_memory_for_tests() -> Result<Connection> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     migrate(&conn)?;
     Ok(conn)
-}
-
-pub fn upsert_library_root(conn: &Connection, path: &Path) -> Result<()> {
-    let now = now_unix();
-    let path = path.to_string_lossy();
-    conn.execute(
-        r#"
-        INSERT INTO library_roots (path, active, added_at, updated_at)
-        VALUES (?1, 1, ?2, ?2)
-        ON CONFLICT(path) DO UPDATE SET
-            active = 1,
-            updated_at = excluded.updated_at
-        "#,
-        params![path, now],
-    )?;
-    Ok(())
-}
-
-pub fn mark_library_root_scanned(conn: &Connection, path: &Path) -> Result<()> {
-    let now = now_unix();
-    let path = path.to_string_lossy();
-    conn.execute(
-        "UPDATE library_roots SET updated_at = ?1, last_scanned_at = ?1 WHERE path = ?2",
-        params![now, path],
-    )?;
-    Ok(())
-}
-
-pub fn deactivate_library_root(conn: &Connection, path: &Path) -> Result<bool> {
-    set_library_root_active(conn, path, false)
-}
-
-pub fn set_library_root_active(conn: &Connection, path: &Path, active: bool) -> Result<bool> {
-    let now = now_unix();
-    let path = path.to_string_lossy();
-    let changed = conn.execute(
-        "UPDATE library_roots SET active = ?1, updated_at = ?2 WHERE path = ?3",
-        params![i64::from(active), now, path],
-    )?;
-    Ok(changed > 0)
-}
-
-pub fn library_roots(conn: &Connection) -> Result<Vec<LibraryRoot>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT path, active
-        FROM library_roots
-        ORDER BY active DESC, path
-        "#,
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(LibraryRoot {
-            path: row.get(0)?,
-            active: row.get::<_, i64>(1)? != 0,
-        })
-    })?;
-
-    let mut roots = Vec::new();
-    for row in rows {
-        roots.push(row?);
-    }
-    Ok(roots)
-}
-
-pub fn active_library_roots(conn: &Connection) -> Result<Vec<LibraryRoot>> {
-    Ok(library_roots(conn)?
-        .into_iter()
-        .filter(|root| root.active)
-        .collect())
-}
-
-pub fn playlists(conn: &Connection) -> Result<Vec<Playlist>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT id, name
-        FROM playlists
-        ORDER BY name COLLATE NOCASE
-        "#,
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(Playlist {
-            id: row.get(0)?,
-            name: row.get(1)?,
-        })
-    })?;
-
-    let mut playlists = Vec::new();
-    for row in rows {
-        playlists.push(row?);
-    }
-    Ok(playlists)
-}
-
-pub fn playlist_by_name(conn: &Connection, name: &str) -> Result<Option<Playlist>> {
-    conn.query_row(
-        r#"
-        SELECT id, name
-        FROM playlists
-        WHERE name = ?1 COLLATE NOCASE
-        "#,
-        params![name.trim()],
-        |row| {
-            Ok(Playlist {
-                id: row.get(0)?,
-                name: row.get(1)?,
-            })
-        },
-    )
-    .optional()
-    .map_err(Into::into)
-}
-
-pub fn create_playlist(conn: &Connection, name: &str) -> Result<Playlist> {
-    let name = normalize_playlist_name(name);
-    let now = now_unix();
-    conn.execute(
-        r#"
-        INSERT INTO playlists (name, created_at, updated_at)
-        VALUES (?1, ?2, ?2)
-        ON CONFLICT(name) DO UPDATE SET updated_at = playlists.updated_at
-        "#,
-        params![name, now],
-    )?;
-    playlist_by_name(conn, &name)?.ok_or_else(|| anyhow::anyhow!("playlist not found: {name}"))
-}
-
-pub fn delete_playlist(conn: &Connection, name: &str) -> Result<bool> {
-    let changed = conn.execute(
-        "DELETE FROM playlists WHERE name = ?1 COLLATE NOCASE",
-        params![name.trim()],
-    )?;
-    Ok(changed > 0)
-}
-
-#[cfg(test)]
-pub fn playlist_track_ids(conn: &Connection, playlist_id: i64) -> Result<Vec<i64>> {
-    Ok(playlist_tracks(conn, playlist_id)?
-        .into_iter()
-        .map(|track| track.media_item_id)
-        .collect())
-}
-
-pub fn playlist_tracks(conn: &Connection, playlist_id: i64) -> Result<Vec<PlaylistTrack>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT id, media_item_id
-        FROM playlist_tracks
-        WHERE playlist_id = ?1
-        ORDER BY position, added_at, id
-        "#,
-    )?;
-    let rows = stmt.query_map(params![playlist_id], |row| {
-        Ok(PlaylistTrack {
-            id: row.get(0)?,
-            media_item_id: row.get(1)?,
-        })
-    })?;
-
-    let mut tracks = Vec::new();
-    for row in rows {
-        tracks.push(row?);
-    }
-    Ok(tracks)
-}
-
-pub fn add_tracks_to_playlist(
-    conn: &Connection,
-    playlist_id: i64,
-    media_item_ids: &[i64],
-) -> Result<usize> {
-    let tx = conn.unchecked_transaction()?;
-    let mut position = tx.query_row(
-        "SELECT COALESCE(MAX(position) + 1, 0) FROM playlist_tracks WHERE playlist_id = ?1",
-        params![playlist_id],
-        |row| row.get::<_, i64>(0),
-    )?;
-    let now = now_unix();
-    let mut added = 0;
-    for media_item_id in media_item_ids {
-        let changed = tx.execute(
-            r#"
-            INSERT INTO playlist_tracks (
-                playlist_id, media_item_id, position, added_at
-            ) VALUES (?1, ?2, ?3, ?4)
-            "#,
-            params![playlist_id, media_item_id, position, now],
-        )?;
-        if changed > 0 {
-            position += 1;
-            added += 1;
-        }
-    }
-    touch_playlist(&tx, playlist_id)?;
-    tx.commit()?;
-    Ok(added)
-}
-
-pub fn remove_tracks_from_playlist(
-    conn: &Connection,
-    playlist_id: i64,
-    media_item_ids: &[i64],
-) -> Result<usize> {
-    let tx = conn.unchecked_transaction()?;
-    let mut removed = 0;
-    for media_item_id in unique_media_item_ids(media_item_ids) {
-        removed += tx.execute(
-            "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND media_item_id = ?2",
-            params![playlist_id, media_item_id],
-        )?;
-    }
-    if removed > 0 {
-        compact_playlist_positions(&tx, playlist_id)?;
-        touch_playlist(&tx, playlist_id)?;
-    }
-    tx.commit()?;
-    Ok(removed)
-}
-
-pub fn remove_latest_tracks_from_playlist(
-    conn: &Connection,
-    playlist_id: i64,
-    media_item_ids: &[i64],
-) -> Result<usize> {
-    let tx = conn.unchecked_transaction()?;
-    let mut removed = 0;
-    for media_item_id in media_item_ids {
-        let entry_id = tx
-            .query_row(
-                r#"
-                SELECT id
-                FROM playlist_tracks
-                WHERE playlist_id = ?1 AND media_item_id = ?2
-                ORDER BY position DESC, added_at DESC, id DESC
-                LIMIT 1
-                "#,
-                params![playlist_id, media_item_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        if let Some(entry_id) = entry_id {
-            removed += tx.execute(
-                "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND id = ?2",
-                params![playlist_id, entry_id],
-            )?;
-        }
-    }
-    if removed > 0 {
-        compact_playlist_positions(&tx, playlist_id)?;
-        touch_playlist(&tx, playlist_id)?;
-    }
-    tx.commit()?;
-    Ok(removed)
-}
-
-pub fn remove_playlist_track_entries(
-    conn: &Connection,
-    playlist_id: i64,
-    playlist_track_ids: &[i64],
-) -> Result<usize> {
-    let tx = conn.unchecked_transaction()?;
-    let mut removed = 0;
-    for playlist_track_id in playlist_track_ids {
-        removed += tx.execute(
-            "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND id = ?2",
-            params![playlist_id, playlist_track_id],
-        )?;
-    }
-    if removed > 0 {
-        compact_playlist_positions(&tx, playlist_id)?;
-        touch_playlist(&tx, playlist_id)?;
-    }
-    tx.commit()?;
-    Ok(removed)
-}
-
-pub fn clear_playlist(conn: &Connection, playlist_id: i64) -> Result<usize> {
-    let tx = conn.unchecked_transaction()?;
-    let removed = tx.execute(
-        "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
-        params![playlist_id],
-    )?;
-    if removed > 0 {
-        touch_playlist(&tx, playlist_id)?;
-    }
-    tx.commit()?;
-    Ok(removed)
-}
-
-fn normalize_playlist_name(name: &str) -> String {
-    let name = name.trim();
-    if name.is_empty() {
-        "Default".to_string()
-    } else {
-        name.to_string()
-    }
-}
-
-fn unique_media_item_ids(media_item_ids: &[i64]) -> Vec<i64> {
-    let mut seen = std::collections::HashSet::new();
-    media_item_ids
-        .iter()
-        .copied()
-        .filter(|id| seen.insert(*id))
-        .collect()
-}
-
-fn ensure_playlist_tracks_allow_duplicates(conn: &Connection) -> Result<()> {
-    let mut stmt = conn.prepare("PRAGMA table_info(playlist_tracks)")?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    let mut has_entry_id = false;
-    for row in rows {
-        if row? == "id" {
-            has_entry_id = true;
-            break;
-        }
-    }
-    if has_entry_id {
-        return Ok(());
-    }
-
-    conn.execute_batch(
-        r#"
-        DROP INDEX IF EXISTS idx_playlist_tracks_playlist_position;
-        ALTER TABLE playlist_tracks RENAME TO playlist_tracks_old;
-
-        CREATE TABLE playlist_tracks (
-            id              INTEGER PRIMARY KEY,
-            playlist_id     INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
-            media_item_id   INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
-            position        INTEGER NOT NULL,
-            added_at        INTEGER NOT NULL
-        );
-
-        INSERT INTO playlist_tracks (playlist_id, media_item_id, position, added_at)
-        SELECT playlist_id, media_item_id, position, added_at
-        FROM playlist_tracks_old
-        ORDER BY playlist_id, position, added_at, media_item_id;
-
-        DROP TABLE playlist_tracks_old;
-        "#,
-    )?;
-    Ok(())
-}
-
-fn touch_playlist(conn: &Connection, playlist_id: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
-        params![now_unix(), playlist_id],
-    )?;
-    Ok(())
-}
-
-fn compact_playlist_positions(conn: &Connection, playlist_id: i64) -> Result<()> {
-    let ids = playlist_track_entry_ids(conn, playlist_id)?;
-    for (position, playlist_track_id) in ids.into_iter().enumerate() {
-        conn.execute(
-            "UPDATE playlist_tracks SET position = ?1 WHERE playlist_id = ?2 AND id = ?3",
-            params![position as i64, playlist_id, playlist_track_id],
-        )?;
-    }
-    Ok(())
-}
-
-fn playlist_track_entry_ids(conn: &Connection, playlist_id: i64) -> Result<Vec<i64>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT id
-        FROM playlist_tracks
-        WHERE playlist_id = ?1
-        ORDER BY position, added_at, id
-        "#,
-    )?;
-    let rows = stmt.query_map(params![playlist_id], |row| row.get(0))?;
-
-    let mut ids = Vec::new();
-    for row in rows {
-        ids.push(row?);
-    }
-    Ok(ids)
 }
 
 pub fn upsert_track(conn: &Connection, track: &TrackMetadata) -> Result<StoredTrack> {
@@ -1161,88 +776,12 @@ fn normalize_identity_part(value: Option<&str>) -> Option<String> {
     (!normalized.is_empty()).then_some(normalized)
 }
 
-pub fn record_play(
-    conn: &Connection,
-    media_item_id: i64,
-    location_id: i64,
-    duration_ms: i64,
-    completed: bool,
-) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    let location_matches_media_item: bool = tx.query_row(
-        r#"
-        SELECT EXISTS(
-            SELECT 1
-            FROM locations
-            WHERE id = ?1 AND media_item_id = ?2
-        )
-        "#,
-        params![location_id, media_item_id],
-        |row| row.get(0),
-    )?;
-    if !location_matches_media_item {
-        anyhow::bail!("location {location_id} does not belong to media item {media_item_id}");
-    }
-
-    let now = now_unix();
-    let completed_i64 = i64::from(completed);
-    tx.execute(
-        r#"
-        INSERT INTO play_events (
-            media_item_id, location_id, played_at, duration_ms, completed
-        ) VALUES (?1, ?2, ?3, ?4, ?5)
-        "#,
-        params![
-            media_item_id,
-            location_id,
-            now,
-            duration_ms.max(0),
-            completed_i64
-        ],
-    )?;
-
-    tx.execute(
-        r#"
-        INSERT INTO media_stats (
-            media_item_id, play_count, last_played_at, total_play_ms
-        ) VALUES (?1, ?2, ?3, ?4)
-        ON CONFLICT(media_item_id) DO UPDATE SET
-            play_count = media_stats.play_count + excluded.play_count,
-            last_played_at = COALESCE(excluded.last_played_at, media_stats.last_played_at),
-            total_play_ms = media_stats.total_play_ms + excluded.total_play_ms,
-            skip_count = media_stats.skip_count + CASE WHEN excluded.play_count = 0 THEN 1 ELSE 0 END
-        "#,
-        params![
-            media_item_id,
-            completed_i64,
-            if completed { Some(now) } else { None },
-            duration_ms.max(0)
-        ],
-    )?;
-
-    tx.commit()?;
-    Ok(())
-}
-
 pub fn set_cover_path(conn: &Connection, media_item_id: i64, path: &Path) -> Result<()> {
     conn.execute(
         "UPDATE media_items SET cover_path = ?1, updated_at = ?2 WHERE id = ?3",
         params![path.to_string_lossy(), now_unix(), media_item_id],
     )?;
     Ok(())
-}
-
-pub fn stats(conn: &Connection) -> Result<DbStats> {
-    Ok(DbStats {
-        media_items: count(conn, "media_items")?,
-        locations: count(conn, "locations")?,
-        play_events: count(conn, "play_events")?,
-        completed_plays: conn.query_row(
-            "SELECT COALESCE(SUM(completed), 0) FROM play_events",
-            [],
-            |row| row.get(0),
-        )?,
-    })
 }
 
 pub fn library_tracks(conn: &Connection) -> Result<Vec<LibraryTrack>> {
@@ -1369,12 +908,6 @@ pub fn format_duration(duration_ms: Option<i64>) -> String {
     let minutes = total_seconds / 60;
     let seconds = total_seconds % 60;
     format!("{minutes}:{seconds:02}")
-}
-
-fn count(conn: &Connection, table: &str) -> Result<i64> {
-    let sql = format!("SELECT COUNT(*) FROM {table}");
-    conn.query_row(&sql, [], |row| row.get(0))
-        .map_err(Into::into)
 }
 
 fn path_matches_root_sql(path: &str, root: &str) -> String {

@@ -389,11 +389,11 @@ fn command_mode_executes_library_commands() {
     app.command = String::from("library");
     app.execute_command(&conn);
     assert!(app.message.contains(library_dir.path().to_str().unwrap()));
-    assert!(app.command_focus);
-    assert_eq!(app.command_output_kind, CommandOutputKind::LibraryRoots);
-    assert!(app.command_output[0].starts_with("library roots"));
-    assert!(app.command_output[1].contains("[x]"));
-    assert!(app.command_output[1].contains(library_dir.path().to_str().unwrap()));
+    assert!(app.command_output.is_focused());
+    assert_eq!(app.command_output.kind(), CommandOutputKind::LibraryRoots);
+    assert!(app.command_output.lines()[0].starts_with("library roots"));
+    assert!(app.command_output.lines()[1].contains("[x]"));
+    assert!(app.command_output.lines()[1].contains(library_dir.path().to_str().unwrap()));
 
     app.command = format!("remove {}", library_dir.path().display());
     app.execute_command(&conn);
@@ -703,10 +703,10 @@ fn library_command_focuses_root_list_and_toggles_roots() {
     app.command = String::from("library");
     app.execute_command(&conn);
 
-    assert!(app.command_focus);
-    assert_eq!(app.command_output_kind, CommandOutputKind::LibraryRoots);
-    assert_eq!(app.command_roots.len(), 2);
-    assert_eq!(app.command_selected, 0);
+    assert!(app.command_output.is_focused());
+    assert_eq!(app.command_output.kind(), CommandOutputKind::LibraryRoots);
+    assert_eq!(app.command_output.roots().len(), 2);
+    assert_eq!(app.command_output.selected_index(), 0);
     assert_eq!(command_info_title(&app), "Library");
     assert_eq!(
         command_info_lines(&app, 80, 10)[1].spans[0].style,
@@ -715,8 +715,8 @@ fn library_command_focuses_root_list_and_toggles_roots() {
 
     app.handle_key(&conn, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.command_selected, 1);
-    let toggled_path = app.command_roots[1].path.clone();
+    assert_eq!(app.command_output.selected_index(), 1);
+    let toggled_path = app.command_output.roots()[1].path.clone();
 
     app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
@@ -729,8 +729,11 @@ fn library_command_focuses_root_list_and_toggles_roots() {
             .unwrap()
             .active
     );
-    assert!(app.command_focus);
-    assert_eq!(app.command_roots[app.command_selected].path, toggled_path);
+    assert!(app.command_output.is_focused());
+    assert_eq!(
+        app.command_output.roots()[app.command_output.selected_index()].path,
+        toggled_path
+    );
 
     app.handle_key(&conn, KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
         .unwrap();
@@ -767,10 +770,10 @@ fn colon_opens_command_bar() {
 #[test]
 fn library_output_renders_in_info_pane() {
     let mut app = test_app(vec![test_track(1, "first track")]);
-    app.command_output = vec![
+    app.show_command_output(vec![
         String::from("library roots (1 active / 1 total)"),
         String::from("[x] /tmp/music"),
-    ];
+    ]);
 
     let lines = command_info_lines(&app, 80, 10);
 
@@ -1924,16 +1927,16 @@ fn escape_clears_command_output_before_filter() {
     let mut app = test_app(vec![test_track(1, "keep one"), test_track(2, "skip this")]);
     let conn = test_conn();
     app.filter = String::from("keep");
-    app.command_output = vec![
+    app.show_command_output(vec![
         String::from("library roots"),
         String::from("[x] /tmp/music"),
-    ];
+    ]);
     app.sync_selection();
 
     app.handle_key(&conn, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
         .unwrap();
 
-    assert!(app.command_output.is_empty());
+    assert!(!app.command_output.is_visible());
     assert_eq!(app.filter, "keep");
     assert_eq!(app.playback_sequence_indices(), &[0]);
 }
@@ -1945,15 +1948,15 @@ fn normal_navigation_clears_command_output() {
         test_track(2, "second track"),
     ]);
     let conn = test_conn();
-    app.command_output = vec![
+    app.show_command_output(vec![
         String::from("library roots"),
         String::from("[x] /tmp/music"),
-    ];
+    ]);
 
     app.handle_key(&conn, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
         .unwrap();
 
-    assert!(app.command_output.is_empty());
+    assert!(!app.command_output.is_visible());
 }
 
 #[test]
@@ -2052,8 +2055,8 @@ fn scan_commands_start_background_job_before_finishing() {
 
     assert!(!app.command_mode);
     assert!(app.library_job.is_some());
-    assert!(app.command_output[0].contains("working: :update"));
-    assert!(app.command_output[1].contains("scanning files"));
+    assert!(app.command_output.lines()[0].contains("working: :update"));
+    assert!(app.command_output.lines()[1].contains("scanning files"));
 
     assert!(wait_for_library_job(&mut app, &conn));
 }
@@ -2912,6 +2915,7 @@ fn inactive_pane_selection_is_visible() {
 #[test]
 fn command_and_filter_focus_make_both_pane_selections_inactive() {
     let mut app = test_app(vec![test_track(1, "first track")]);
+    let conn = test_conn();
 
     assert!(pane_active(&app, FocusPane::Tree));
     assert!(!pane_active(&app, FocusPane::Tracks));
@@ -2946,7 +2950,10 @@ fn command_and_filter_focus_make_both_pane_selections_inactive() {
     assert!(!pane_active(&app, FocusPane::Playlist));
 
     app.rate_mode = false;
-    app.command_focus = true;
+    db::upsert_library_root(&conn, Path::new("/tmp/music")).unwrap();
+    app.command = String::from("library");
+    app.execute_command(&conn);
+    assert!(app.command_output.is_focused());
     assert!(!pane_active(&app, FocusPane::Tree));
     assert!(!pane_active(&app, FocusPane::Tracks));
     assert!(!pane_active(&app, FocusPane::Playlist));
@@ -4450,11 +4457,7 @@ fn test_app(tracks: Vec<LibraryTrack>) -> App {
         rate_mode: false,
         command: String::new(),
         command_mode: false,
-        command_output: Vec::new(),
-        command_output_kind: CommandOutputKind::Text,
-        command_roots: Vec::new(),
-        command_selected: 0,
-        command_focus: false,
+        command_output: CommandOutputState::default(),
         key_bindings: HashMap::new(),
         keymap_capture_action: None,
         library_job: None,
