@@ -2,7 +2,9 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
+use crossterm::event::{
+    self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, Event,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -100,6 +102,11 @@ fn run_loop(
                     needs_draw = true;
                     next_tick = Instant::now();
                 }
+                Event::FocusGained => {
+                    terminal.clear()?;
+                    needs_draw = true;
+                    next_tick = Instant::now();
+                }
                 Event::Resize(_, _) => needs_draw = true,
                 Event::Mouse(mouse) => {
                     let size = terminal.size()?;
@@ -119,7 +126,12 @@ fn run_loop(
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableFocusChange,
+        EnableMouseCapture
+    )?;
     Terminal::new(CrosstermBackend::new(stdout)).map_err(Into::into)
 }
 
@@ -128,6 +140,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
     execute!(
         terminal.backend_mut(),
         DisableMouseCapture,
+        DisableFocusChange,
         LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;
