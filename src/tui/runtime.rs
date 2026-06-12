@@ -1,7 +1,9 @@
 use std::io;
+use std::io::Write;
+use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Error, Result};
 use crossterm::event::{
     self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, Event,
 };
@@ -22,17 +24,17 @@ use super::App;
 const INTEGRATION_TICK: Duration = Duration::from_millis(75);
 
 pub fn run(conn: &Connection, paths: &AppPaths) -> Result<()> {
-    let mut terminal = setup_terminal()?;
+    let mut terminal = TerminalSession::setup()?;
     let mut app = match App::new(conn, paths) {
         Ok(app) => app,
         Err(error) => {
-            let _ = restore_terminal(&mut terminal);
+            let _ = terminal.restore();
             return Err(error);
         }
     };
     let result = run_loop(&mut terminal, conn, &mut app);
     let shutdown_result = app.shutdown(conn);
-    let restore_result = restore_terminal(&mut terminal);
+    let restore_result = terminal.restore();
     result.and(shutdown_result).and(restore_result)
 }
 
@@ -123,26 +125,97 @@ fn run_loop(
     Ok(())
 }
 
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableFocusChange,
-        EnableMouseCapture
-    )?;
-    Terminal::new(CrosstermBackend::new(stdout)).map_err(Into::into)
+struct TerminalSession {
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    restored: bool,
 }
 
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        DisableMouseCapture,
-        DisableFocusChange,
-        LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
-    Ok(())
+impl TerminalSession {
+    fn setup() -> Result<Self> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        if let Err(error) = execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableFocusChange,
+            EnableMouseCapture
+        ) {
+            let _ = restore_capabilities(&mut stdout);
+            return Err(error.into());
+        }
+
+        let terminal = match Terminal::new(CrosstermBackend::new(stdout)) {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                let _ = restore_capabilities(&mut io::stdout());
+                return Err(error.into());
+            }
+        };
+        Ok(Self {
+            terminal,
+            restored: false,
+        })
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        if self.restored {
+            return Ok(());
+        }
+        self.restored = true;
+
+        let mut first_error = None;
+        remember_first_error(
+            &mut first_error,
+            restore_capabilities(self.terminal.backend_mut()),
+        );
+        remember_first_error(
+            &mut first_error,
+            self.terminal.show_cursor().map_err(Into::into),
+        );
+        first_error.map_or(Ok(()), Err)
+    }
+}
+
+impl Deref for TerminalSession {
+    type Target = Terminal<CrosstermBackend<io::Stdout>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.terminal
+    }
+}
+
+impl DerefMut for TerminalSession {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.terminal
+    }
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+fn restore_capabilities(writer: &mut impl Write) -> Result<()> {
+    let mut first_error = None;
+    remember_first_error(&mut first_error, disable_raw_mode().map_err(Into::into));
+    remember_first_error(
+        &mut first_error,
+        execute!(writer, DisableMouseCapture).map_err(Into::into),
+    );
+    remember_first_error(
+        &mut first_error,
+        execute!(writer, DisableFocusChange).map_err(Into::into),
+    );
+    remember_first_error(
+        &mut first_error,
+        execute!(writer, LeaveAlternateScreen).map_err(Into::into),
+    );
+    first_error.map_or(Ok(()), Err)
+}
+
+fn remember_first_error(first_error: &mut Option<Error>, result: Result<()>) {
+    if let Err(error) = result {
+        first_error.get_or_insert(error);
+    }
 }

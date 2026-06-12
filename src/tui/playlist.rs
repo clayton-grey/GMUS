@@ -192,6 +192,9 @@ impl App {
         self.expanded_playlists.insert(playlist.id);
         self.playlist_panel_open = true;
         self.keymap_panel_open = false;
+        if self.focus == FocusPane::Keymap {
+            self.focus = FocusPane::Playlist;
+        }
         self.sync_selection();
         self.select_playlist_row_for_id(playlist.id);
         Ok(format!("playlist: {}", playlist.name))
@@ -212,6 +215,9 @@ impl App {
         self.expanded_playlists.insert(playlist.id);
         self.playlist_panel_open = true;
         self.keymap_panel_open = false;
+        if self.focus == FocusPane::Keymap {
+            self.focus = FocusPane::Playlist;
+        }
         self.sync_selection();
         self.select_playlist_row_for_id(playlist.id);
         Ok(format!("cleared {removed} tracks from {}", playlist.name))
@@ -229,8 +235,13 @@ impl App {
             self.playlists = db::playlists(conn)?;
             self.refresh_playlist_tracks(conn)?;
             self.expanded_playlists.remove(&playlist.id);
-            self.active_playlist_id = self.playlists.first().map(|playlist| playlist.id);
+            let fallback_playlist_id = self.playlists.first().map(|playlist| playlist.id);
+            self.active_playlist_id = fallback_playlist_id;
             self.sync_selection();
+            if let Some(playlist_id) = fallback_playlist_id {
+                self.select_playlist_row_for_id(playlist_id);
+                self.apply_selection_state();
+            }
             Ok(format!("deleted playlist {}", playlist.name))
         } else {
             Ok(format!("no playlist: {}", playlist.name))

@@ -1,4 +1,4 @@
-use super::{App, TreeEntry};
+use super::{App, TrackRow, TreeEntry};
 
 impl App {
     pub(super) fn sync_selection(&mut self) {
@@ -15,11 +15,40 @@ impl App {
     pub(super) fn sync_selection_preserving_browser_selection(&mut self) {
         let selected_tree_entry = self.selected_tree_entry().cloned();
         let selected_media_item_id = self.selected_playable_media_item_id();
+        let selected_playlist_track =
+            self.track_rows()
+                .get(self.selected_track_row)
+                .and_then(|row| match row {
+                    TrackRow::PlaylistTrack {
+                        playlist_id,
+                        playlist_track_id,
+                        ..
+                    } => Some((*playlist_id, *playlist_track_id)),
+                    _ => None,
+                });
 
         self.sync_selection_preserving_browser_anchors(
             selected_tree_entry.as_ref(),
             selected_media_item_id,
         );
+        if let Some(position) =
+            selected_playlist_track.and_then(|(playlist_id, playlist_track_id)| {
+                self.track_rows().iter().position(|row| {
+                    matches!(
+                        row,
+                        TrackRow::PlaylistTrack {
+                            playlist_id: row_playlist_id,
+                            playlist_track_id: row_playlist_track_id,
+                            ..
+                        } if *row_playlist_id == playlist_id
+                            && *row_playlist_track_id == playlist_track_id
+                    )
+                })
+            })
+        {
+            self.selected_track_row = position;
+            self.apply_selection_state();
+        }
     }
 
     pub(super) fn sync_selection_preserving_browser_anchors(

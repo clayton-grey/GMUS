@@ -51,13 +51,13 @@ impl LazyMacIntegration {
 
 impl Integration for LazyMacIntegration {
     fn tick(&mut self) {
-        if let Some(inner) = &mut self.inner {
+        if let Ok(inner) = self.inner_mut() {
             inner.tick();
         }
     }
 
     fn next_command(&mut self) -> Option<IntegrationCommand> {
-        self.inner.as_mut().and_then(Integration::next_command)
+        self.inner_mut().ok().and_then(Integration::next_command)
     }
 
     fn publish_event(&mut self, event: &IntegrationEvent) -> Result<()> {

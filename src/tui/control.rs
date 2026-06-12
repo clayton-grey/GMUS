@@ -180,7 +180,6 @@ impl App {
         self.dismiss_startup_info();
 
         if matches!(key.code, KeyCode::Char('c')) && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.shutdown(conn)?;
             return Ok(true);
         }
 
@@ -269,7 +268,6 @@ impl App {
     fn handle_key_action(&mut self, conn: &Connection, action: KeyAction) -> Result<bool> {
         match action {
             KeyAction::Quit => {
-                self.shutdown(conn)?;
                 return Ok(true);
             }
             KeyAction::RefreshLibrary => self.refresh(conn)?,
@@ -296,27 +294,9 @@ impl App {
             KeyAction::OpenPlaylist => self.open_playlist_panel(conn)?,
             KeyAction::ShrinkPane => self.resize_focused_pane(conn, false)?,
             KeyAction::GrowPane => self.resize_focused_pane(conn, true)?,
-            KeyAction::CommandMode => {
-                self.filter_mode = false;
-                self.rate_mode = false;
-                self.command_mode = true;
-                self.command.clear();
-                self.clear_command_output();
-                self.message = String::from("typing command");
-            }
-            KeyAction::FilterMode => {
-                self.rate_mode = false;
-                self.filter_mode = true;
-                self.message = String::from("typing filter");
-            }
-            KeyAction::RateMode => {
-                self.filter_mode = false;
-                self.command_mode = false;
-                self.rate_mode = true;
-                self.rate_input.clear();
-                self.clear_command_output();
-                self.message = String::from("typing playback rate");
-            }
+            KeyAction::CommandMode => self.enter_command_mode(),
+            KeyAction::FilterMode => self.enter_filter_mode(),
+            KeyAction::RateMode => self.enter_rate_mode(),
             KeyAction::PlaySelected => self.play_from_controls(conn)?,
             KeyAction::TogglePause => self.toggle_pause(conn)?,
             KeyAction::Stop => self.stop_current(conn)?,
@@ -346,7 +326,6 @@ impl App {
     ) -> Result<bool> {
         match key.code {
             KeyCode::Char('q') => {
-                self.shutdown(conn)?;
                 return Ok(true);
             }
             KeyCode::Esc if self.clear_command_output() => {
@@ -363,30 +342,38 @@ impl App {
                 self.focus = FocusPane::Tree;
                 self.apply_selection_state();
             }
-            KeyCode::Char(':') => {
-                self.clear_command_output();
-                self.filter_mode = false;
-                self.rate_mode = false;
-                self.command_mode = true;
-                self.command.clear();
-                self.message = String::from("typing command");
-            }
-            KeyCode::Char('/') => {
-                self.clear_command_output();
-                self.rate_mode = false;
-                self.filter_mode = true;
-                self.message = String::from("typing filter");
-            }
-            KeyCode::Char('r') => {
-                self.clear_command_output();
-                self.filter_mode = false;
-                self.rate_mode = true;
-                self.rate_input.clear();
-                self.message = String::from("typing playback rate");
-            }
+            KeyCode::Char(':') => self.enter_command_mode(),
+            KeyCode::Char('/') => self.enter_filter_mode(),
+            KeyCode::Char('r') => self.enter_rate_mode(),
             _ => {}
         }
         Ok(false)
+    }
+
+    fn enter_command_mode(&mut self) {
+        self.filter_mode = false;
+        self.rate_mode = false;
+        self.command_mode = true;
+        self.command.clear();
+        self.clear_command_output();
+        self.message = String::from("typing command");
+    }
+
+    fn enter_filter_mode(&mut self) {
+        self.command_mode = false;
+        self.rate_mode = false;
+        self.filter_mode = true;
+        self.clear_command_output();
+        self.message = String::from("typing filter");
+    }
+
+    fn enter_rate_mode(&mut self) {
+        self.filter_mode = false;
+        self.command_mode = false;
+        self.rate_mode = true;
+        self.rate_input.clear();
+        self.clear_command_output();
+        self.message = String::from("typing playback rate");
     }
 
     pub(super) fn handle_mouse(

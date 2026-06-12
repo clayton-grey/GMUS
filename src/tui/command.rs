@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use rusqlite::Connection;
-use unicode_width::UnicodeWidthStr;
 
 #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
 use crate::integration::IntegrationEvent;
 use crate::{db, library};
 
+use super::formatting::display_width;
 use super::layout::DEFAULT_COLUMN_LAYOUT_WIDTH;
 use super::{App, CommandOutputKind};
 
@@ -431,10 +431,6 @@ fn unquote_command_arg(value: &str) -> &str {
         }
     }
     value
-}
-
-fn display_width(text: &str) -> usize {
-    UnicodeWidthStr::width(text)
 }
 
 impl App {

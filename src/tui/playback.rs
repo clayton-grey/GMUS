@@ -309,7 +309,9 @@ impl App {
                 self.sync_integration_playback(true);
             }
             Err(error) => {
+                let _ = self.player.stop();
                 self.message = format!("could not play {}: {error:#}", track.path);
+                self.sync_integration_playback(true);
             }
         }
         Ok(())
@@ -333,10 +335,10 @@ impl App {
     }
 
     fn finish_current(&mut self, conn: &Connection, natural_end: bool) -> Result<()> {
-        let Some(mut current) = self.current.take() else {
+        let Some(mut current) = self.current.clone() else {
             return Ok(());
         };
-        if let Some(position_ms) = self.suspended_position_ms.take() {
+        if let Some(position_ms) = self.suspended_position_ms {
             current.align_position(position_ms);
         } else {
             current.tick_position(self.player.position(), self.player.state());
@@ -370,6 +372,8 @@ impl App {
                 self.increment_cached_play_count(current.track.media_item_id);
             }
         }
+        self.current = None;
+        self.suspended_position_ms = None;
         Ok(())
     }
 

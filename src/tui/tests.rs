@@ -426,6 +426,64 @@ fn command_mode_executes_playlist_commands() {
 }
 
 #[test]
+fn playlist_commands_move_focus_from_closed_keymap_pane() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    let mut app = test_app(Vec::new());
+    let playlist = db::create_playlist(&conn, "Road").unwrap();
+
+    app.focus = FocusPane::Keymap;
+    app.keymap_panel_open = true;
+    app.command_playlist(&conn, "Road").unwrap();
+
+    assert!(!app.keymap_panel_open);
+    assert!(app.playlist_panel_open);
+    assert_eq!(app.focus, FocusPane::Playlist);
+
+    app.focus = FocusPane::Keymap;
+    app.keymap_panel_open = true;
+    app.command_playlist_clear(&conn, "Road").unwrap();
+
+    assert!(!app.keymap_panel_open);
+    assert!(app.playlist_panel_open);
+    assert_eq!(app.focus, FocusPane::Playlist);
+    assert_eq!(app.active_playlist_id, Some(playlist.id));
+}
+
+#[test]
+fn deleting_active_playlist_preserves_first_playlist_fallback() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    let first = db::create_playlist(&conn, "First").unwrap();
+    let active = db::create_playlist(&conn, "Active").unwrap();
+    let last = db::create_playlist(&conn, "Last").unwrap();
+    let mut app = test_app(Vec::new());
+    app.playlists = db::playlists(&conn).unwrap();
+    app.active_playlist_id = Some(active.id);
+    app.playlist_panel_open = true;
+    app.sync_selection();
+    app.selected_playlist_row = app
+        .view
+        .playlist_entries
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                PlaylistPanelEntry::Playlist { playlist_id, .. } if *playlist_id == last.id
+            )
+        })
+        .unwrap();
+
+    app.command_playlist_delete(&conn, "Active").unwrap();
+
+    assert_eq!(app.active_playlist_id, Some(first.id));
+    assert!(matches!(
+        app.view.playlist_entries.get(app.selected_playlist_row),
+        Some(PlaylistPanelEntry::Playlist { playlist_id, .. }) if *playlist_id == first.id
+    ));
+}
+
+#[test]
 fn rate_command_changes_and_reports_playback_rate() {
     let conn = test_conn();
     let mut app = test_app(Vec::new());
@@ -2355,6 +2413,42 @@ fn album_headers_keep_scanned_years() {
 }
 
 #[test]
+fn album_metadata_reflects_filtered_visible_tracks() {
+    let mut hidden = test_track(1, "hidden track");
+    hidden.album_year = Some(2018);
+    hidden.duration_ms = Some(120_000);
+    hidden.disc_number = Some(2);
+    let mut visible = test_track(2, "visible track");
+    visible.album_year = Some(2024);
+    visible.duration_ms = Some(60_000);
+    visible.disc_number = Some(1);
+    let mut app = test_app(vec![hidden, visible]);
+
+    app.filter = "visible".to_string();
+    app.sync_selection();
+
+    assert!(matches!(
+        app.track_rows().first(),
+        Some(TrackRow::AlbumHeader {
+            album_year: Some(2024),
+            duration_ms: 60_000,
+            ..
+        })
+    ));
+    assert!(matches!(
+        app.track_rows().get(1),
+        Some(TrackRow::Track {
+            show_disc_number: false,
+            ..
+        })
+    ));
+    assert!(!app
+        .track_rows()
+        .iter()
+        .any(|row| matches!(row, TrackRow::DiscDivider { .. })));
+}
+
+#[test]
 fn tab_confirms_filter_and_focuses_library() {
     let mut app = test_app(vec![test_track(1, "keep one"), test_track(2, "skip this")]);
     let conn = test_conn();
@@ -3172,6 +3266,37 @@ fn duplicate_playlist_playback_advances_by_entry_identity() {
 }
 
 #[test]
+fn preserving_browser_selection_keeps_duplicate_playlist_entry_identity() {
+    let mut app = test_app(vec![test_track(1, "looped track")]);
+    app.playlists = vec![db::Playlist {
+        id: 7,
+        name: "Road".to_string(),
+    }];
+    app.playlist_track_ids.insert(7, vec![1, 1]);
+    app.playlist_track_entry_ids.insert(7, vec![11, 12]);
+    app.playlist_track_indices.insert(7, vec![0, 0]);
+    app.playlists_expanded = true;
+    app.sync_selection();
+    app.selected_tree = app
+        .tree_entries()
+        .iter()
+        .position(|entry| matches!(entry, TreeEntry::Playlist { playlist_id: 7, .. }))
+        .unwrap();
+    app.sync_selection();
+    app.selected_track_row = 1;
+
+    app.sync_selection_preserving_browser_selection();
+
+    assert!(matches!(
+        app.track_rows().get(app.selected_track_row),
+        Some(TrackRow::PlaylistTrack {
+            playlist_track_id: 12,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn playlist_playback_does_not_mark_library_track_row_current() {
     let mut app = test_app(vec![test_track(1, "looped track")]);
     app.playlists = vec![db::Playlist {
@@ -3854,6 +3979,136 @@ fn play_entry_starts_player_backend() {
 
     assert_eq!(app.player.state(), PlaybackState::Playing);
     assert_eq!(app.logical_state(), PlaybackState::Playing);
+}
+
+#[test]
+fn failed_record_play_during_stop_retains_current_for_retry() {
+    let conn = test_conn();
+    db::upsert_track(
+        &conn,
+        &test_track_metadata("/tmp/first.flac", "first track", 1),
+    )
+    .unwrap();
+    let track = db::library_tracks(&conn)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let mut app = test_app(vec![track.clone()]);
+    let mut invalid_track = track.clone();
+    invalid_track.location_id += 1_000;
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: invalid_track,
+        last_position_ms: 50_000,
+        listened_ms: 50_000,
+    });
+    app.suspended_position_ms = Some(50_000);
+
+    assert!(app.stop_current(&conn).is_err());
+    assert!(app.current.is_some());
+    assert_eq!(app.suspended_position_ms, Some(50_000));
+
+    app.current.as_mut().unwrap().track.location_id = track.location_id;
+    app.stop_current(&conn).unwrap();
+
+    assert!(app.current.is_none());
+    assert_eq!(app.suspended_position_ms, None);
+}
+
+#[test]
+fn failed_record_play_during_shutdown_retains_current_for_retry() {
+    let conn = test_conn();
+    db::upsert_track(
+        &conn,
+        &test_track_metadata("/tmp/first.flac", "first track", 1),
+    )
+    .unwrap();
+    let track = db::library_tracks(&conn)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let mut app = test_app(vec![track.clone()]);
+    let mut invalid_track = track.clone();
+    invalid_track.location_id += 1_000;
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: invalid_track,
+        last_position_ms: 50_000,
+        listened_ms: 50_000,
+    });
+    app.suspended_position_ms = Some(50_000);
+
+    assert!(app.shutdown(&conn).is_err());
+    assert!(app.current.is_some());
+    assert_eq!(app.suspended_position_ms, Some(50_000));
+
+    app.current.as_mut().unwrap().track.location_id = track.location_id;
+    app.shutdown(&conn).unwrap();
+
+    assert!(app.current.is_none());
+    assert_eq!(app.suspended_position_ms, None);
+}
+
+#[test]
+fn quit_keys_signal_exit_without_immediate_shutdown() {
+    let conn = test_conn();
+    for key in [
+        KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    ] {
+        let mut app = test_app(vec![test_track(1, "first track")]);
+        app.current = Some(PlayingTrack {
+            index: 0,
+            source: None,
+            track: app.tracks[0].clone(),
+            last_position_ms: 0,
+            listened_ms: 0,
+        });
+        app.player.play().unwrap();
+
+        assert!(app.handle_key(&conn, key).unwrap());
+        assert!(app.current.is_some());
+        assert_eq!(app.player.state(), PlaybackState::Playing);
+    }
+}
+
+#[test]
+fn failed_replacement_track_load_publishes_stopped_integration_snapshot() {
+    let conn = test_conn();
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut app = test_app(vec![
+        test_track(1, "first track"),
+        test_track(2, "replacement track"),
+    ]);
+    app.player = Box::new(OutputFailedPlayer);
+    app.integration = Box::new(RecordingIntegration {
+        events: Rc::clone(&events),
+    });
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: app.tracks[0].clone(),
+        last_position_ms: 0,
+        listened_ms: 0,
+    });
+    app.suspended_position_ms = Some(0);
+
+    app.play_index(&conn, 1).unwrap();
+
+    assert!(app.current.is_none());
+    assert_eq!(
+        events.borrow().as_slice(),
+        &[IntegrationEvent::Playback(
+            crate::integration::PlaybackSnapshot {
+                state: PlaybackState::Stopped,
+                position_ms: 0,
+            }
+        )]
+    );
 }
 
 #[test]

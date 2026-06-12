@@ -25,14 +25,18 @@ pub fn add_library_root(
     paths: &AppPaths,
     root: &Path,
 ) -> Result<(PathBuf, ScanReport)> {
-    let root = canonical_root(root)?;
-    let report = scan_canonical_path(conn, paths, &root)?;
-    db::upsert_library_root(conn, &root)?;
-    db::mark_library_root_scanned(conn, &root)?;
-    Ok((root, report))
+    reconcile_library_root(conn, paths, root)
 }
 
 pub fn update_library_root(
+    conn: &Connection,
+    paths: &AppPaths,
+    root: &Path,
+) -> Result<(PathBuf, ScanReport)> {
+    reconcile_library_root(conn, paths, root)
+}
+
+fn reconcile_library_root(
     conn: &Connection,
     paths: &AppPaths,
     root: &Path,
@@ -44,25 +48,31 @@ pub fn update_library_root(
     Ok((root, report))
 }
 
-pub fn rescan_path(conn: &Connection, paths: &AppPaths, root: &Path) -> Result<ScanReport> {
+pub(crate) fn rescan_path_deferred_merge(
+    conn: &Connection,
+    paths: &AppPaths,
+    root: &Path,
+) -> Result<ScanReport> {
     let root = canonical_root(root)?;
-    rescan_canonical_path(conn, paths, &root)
-}
-
-fn scan_canonical_path(conn: &Connection, paths: &AppPaths, root: &Path) -> Result<ScanReport> {
-    let mut report = ScanReport::default();
-    let mut seen_paths = Vec::new();
-    scan_inner(conn, paths, root, &mut report, &mut seen_paths)?;
-    Ok(report)
+    reconcile_canonical_path(conn, paths, &root)
 }
 
 fn rescan_canonical_path(conn: &Connection, paths: &AppPaths, root: &Path) -> Result<ScanReport> {
+    let mut report = reconcile_canonical_path(conn, paths, root)?;
+    report.duplicate_tracks_merged = db::merge_similar_media_items(conn)?;
+    Ok(report)
+}
+
+fn reconcile_canonical_path(
+    conn: &Connection,
+    paths: &AppPaths,
+    root: &Path,
+) -> Result<ScanReport> {
     let mut report = ScanReport::default();
     let mut seen_paths = Vec::new();
     scan_inner(conn, paths, root, &mut report, &mut seen_paths)?;
     report.files_marked_missing =
         db::mark_locations_missing_under_root_except(conn, root, &seen_paths)?;
-    report.duplicate_tracks_merged = db::merge_similar_media_items(conn)?;
     Ok(report)
 }
 
@@ -118,9 +128,15 @@ fn scan_inner(
         Ok(track) => {
             let stored = db::upsert_track(conn, &track)?;
             report.tracks_stored += 1;
-            if let Some(cover_path) = art::cache_cover_for_track(&track, &paths.art_dir)? {
-                db::set_cover_path(conn, stored.media_item_id, &cover_path)?;
-                report.art_cached += 1;
+            match art::cache_cover_for_track(&track, &paths.art_dir) {
+                Ok(Some(cover_path)) => {
+                    db::set_cover_path(conn, stored.media_item_id, &cover_path)?;
+                    report.art_cached += 1;
+                }
+                Ok(None) => {}
+                Err(error) => report
+                    .errors
+                    .push(format!("{}: caching cover art: {error:#}", path.display())),
             }
         }
         Err(error) => {
@@ -147,11 +163,51 @@ mod tests {
         db::upsert_track(&conn, &test_track_metadata(audio_path.clone())).unwrap();
         let paths = test_paths(data_dir.path().join("art"));
 
-        let report = rescan_path(&conn, &paths, &root).unwrap();
+        let report = rescan_canonical_path(&conn, &paths, &root).unwrap();
 
         assert_eq!(report.files_seen, 1);
         assert_eq!(report.files_marked_missing, 0);
         assert_eq!(report.errors.len(), 1);
+        assert_eq!(db::library_tracks(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn repeated_add_marks_deleted_tracks_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let audio_path = root.join("song.wav");
+        write_test_wav(&audio_path);
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        let paths = test_paths(data_dir.path().join("art"));
+
+        add_library_root(&conn, &paths, &root).unwrap();
+        fs::remove_file(&audio_path).unwrap();
+        let (_, report) = add_library_root(&conn, &paths, &root).unwrap();
+
+        assert_eq!(report.files_marked_missing, 1);
+        assert!(db::library_tracks(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn artwork_cache_failure_is_reported_without_aborting_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let audio_path = root.join("song.wav");
+        write_test_wav(&audio_path);
+        fs::write(root.join("cover.jpg"), b"cover").unwrap();
+        let art_path = data_dir.path().join("art");
+        fs::write(&art_path, b"not a directory").unwrap();
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        let paths = test_paths(art_path);
+
+        let (_, report) = add_library_root(&conn, &paths, &root).unwrap();
+
+        assert_eq!(report.tracks_stored, 1);
+        assert_eq!(report.art_cached, 0);
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].contains("caching cover art"));
         assert_eq!(db::library_tracks(&conn).unwrap().len(), 1);
     }
 
@@ -165,7 +221,7 @@ mod tests {
         let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
         let paths = test_paths(data_dir.path().join("art"));
 
-        let report = scan_canonical_path(&conn, &paths, &root).unwrap();
+        let report = reconcile_canonical_path(&conn, &paths, &root).unwrap();
 
         assert_eq!(report.files_seen, 0);
         assert_eq!(report.files_skipped, 1);
@@ -205,5 +261,23 @@ mod tests {
             duration_ms: Some(120_000),
             compilation: false,
         }
+    }
+
+    fn write_test_wav(path: &Path) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&38_u32.to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&8_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&16_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&2_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_i16.to_le_bytes());
+        fs::write(path, bytes).unwrap();
     }
 }

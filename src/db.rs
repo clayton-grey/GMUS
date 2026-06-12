@@ -1120,7 +1120,6 @@ pub fn merge_similar_media_items(conn: &Connection) -> Result<usize> {
                 track_number,
                 disc_number,
                 duration_ms,
-                updated_at,
                 COALESCE(
                     (
                         SELECT library_roots.path
@@ -1155,9 +1154,8 @@ pub fn merge_similar_media_items(conn: &Connection) -> Result<usize> {
                 track_number: row.get(5)?,
                 disc_number: row.get(6)?,
                 duration_ms: row.get(7)?,
-                updated_at: row.get(8)?,
-                library_root: row.get(9)?,
-                present_locations: row.get(10)?,
+                library_root: row.get(8)?,
+                present_locations: row.get(9)?,
             })
         })?;
 
@@ -1170,19 +1168,24 @@ pub fn merge_similar_media_items(conn: &Connection) -> Result<usize> {
     }
 
     let mut merged = 0;
-    for mut candidates in groups
+    for candidates in groups
         .into_values()
         .filter(|candidates| candidates.len() > 1)
     {
-        candidates.sort_by(|left, right| {
-            right
-                .present_locations
-                .cmp(&left.present_locations)
-                .then_with(|| right.updated_at.cmp(&left.updated_at))
-                .then_with(|| right.id.cmp(&left.id))
-        });
-        let canonical_id = candidates[0].id;
-        for duplicate in candidates.into_iter().skip(1) {
+        let mut present = candidates
+            .iter()
+            .filter(|candidate| candidate.present_locations > 0);
+        let Some(canonical_id) = present.next().map(|candidate| candidate.id) else {
+            continue;
+        };
+        if present.next().is_some() {
+            continue;
+        }
+
+        for duplicate in candidates
+            .into_iter()
+            .filter(|candidate| candidate.present_locations == 0)
+        {
             merge_media_item(&tx, canonical_id, duplicate.id)?;
             merged += 1;
         }
@@ -1201,7 +1204,6 @@ struct MergeCandidate {
     track_number: Option<i64>,
     disc_number: Option<i64>,
     duration_ms: Option<i64>,
-    updated_at: i64,
     library_root: String,
     present_locations: i64,
 }
@@ -1335,6 +1337,21 @@ pub fn record_play(
     completed: bool,
 ) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
+    let location_matches_media_item: bool = tx.query_row(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM locations
+            WHERE id = ?1 AND media_item_id = ?2
+        )
+        "#,
+        params![location_id, media_item_id],
+        |row| row.get(0),
+    )?;
+    if !location_matches_media_item {
+        anyhow::bail!("location {location_id} does not belong to media item {media_item_id}");
+    }
+
     let now = now_unix();
     let completed_i64 = i64::from(completed);
     tx.execute(
@@ -2094,6 +2111,70 @@ mod tests {
         assert_eq!(
             playlist_track_ids(&conn, playlist.id).unwrap(),
             vec![renamed_stored.media_item_id]
+        );
+    }
+
+    #[test]
+    fn merge_similar_media_items_refuses_groups_with_multiple_present_candidates() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let first = test_track_metadata("/tmp/music/first.flac", "Same Track", 1, 120_000);
+        let second = test_track_metadata("/tmp/music/second.flac", "Same Track", 1, 121_000);
+
+        upsert_track(&conn, &first).unwrap();
+        upsert_track(&conn, &second).unwrap();
+
+        let merged = merge_similar_media_items(&conn).unwrap();
+
+        assert_eq!(merged, 0);
+        assert_eq!(stats(&conn).unwrap().media_items, 2);
+        assert_eq!(library_tracks(&conn).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn merge_similar_media_items_refuses_groups_without_a_present_candidate() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let first = test_track_metadata("/tmp/music/first.flac", "Same Track", 1, 120_000);
+        let second = test_track_metadata("/tmp/music/second.flac", "Same Track", 1, 121_000);
+
+        upsert_track(&conn, &first).unwrap();
+        upsert_track(&conn, &second).unwrap();
+        mark_locations_missing_under_root(&conn, Path::new("/tmp/music")).unwrap();
+
+        let merged = merge_similar_media_items(&conn).unwrap();
+
+        assert_eq!(merged, 0);
+        assert_eq!(stats(&conn).unwrap().media_items, 2);
+        assert!(library_tracks(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn record_play_rejects_location_from_another_media_item() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let first = test_track_metadata("/tmp/music/first.flac", "First Track", 1, 120_000);
+        let second = test_track_metadata("/tmp/music/second.flac", "Second Track", 2, 120_000);
+        let first_stored = upsert_track(&conn, &first).unwrap();
+        let second_stored = upsert_track(&conn, &second).unwrap();
+
+        let error = record_play(
+            &conn,
+            first_stored.media_item_id,
+            second_stored.location_id,
+            120_000,
+            true,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("does not belong"));
+        assert_eq!(stats(&conn).unwrap().play_events, 0);
+        assert_eq!(
+            media_stats_row(&conn, first_stored.media_item_id)
+                .unwrap()
+                .unwrap()
+                .play_count,
+            0
         );
     }
 

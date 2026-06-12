@@ -152,9 +152,12 @@ fn main() -> Result<()> {
             let mut player = player::default_player_backend()?;
             player.load_and_play(&path)?;
             player.sleep_until_end();
+            if player.output_failed() {
+                anyhow::bail!("audio output disconnected while playing {}", path.display());
+            }
 
             let mut played_ms = player.position().as_millis() as i64;
-            if player.is_finished() && !player.output_failed() {
+            if player.is_finished() {
                 if let Some(duration_ms) = track.duration_ms {
                     played_ms = played_ms.max(duration_ms);
                 }

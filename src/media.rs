@@ -4,7 +4,7 @@ use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
 use lofty::file::{AudioFile, TaggedFileExt};
-use lofty::picture::PictureType;
+use lofty::picture::{MimeType, PictureType};
 use lofty::prelude::Accessor;
 use lofty::tag::{ItemKey, Tag};
 use sha2::{Digest, Sha256};
@@ -38,27 +38,25 @@ pub struct TrackMetadata {
 
 impl TrackMetadata {
     pub fn fingerprint(&self) -> String {
-        let mut basis = String::new();
+        let mut basis = Vec::new();
         if self.title.is_some() || self.artist.is_some() || self.album.is_some() {
-            basis.push_str("tags:v1:");
-            push_norm(
+            basis.extend_from_slice(b"tags:v2");
+            push_norm_field(
                 &mut basis,
                 self.album_artist.as_deref().or(self.artist.as_deref()),
             );
-            push_norm(&mut basis, self.album.as_deref());
-            push_norm(&mut basis, self.title.as_deref());
-            basis.push_str(&self.duration_ms.unwrap_or_default().to_string());
+            push_norm_field(&mut basis, self.album.as_deref());
+            push_norm_field(&mut basis, self.title.as_deref());
+            push_optional_i64(&mut basis, self.duration_ms);
         } else {
-            basis.push_str("file:v1:");
-            basis.push_str(&self.file_size.to_string());
-            basis.push(':');
-            basis.push_str(&self.modified_at.unwrap_or_default().to_string());
-            basis.push(':');
-            basis.push_str(&self.path.to_string_lossy());
+            basis.extend_from_slice(b"file:v2");
+            push_i64(&mut basis, self.file_size);
+            push_optional_i64(&mut basis, self.modified_at);
+            push_bytes(&mut basis, self.path.to_string_lossy().as_bytes());
         }
 
         let mut hasher = Sha256::new();
-        hasher.update(basis.as_bytes());
+        hasher.update(&basis);
         hex::encode(hasher.finalize())
     }
 }
@@ -131,25 +129,27 @@ pub fn is_audio_path(path: &Path) -> bool {
     )
 }
 
-fn extension_for_mime(mime: Option<&lofty::picture::MimeType>) -> Option<&'static str> {
-    let mime = mime?;
-    let debug = format!("{mime:?}").to_ascii_lowercase();
-    if debug.contains("jpeg") || debug.contains("jpg") {
-        Some("jpg")
-    } else if debug.contains("png") {
-        Some("png")
-    } else if debug.contains("webp") {
-        Some("webp")
-    } else {
-        None
+fn extension_for_mime(mime: Option<&MimeType>) -> Option<&'static str> {
+    match mime?.as_str().to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/png" => Some("png"),
+        "image/webp" => Some("webp"),
+        _ => None,
     }
 }
 
 fn embedded_art_from_tag(tag: Option<&Tag>) -> Option<EmbeddedArt> {
     tag.and_then(|tag| {
-        tag.get_picture_type(PictureType::CoverFront)
-            .or_else(|| tag.pictures().first())
-            .and_then(|picture| {
+        let pictures = tag.pictures();
+        pictures
+            .iter()
+            .filter(|picture| picture.pic_type() == PictureType::CoverFront)
+            .chain(
+                pictures
+                    .iter()
+                    .filter(|picture| picture.pic_type() != PictureType::CoverFront),
+            )
+            .find_map(|picture| {
                 extension_for_mime(picture.mime_type()).map(|extension| (picture, extension))
             })
             .map(|(picture, extension)| EmbeddedArt {
@@ -212,21 +212,110 @@ fn parse_year(value: &str) -> Option<i64> {
     })
 }
 
-fn push_norm(out: &mut String, value: Option<&str>) {
-    out.push(':');
-    if let Some(value) = value {
-        out.push_str(&value.trim().to_ascii_lowercase());
+fn push_norm_field(out: &mut Vec<u8>, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            out.push(1);
+            push_bytes(out, value.trim().to_ascii_lowercase().as_bytes());
+        }
+        None => out.push(0),
     }
+}
+
+fn push_optional_i64(out: &mut Vec<u8>, value: Option<i64>) {
+    match value {
+        Some(value) => {
+            out.push(1);
+            push_i64(out, value);
+        }
+        None => out.push(0),
+    }
+}
+
+fn push_i64(out: &mut Vec<u8>, value: i64) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn push_bytes(out: &mut Vec<u8>, value: &[u8]) {
+    out.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    out.extend_from_slice(value);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_year;
+    use super::{embedded_art_from_tag, parse_year, TrackMetadata};
+    use lofty::picture::{MimeType, Picture, PictureType};
+    use lofty::tag::{Tag, TagType};
+    use std::path::PathBuf;
 
     #[test]
     fn parses_year_from_tag_dates() {
         assert_eq!(parse_year("2018-05-11"), Some(2018));
         assert_eq!(parse_year("released 1997"), Some(1997));
         assert_eq!(parse_year("97"), None);
+    }
+
+    #[test]
+    fn fingerprint_distinguishes_tag_field_delimiter_collisions() {
+        let first = tagged_track(Some("artist:album"), Some("title"), Some(120_000));
+        let second = tagged_track(Some("artist"), Some("album:title"), Some(120_000));
+
+        assert_ne!(first.fingerprint(), second.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_distinguishes_title_duration_boundary_collisions() {
+        let first = tagged_track(Some("artist"), Some("title1"), Some(23));
+        let second = tagged_track(Some("artist"), Some("title"), Some(123));
+
+        assert_ne!(first.fingerprint(), second.fingerprint());
+    }
+
+    #[test]
+    fn embedded_art_falls_back_when_front_cover_mime_is_unsupported() {
+        let mut tag = Tag::new(TagType::Id3v2);
+        tag.push_picture(
+            Picture::unchecked(vec![1])
+                .pic_type(PictureType::CoverFront)
+                .mime_type(MimeType::Gif)
+                .build(),
+        );
+        tag.push_picture(
+            Picture::unchecked(vec![2])
+                .pic_type(PictureType::CoverBack)
+                .mime_type(MimeType::Png)
+                .build(),
+        );
+
+        let art = embedded_art_from_tag(Some(&tag)).unwrap();
+
+        assert_eq!(art.extension, "png");
+        assert_eq!(art.bytes, vec![2]);
+    }
+
+    fn tagged_track(
+        artist: Option<&str>,
+        title: Option<&str>,
+        duration_ms: Option<i64>,
+    ) -> TrackMetadata {
+        TrackMetadata {
+            path: PathBuf::from("/tmp/song.flac"),
+            file_size: 10,
+            modified_at: Some(1),
+            title: title.map(str::to_owned),
+            artist: artist.map(str::to_owned),
+            album: Some("album".into()),
+            album_artist: None,
+            album_year: None,
+            release_date: None,
+            composer: None,
+            genre: None,
+            track_number: None,
+            track_total: None,
+            disc_number: None,
+            disc_total: None,
+            duration_ms,
+            compilation: false,
+        }
     }
 }

@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -19,7 +19,14 @@ impl AppPaths {
     }
 
     pub fn resolve_without_creating_dirs(db_override: Option<PathBuf>) -> Result<Self> {
-        let data_dir = default_data_dir()?;
+        let data_dir = match db_override.as_deref() {
+            Some(path) => path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf(),
+            None => default_data_dir()?,
+        };
         let db_path = db_override.unwrap_or_else(|| data_dir.join("gmus.sqlite3"));
         let art_dir = db_path
             .parent()
@@ -68,6 +75,8 @@ fn home_dir() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::AppPaths;
 
     #[test]
@@ -78,6 +87,7 @@ mod tests {
         let paths = AppPaths::resolve_without_creating_dirs(Some(db_path.clone())).unwrap();
 
         assert_eq!(paths.db_path, db_path);
+        assert_eq!(paths.data_dir, dir.path().join("nested"));
         assert_eq!(paths.art_dir, dir.path().join("nested").join("art"));
         assert!(!dir.path().join("nested").exists());
     }
@@ -94,5 +104,14 @@ mod tests {
 
         assert!(paths.db_path.parent().unwrap().is_dir());
         assert!(paths.art_dir.is_dir());
+    }
+
+    #[test]
+    fn relative_db_override_uses_current_directory_as_data_dir() {
+        let paths =
+            AppPaths::resolve_without_creating_dirs(Some(PathBuf::from("gmus.sqlite3"))).unwrap();
+
+        assert_eq!(paths.data_dir, PathBuf::from("."));
+        assert_eq!(paths.art_dir, PathBuf::from("art"));
     }
 }

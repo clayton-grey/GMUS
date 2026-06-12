@@ -195,27 +195,27 @@ impl App {
         let mut album_durations = HashMap::new();
         let mut album_years = HashMap::new();
         let mut album_discs = HashMap::new();
-        for track in &self.tracks {
-            if tree_entry_matches_track(&entry, track) {
-                let album_key = track_album_key(track);
-                *album_durations.entry(album_key.clone()).or_insert(0) +=
-                    track.duration_ms.unwrap_or(0);
-                let album_year = album_years.entry(album_key.clone()).or_insert(None);
-                if album_year.is_none() {
-                    *album_year = track.album_year;
-                }
-                if let Some(disc_number) = track.disc_number {
-                    album_discs
-                        .entry(album_key)
-                        .or_insert_with(HashSet::new)
-                        .insert(disc_number);
-                }
+        let track_indices = self.track_indices_for_entry(&entry);
+        for &index in &track_indices {
+            let track = &self.tracks[index];
+            let album_key = track_album_key(track);
+            *album_durations.entry(album_key.clone()).or_insert(0) +=
+                track.duration_ms.unwrap_or(0);
+            let album_year = album_years.entry(album_key.clone()).or_insert(None);
+            if album_year.is_none() {
+                *album_year = track.album_year;
+            }
+            if let Some(disc_number) = track.disc_number {
+                album_discs
+                    .entry(album_key)
+                    .or_insert_with(HashSet::new)
+                    .insert(disc_number);
             }
         }
 
         let mut current_album: Option<String> = None;
         let mut current_disc: Option<i64> = None;
-        for index in self.track_indices_for_entry(&entry) {
+        for index in track_indices {
             let track = &self.tracks[index];
             let album_key = track_album_key(track);
             let album = track.tree_album().to_string();
