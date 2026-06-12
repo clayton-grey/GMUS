@@ -63,13 +63,22 @@ than the immediate reliability payoff justified.
   focus into one `CommandOutputState` with centralized show, clear, and movement
   behavior.
 
+## Completed In The Fifth Pass
+
+- Extracted catalog queries, path-first upserts, location reconciliation,
+  identity splitting and merging, cover ownership, and media-stat repair into
+  one cohesive `db::catalog` implementation module.
+- Reduced production `db.rs` to the stable public facade, connection setup,
+  shared time/formatting utilities, and cross-domain integration tests.
+- Kept migration access limited to the single legacy-location split hook and
+  kept catalog reconciliation details private.
+
 ## Next Structural Pass
 
 - Continue grouping the large TUI `App` state into browser, playlist, input,
   playback, and layout state objects while preserving the coordinator API.
-- Extract the cohesive catalog and identity implementation from the `db`
-  facade after its cross-table tests are ready to move with it.
-- Split the large TUI test module by concern after the state boundaries settle.
+- Begin splitting the large TUI test module by concern while preserving shared
+  fixtures and the private coordinator test surface.
 
 ## Later Reliability And Performance Work
 
