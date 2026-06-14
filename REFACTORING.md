@@ -73,12 +73,105 @@ than the immediate reliability payoff justified.
 - Kept migration access limited to the single legacy-location split hook and
   kept catalog reconciliation details private.
 
-## Next Structural Pass
+## Completed In The Sixth Pass
 
-- Continue grouping the large TUI `App` state into browser, playlist, input,
-  playback, and layout state objects while preserving the coordinator API.
-- Begin splitting the large TUI test module by concern while preserving shared
-  fixtures and the private coordinator test surface.
+- Began splitting the oversized TUI test suite by moving the filter query,
+  rendering, persistence, confirmation, and clearing tests into a focused
+  `tui::tests::filter` submodule.
+- Preserved shared TUI test fixtures and private coordinator access in the
+  parent test module without widening production visibility.
+
+## Completed In The Seventh Pass
+
+- Grouped playback target, continuous, repeat, shuffle, and cached shuffle
+  permutation state into one private `PlaybackModeState`.
+- Moved ordered and shuffled sequence navigation into the playback mode state
+  while keeping playable-sequence assembly and user-facing toggle coordination
+  on `App`.
+- Kept mode rendering and tests on narrow state queries instead of exposing
+  playback policy fields.
+
+## Completed In The Eighth Pass
+
+- Moved command execution, rate input, command output, scan-job command, and
+  completion tests into a focused `tui::tests::command` submodule.
+- Moved the deterministic shuffle permutation mechanics test beside the private
+  playback mode implementation, avoiding test-only state setters and cache
+  accessors.
+- Continued sharing parent TUI fixtures without widening production
+  visibility.
+
+## Completed In The Ninth Pass
+
+- Grouped info visibility, startup overlay visibility, pane offsets, and the
+  responsive column breakpoint into one private `LayoutState`.
+- Moved visibility transitions and clamped pane resizing into the layout state
+  while keeping input coordination, status messages, and persistence on
+  `App`.
+- Kept rendering, mouse hit-testing, commands, and tests on narrow layout
+  queries, with edge-invariant tests beside the implementation.
+
+## Completed In The Tenth Pass
+
+- Replaced the three independent command, filter, and rate mode flags with one
+  mutually exclusive `InputMode` owned by a private `InputState`.
+- Grouped command, filter, and rate buffers with their mode transitions while
+  preserving active filters across mode changes and clearing transient command
+  and rate input on entry.
+- Kept command execution, filter persistence, rate validation, rendering, and
+  input coordination in their existing modules behind narrow input-state
+  operations.
+
+## Completed In The Eleventh Pass
+
+- Grouped the library tree cursor, track-row cursor, and tree expansion policy
+  into one private `BrowserState`.
+- Moved cursor clamping, tree movement, and expansion snapshots behind narrow
+  browser-state operations.
+- Kept derived browser rows, playlist-panel selection, keymap selection, and
+  cross-pane focus outside the browser state because they have separate
+  ownership and transition rules; Ratatui list state remains presentation
+  state beside the other renderer-facing list states.
+
+## Completed In The Twelfth Pass
+
+- Grouped playlist-panel cursor, expansion, and active-playlist status into one
+  private `PlaylistPanelState`.
+- Moved row movement and clamping, active-playlist updates, expansion
+  transitions, and playlist-content behavior behind narrow state operations.
+- Kept playlist cache and derived entries, Ratatui list state, cross-pane
+  focus, and shared management-panel visibility outside the playlist state
+  because they require separate coordination.
+
+## Completed In The Thirteenth Pass
+
+- Grouped keymap-panel cursor and capture state into one private
+  `KeymapPanelState` while keeping persisted binding configuration separate.
+- Made persisted duplicate and noncanonical key cleanup and custom-key dispatch
+  deterministic, with resets reclaiming any shadowed default keys.
+- Kept keymap rendering consistent with effective dispatch when a custom
+  binding shadows another action's default key.
+
+## Completed In The Fourteenth Pass
+
+- Centralized playlist, keymap, and track-info visibility transitions in one
+  private `ManagementPanelState`, making the two management panels mutually
+  exclusive and cancelling key capture whenever keymap visibility ends.
+- Moved shared presentation visibility and layout queries out of the filter
+  module, and moved track-info panel coordination beside management-panel
+  ownership.
+- Split the large TUI behavior suite into command, filter, keymap, playlist,
+  playback, browser, persistence, and presentation modules, leaving the parent
+  test module as shared fixture support.
+
+## TUI Structural Refactoring Complete
+
+- Remaining coordinator fields are model/cache data, Ratatui presentation
+  state, cross-pane focus, persisted preferences, playback session resources,
+  and status output. Further grouping would broaden ownership or lifecycle
+  changes without a clear structural payoff.
+- Continue future TUI work from concrete feature, reliability, accessibility,
+  or performance needs rather than field-count reduction.
 
 ## Later Reliability And Performance Work
 

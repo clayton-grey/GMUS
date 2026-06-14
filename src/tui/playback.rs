@@ -37,6 +37,202 @@ impl PlayTarget {
     }
 }
 
+pub(super) struct PlaybackModeState {
+    target: PlayTarget,
+    continuous: bool,
+    repeat: bool,
+    shuffle: bool,
+    shuffle_seed: u64,
+    shuffle_scope: Vec<PlaybackEntry>,
+    shuffle_order: Vec<PlaybackEntry>,
+}
+
+impl Default for PlaybackModeState {
+    fn default() -> Self {
+        Self {
+            target: PlayTarget::Library,
+            continuous: true,
+            repeat: false,
+            shuffle: false,
+            shuffle_seed: 0x476d_7573_2026_0528,
+            shuffle_scope: Vec::new(),
+            shuffle_order: Vec::new(),
+        }
+    }
+}
+
+impl PlaybackModeState {
+    pub(super) fn target(&self) -> PlayTarget {
+        self.target
+    }
+
+    pub(super) fn continuous(&self) -> bool {
+        self.continuous
+    }
+
+    pub(super) fn repeat(&self) -> bool {
+        self.repeat
+    }
+
+    pub(super) fn shuffle(&self) -> bool {
+        self.shuffle
+    }
+
+    pub(super) fn advance_target(&mut self) -> PlayTarget {
+        self.target = self.target.next();
+        self.reset_sequence();
+        self.target
+    }
+
+    pub(super) fn toggle_continuous(&mut self) -> bool {
+        self.continuous = !self.continuous;
+        self.continuous
+    }
+
+    pub(super) fn toggle_repeat(&mut self) -> bool {
+        self.repeat = !self.repeat;
+        self.repeat
+    }
+
+    pub(super) fn toggle_shuffle(&mut self) -> bool {
+        self.shuffle = !self.shuffle;
+        self.reset_sequence();
+        self.shuffle
+    }
+
+    pub(super) fn reset_sequence(&mut self) {
+        self.shuffle_scope.clear();
+        self.shuffle_order.clear();
+    }
+
+    fn next_entry(
+        &mut self,
+        sequence: &[PlaybackEntry],
+        anchor: Option<PlaybackEntry>,
+        selected: Option<PlaybackEntry>,
+        direction: i32,
+    ) -> Option<PlaybackEntry> {
+        if self.shuffle {
+            self.next_shuffle_entry(sequence, anchor, selected, direction)
+        } else {
+            self.next_ordered_entry(sequence, anchor, selected, direction)
+        }
+    }
+
+    fn next_ordered_entry(
+        &self,
+        sequence: &[PlaybackEntry],
+        anchor: Option<PlaybackEntry>,
+        selected: Option<PlaybackEntry>,
+        direction: i32,
+    ) -> Option<PlaybackEntry> {
+        if let Some(anchor) = anchor {
+            if let Some(position) = sequence
+                .iter()
+                .position(|entry| playback_entries_match(*entry, anchor))
+            {
+                return if direction >= 0 {
+                    sequence
+                        .get(position + 1)
+                        .copied()
+                        .or_else(|| self.repeat.then(|| sequence[0]))
+                } else {
+                    position
+                        .checked_sub(1)
+                        .and_then(|position| sequence.get(position).copied())
+                        .or_else(|| self.repeat.then(|| sequence[sequence.len() - 1]))
+                };
+            }
+
+            if let Some(selected) = selected.filter(|selected| sequence.contains(selected)) {
+                return Some(selected);
+            }
+        }
+
+        if direction >= 0 {
+            sequence.first().copied()
+        } else {
+            sequence.last().copied()
+        }
+    }
+
+    fn next_shuffle_entry(
+        &mut self,
+        sequence: &[PlaybackEntry],
+        anchor: Option<PlaybackEntry>,
+        selected: Option<PlaybackEntry>,
+        direction: i32,
+    ) -> Option<PlaybackEntry> {
+        self.ensure_shuffle_order(sequence);
+        if self.shuffle_order.is_empty() {
+            return None;
+        }
+
+        if let Some(anchor) = anchor {
+            if let Some(position) = self
+                .shuffle_order
+                .iter()
+                .position(|entry| playback_entries_match(*entry, anchor))
+            {
+                return if direction >= 0 {
+                    self.shuffle_order.get(position + 1).copied().or_else(|| {
+                        if self.repeat {
+                            self.rebuild_shuffle_order(sequence);
+                            self.shuffle_order.first().copied()
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    position
+                        .checked_sub(1)
+                        .and_then(|position| self.shuffle_order.get(position).copied())
+                        .or_else(|| {
+                            if self.repeat {
+                                self.shuffle_order.last().copied()
+                            } else {
+                                None
+                            }
+                        })
+                };
+            }
+
+            if let Some(selected) = selected.filter(|selected| sequence.contains(selected)) {
+                return Some(selected);
+            }
+        }
+
+        if direction >= 0 {
+            self.shuffle_order.first().copied()
+        } else {
+            self.shuffle_order.last().copied()
+        }
+    }
+
+    fn ensure_shuffle_order(&mut self, sequence: &[PlaybackEntry]) {
+        if self.shuffle_scope != sequence {
+            self.rebuild_shuffle_order(sequence);
+        }
+    }
+
+    fn rebuild_shuffle_order(&mut self, sequence: &[PlaybackEntry]) {
+        self.shuffle_scope = sequence.to_vec();
+        self.shuffle_order = sequence.to_vec();
+        for index in (1..self.shuffle_order.len()).rev() {
+            let swap_with = (self.next_shuffle_u64() as usize) % (index + 1);
+            self.shuffle_order.swap(index, swap_with);
+        }
+    }
+
+    fn next_shuffle_u64(&mut self) -> u64 {
+        self.shuffle_seed = self
+            .shuffle_seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        self.shuffle_seed
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct PlayingTrack {
     pub(super) index: usize,
@@ -456,14 +652,14 @@ impl App {
     pub(super) fn selected_playback_entry(&self) -> Option<PlaybackEntry> {
         let rows = self.track_rows();
         if let Some(entry) = rows
-            .get(self.selected_track_row)
+            .get(self.browser.selected_track_row())
             .and_then(track_row_playback_entry)
         {
             return Some(entry);
         }
 
         rows.iter()
-            .skip(self.selected_track_row)
+            .skip(self.browser.selected_track_row())
             .find_map(track_row_playback_entry)
             .or_else(|| rows.iter().rev().find_map(track_row_playback_entry))
     }
@@ -494,117 +690,25 @@ impl App {
         }
 
         let anchor = self.playback_anchor_entry();
-        if self.shuffle {
-            return self.next_shuffle_playback_index(&sequence, anchor, direction);
-        }
-
-        self.next_ordered_playback_index(&sequence, anchor, direction)
+        let selected = anchor
+            .filter(|anchor| !playback_sequence_contains_anchor(&sequence, *anchor))
+            .and_then(|_| self.selected_playback_entry());
+        self.playback_mode
+            .next_entry(&sequence, anchor, selected, direction)
     }
 
     pub(super) fn next_auto_advance_entry(&mut self) -> Option<PlaybackEntry> {
-        self.continuous
-            .then(|| self.next_playback_entry(1))
-            .flatten()
+        if self.playback_mode.continuous() {
+            self.next_playback_entry(1)
+        } else {
+            None
+        }
     }
 
     #[cfg(test)]
     pub(super) fn next_auto_advance_index(&mut self) -> Option<usize> {
         self.next_auto_advance_entry()
             .map(|entry| entry.track_index)
-    }
-
-    fn next_ordered_playback_index(
-        &self,
-        sequence: &[PlaybackEntry],
-        anchor: Option<PlaybackEntry>,
-        direction: i32,
-    ) -> Option<PlaybackEntry> {
-        if let Some(anchor) = anchor {
-            if let Some(position) = sequence
-                .iter()
-                .position(|entry| playback_entries_match(*entry, anchor))
-            {
-                return if direction >= 0 {
-                    sequence
-                        .get(position + 1)
-                        .copied()
-                        .or_else(|| self.repeat.then(|| sequence[0]))
-                } else {
-                    position
-                        .checked_sub(1)
-                        .and_then(|position| sequence.get(position).copied())
-                        .or_else(|| self.repeat.then(|| sequence[sequence.len() - 1]))
-                };
-            }
-
-            if let Some(selected) = self
-                .selected_playback_entry()
-                .filter(|selected| sequence.contains(selected))
-            {
-                return Some(selected);
-            }
-        }
-
-        if direction >= 0 {
-            sequence.first().copied()
-        } else {
-            sequence.last().copied()
-        }
-    }
-
-    fn next_shuffle_playback_index(
-        &mut self,
-        sequence: &[PlaybackEntry],
-        anchor: Option<PlaybackEntry>,
-        direction: i32,
-    ) -> Option<PlaybackEntry> {
-        self.ensure_shuffle_order(sequence);
-        if self.shuffle_order.is_empty() {
-            return None;
-        }
-
-        if let Some(anchor) = anchor {
-            if let Some(position) = self
-                .shuffle_order
-                .iter()
-                .position(|entry| playback_entries_match(*entry, anchor))
-            {
-                return if direction >= 0 {
-                    self.shuffle_order.get(position + 1).copied().or_else(|| {
-                        if self.repeat {
-                            self.rebuild_shuffle_order(sequence);
-                            self.shuffle_order.first().copied()
-                        } else {
-                            None
-                        }
-                    })
-                } else {
-                    position
-                        .checked_sub(1)
-                        .and_then(|position| self.shuffle_order.get(position).copied())
-                        .or_else(|| {
-                            if self.repeat {
-                                self.shuffle_order.last().copied()
-                            } else {
-                                None
-                            }
-                        })
-                };
-            }
-
-            if let Some(selected) = self
-                .selected_playback_entry()
-                .filter(|selected| sequence.contains(selected))
-            {
-                return Some(selected);
-            }
-        }
-
-        if direction >= 0 {
-            self.shuffle_order.first().copied()
-        } else {
-            self.shuffle_order.last().copied()
-        }
     }
 
     #[cfg(test)]
@@ -632,7 +736,7 @@ impl App {
             }
         }
 
-        match self.play_target {
+        match self.playback_mode.target() {
             PlayTarget::Library => self.library_playback_entries(),
             PlayTarget::Artist => self
                 .view
@@ -730,32 +834,8 @@ impl App {
         }
     }
 
-    fn ensure_shuffle_order(&mut self, sequence: &[PlaybackEntry]) {
-        if self.shuffle_scope != sequence {
-            self.rebuild_shuffle_order(sequence);
-        }
-    }
-
-    pub(super) fn rebuild_shuffle_order(&mut self, sequence: &[PlaybackEntry]) {
-        self.shuffle_scope = sequence.to_vec();
-        self.shuffle_order = sequence.to_vec();
-        for index in (1..self.shuffle_order.len()).rev() {
-            let swap_with = (self.next_shuffle_u64() as usize) % (index + 1);
-            self.shuffle_order.swap(index, swap_with);
-        }
-    }
-
     pub(super) fn reset_shuffle_order(&mut self) {
-        self.shuffle_scope.clear();
-        self.shuffle_order.clear();
-    }
-
-    fn next_shuffle_u64(&mut self) -> u64 {
-        self.shuffle_seed = self
-            .shuffle_seed
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.shuffle_seed
+        self.playback_mode.reset_sequence();
     }
 }
 
@@ -790,4 +870,87 @@ fn playback_sequence_contains_anchor(sequence: &[PlaybackEntry], anchor: Playbac
     sequence
         .iter()
         .any(|entry| playback_entries_match(*entry, anchor))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shuffle_uses_a_permuted_playback_order() {
+        let sequence = [
+            PlaybackEntry::library(0),
+            PlaybackEntry::library(1),
+            PlaybackEntry::library(2),
+        ];
+        let mut mode = PlaybackModeState {
+            shuffle: true,
+            shuffle_seed: 1,
+            ..PlaybackModeState::default()
+        };
+
+        let next = mode.next_entry(&sequence, None, None, 1);
+
+        assert!(next.is_some());
+        assert_eq!(mode.shuffle_scope, sequence);
+        assert_eq!(mode.shuffle_order.len(), 3);
+        assert_ne!(mode.shuffle_order, sequence);
+    }
+
+    #[test]
+    fn shuffle_repeat_rebuilds_forward_and_reuses_order_backward() {
+        let sequence = [
+            PlaybackEntry::library(0),
+            PlaybackEntry::library(1),
+            PlaybackEntry::library(2),
+        ];
+        let mut mode = PlaybackModeState {
+            repeat: true,
+            shuffle: true,
+            shuffle_seed: 1,
+            shuffle_scope: sequence.to_vec(),
+            shuffle_order: sequence.to_vec(),
+            ..PlaybackModeState::default()
+        };
+
+        let backward = mode.next_entry(&sequence, Some(sequence[0]), None, -1);
+        let seed_before_forward = mode.shuffle_seed;
+        let forward = mode.next_entry(&sequence, Some(sequence[2]), None, 1);
+
+        assert_eq!(backward, Some(sequence[2]));
+        assert_ne!(mode.shuffle_seed, seed_before_forward);
+        assert_eq!(forward, mode.shuffle_order.first().copied());
+    }
+
+    #[test]
+    fn target_and_shuffle_changes_invalidate_only_cached_order() {
+        let scope = vec![PlaybackEntry::library(0), PlaybackEntry::library(1)];
+        let seed = 7;
+        let mut mode = PlaybackModeState {
+            continuous: false,
+            repeat: true,
+            shuffle: true,
+            shuffle_seed: seed,
+            shuffle_scope: scope.clone(),
+            shuffle_order: scope.clone(),
+            ..PlaybackModeState::default()
+        };
+
+        assert_eq!(mode.advance_target(), PlayTarget::Artist);
+        assert!(mode.shuffle_scope.is_empty());
+        assert!(mode.shuffle_order.is_empty());
+        assert!(!mode.continuous);
+        assert!(mode.repeat);
+        assert!(mode.shuffle);
+        assert_eq!(mode.shuffle_seed, seed);
+
+        mode.shuffle_scope = scope.clone();
+        mode.shuffle_order = scope;
+
+        assert!(!mode.toggle_shuffle());
+        assert!(mode.shuffle_scope.is_empty());
+        assert!(mode.shuffle_order.is_empty());
+        assert_eq!(mode.target, PlayTarget::Artist);
+        assert_eq!(mode.shuffle_seed, seed);
+    }
 }

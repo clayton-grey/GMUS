@@ -7,11 +7,11 @@ use crate::db::{self, SavedPaneLayout};
 use super::command::{parse_playback_rate, playback_rate_message, RATE_USAGE};
 use super::keymap::KeyAction;
 use super::layout::{
-    clamp_info_panel_offset, clamp_library_pane_offset, info_panel_target_height,
-    library_pane_percent, INFO_PANE_STEP_ROWS, LIBRARY_PANE_STEP_PERCENT, WIDE_TREE_PERCENT,
+    info_panel_target_height, library_pane_percent, INFO_PANE_STEP_ROWS, LIBRARY_PANE_STEP_PERCENT,
+    WIDE_TREE_PERCENT,
 };
 use super::mouse::{mouse_pane, MouseLayout};
-use super::{App, FocusPane, TreeEntry};
+use super::{App, FocusPane, InputKind, TreeEntry};
 
 const SCRUB_SECONDS: i64 = 5;
 const MOUSE_SCROLL_LINES: usize = 1;
@@ -41,22 +41,15 @@ impl App {
         match pane {
             FocusPane::Tree => {
                 let len = self.tree_entries().len();
-                if len > 0 {
-                    if direction >= 0 {
-                        self.selected_tree = (self.selected_tree + amount).min(len - 1);
-                    } else {
-                        self.selected_tree = self.selected_tree.saturating_sub(amount);
-                    }
-                    self.selected_track_row = 0;
-                }
+                self.browser.move_tree_selection(direction, amount, len);
             }
             FocusPane::Tracks => {
                 for _ in 0..amount {
                     if let Some(row) = self.next_track_row(direction) {
-                        if row == self.selected_track_row {
+                        if row == self.browser.selected_track_row() {
                             break;
                         }
-                        self.selected_track_row = row;
+                        self.browser.select_track_row(row);
                     }
                 }
             }
@@ -69,8 +62,8 @@ impl App {
     pub(super) fn toggle_focus(&mut self) {
         self.focus = match self.focus {
             FocusPane::Tree => FocusPane::Tracks,
-            FocusPane::Tracks if self.playlist_panel_open => FocusPane::Playlist,
-            FocusPane::Tracks if self.keymap_panel_open => FocusPane::Keymap,
+            FocusPane::Tracks if self.management_panel.playlist_open() => FocusPane::Playlist,
+            FocusPane::Tracks if self.management_panel.keymap_open() => FocusPane::Keymap,
             FocusPane::Tracks | FocusPane::Playlist | FocusPane::Keymap => FocusPane::Tree,
         };
     }
@@ -116,16 +109,17 @@ impl App {
             return;
         };
         if matches!(entry, TreeEntry::Playlists | TreeEntry::Playlist { .. }) {
-            let collapsed = self.playlists_expanded;
-            self.playlists_expanded = !self.playlists_expanded;
+            let collapsed = self.browser.playlists_expanded();
+            let expanded = self.browser.toggle_playlists_expanded();
             if collapsed {
-                self.selected_tree = self
+                let position = self
                     .tree_entries()
                     .iter()
                     .position(|entry| matches!(entry, TreeEntry::Playlists))
-                    .unwrap_or(self.selected_tree);
+                    .unwrap_or(self.browser.selected_tree());
+                self.browser.select_tree(position);
             }
-            self.message = if self.playlists_expanded {
+            self.message = if expanded {
                 String::from("expanded Playlists")
             } else {
                 String::from("collapsed Playlists")
@@ -136,16 +130,17 @@ impl App {
             entry,
             TreeEntry::Compilation | TreeEntry::CompilationAlbum { .. }
         ) {
-            let collapsed = self.compilations_expanded;
-            self.compilations_expanded = !self.compilations_expanded;
+            let collapsed = self.browser.compilations_expanded();
+            let expanded = self.browser.toggle_compilations_expanded();
             if collapsed {
-                self.selected_tree = self
+                let position = self
                     .tree_entries()
                     .iter()
                     .position(|entry| matches!(entry, TreeEntry::Compilation))
-                    .unwrap_or(self.selected_tree);
+                    .unwrap_or(self.browser.selected_tree());
+                self.browser.select_tree(position);
             }
-            self.message = if self.compilations_expanded {
+            self.message = if expanded {
                 String::from("expanded Compilations")
             } else {
                 String::from("collapsed Compilations")
@@ -153,15 +148,16 @@ impl App {
             return;
         }
         let artist = entry.artist().to_string();
-        if self.expanded_artists.remove(&artist) {
-            self.selected_tree = self
+        if self.browser.collapse_artist(&artist) {
+            let position = self
                 .tree_entries()
                 .iter()
                 .position(|entry| matches!(entry, TreeEntry::Artist { artist: entry_artist } if entry_artist == &artist))
-                .unwrap_or(self.selected_tree);
+                .unwrap_or(self.browser.selected_tree());
+            self.browser.select_tree(position);
             self.message = format!("collapsed {artist}");
         } else {
-            self.expanded_artists.insert(artist.clone());
+            self.browser.expand_artist(artist.clone());
             self.message = format!("expanded {artist}");
         }
     }
@@ -173,19 +169,18 @@ impl App {
             return Ok(true);
         }
 
-        if self.keymap_capture_action.is_some() {
+        if self.management_panel.keymap.is_capturing() {
             self.capture_key_binding(conn, key)?;
             return Ok(false);
         }
 
-        if self.command_mode {
+        if self.input.kind() == InputKind::Command {
             match key.code {
                 KeyCode::Esc => {
-                    self.command_mode = false;
-                    self.command.clear();
+                    self.input.cancel_command();
                     if self.clear_command_output() {
                         self.message = String::from("output cleared");
-                    } else if self.filter.is_empty() {
+                    } else if self.input.filter().is_empty() {
                         self.message = String::from("command cancelled");
                     } else {
                         self.clear_filter(conn)?;
@@ -193,44 +188,38 @@ impl App {
                 }
                 KeyCode::Enter => self.submit_command(conn),
                 KeyCode::Tab => self.complete_command(conn)?,
-                KeyCode::Backspace => {
-                    self.command.pop();
-                }
-                KeyCode::Char(char) => self.command.push(char),
+                KeyCode::Backspace => self.input.pop_command(),
+                KeyCode::Char(char) => self.input.push_command(char),
                 _ => {}
             }
             return Ok(false);
         }
 
-        if self.rate_mode {
+        if self.input.kind() == InputKind::Rate {
             match key.code {
                 KeyCode::Esc => self.cancel_rate_input(),
                 KeyCode::Enter | KeyCode::Tab => self.confirm_rate_input()?,
-                KeyCode::Backspace => {
-                    self.rate_input.pop();
-                }
-                KeyCode::Char(char) => self.rate_input.push(char),
+                KeyCode::Backspace => self.input.pop_rate(),
+                KeyCode::Char(char) => self.input.push_rate(char),
                 _ => {}
             }
             return Ok(false);
         }
 
-        if self.filter_mode {
+        if self.input.kind() == InputKind::Filter {
             match key.code {
                 KeyCode::Esc => {
                     self.clear_filter(conn)?;
                 }
                 KeyCode::Enter | KeyCode::Tab => self.confirm_filter(conn)?,
                 KeyCode::Backspace => {
-                    self.filter.pop();
-                    self.selected_tree = 0;
-                    self.selected_track_row = 0;
+                    self.input.pop_filter();
+                    self.browser.reset_selection();
                     self.sync_selection();
                 }
                 KeyCode::Char(char) => {
-                    self.filter.push(char);
-                    self.selected_tree = 0;
-                    self.selected_track_row = 0;
+                    self.input.push_filter(char);
+                    self.browser.reset_selection();
                     self.sync_selection();
                 }
                 _ => {}
@@ -275,7 +264,7 @@ impl App {
             }
             KeyAction::ToggleKeymap => self.toggle_keymap_panel(),
             KeyAction::ToggleInfo => {
-                if self.playlist_panel_open || self.keymap_panel_open {
+                if self.management_panel.playlist_open() || self.management_panel.keymap_open() {
                     self.show_track_info_panel();
                 } else {
                     self.toggle_info_panel();
@@ -341,27 +330,19 @@ impl App {
     }
 
     fn enter_command_mode(&mut self) {
-        self.filter_mode = false;
-        self.rate_mode = false;
-        self.command_mode = true;
-        self.command.clear();
+        self.input.enter_command();
         self.clear_command_output();
         self.message = String::from("typing command");
     }
 
     fn enter_filter_mode(&mut self) {
-        self.command_mode = false;
-        self.rate_mode = false;
-        self.filter_mode = true;
+        self.input.enter_filter();
         self.clear_command_output();
         self.message = String::from("typing filter");
     }
 
     fn enter_rate_mode(&mut self) {
-        self.filter_mode = false;
-        self.command_mode = false;
-        self.rate_mode = true;
-        self.rate_input.clear();
+        self.input.enter_rate();
         self.clear_command_output();
         self.message = String::from("typing playback rate");
     }
@@ -373,11 +354,7 @@ impl App {
         terminal_height: u16,
     ) -> bool {
         let dismissed_startup_info = self.dismiss_startup_info();
-        if self.filter_mode
-            || self.rate_mode
-            || self.command_mode
-            || self.command_output.is_focused()
-        {
+        if self.input.is_active() || self.command_output.is_focused() {
             return dismissed_startup_info;
         }
 
@@ -393,11 +370,11 @@ impl App {
             reserved_bottom_rows: self.reserved_bottom_rows(),
             info_visible: self.info_area_visible(),
             input_visible: self.input_bar_visible(),
-            playlist_info_visible: self.playlist_panel_open,
-            keymap_info_visible: self.keymap_panel_open,
-            library_pane_percent_offset: self.library_pane_percent_offset,
-            info_pane_height_offset: self.info_pane_height_offset,
-            column_layout_width: self.column_layout_width,
+            playlist_info_visible: self.management_panel.playlist_open(),
+            keymap_info_visible: self.management_panel.keymap_open(),
+            library_pane_percent_offset: self.layout.library_pane_percent_offset(),
+            info_pane_height_offset: self.layout.info_pane_height_offset(),
+            column_layout_width: self.layout.column_layout_width(),
         };
         let Some(pane) = mouse_pane(mouse.column, mouse.row, layout) else {
             return dismissed_startup_info;
@@ -417,10 +394,9 @@ impl App {
     }
 
     fn confirm_rate_input(&mut self) -> Result<()> {
-        let value = self.rate_input.trim();
+        let value = self.input.rate().trim();
         if value.is_empty() {
-            self.rate_mode = false;
-            self.rate_input.clear();
+            self.input.finish_rate();
             self.message = playback_rate_message(self.player.rate());
             return Ok(());
         }
@@ -430,15 +406,13 @@ impl App {
             return Ok(());
         };
         self.player.set_rate(rate)?;
-        self.rate_mode = false;
-        self.rate_input.clear();
+        self.input.finish_rate();
         self.message = playback_rate_message(rate);
         Ok(())
     }
 
     fn cancel_rate_input(&mut self) {
-        self.rate_mode = false;
-        self.rate_input.clear();
+        self.input.finish_rate();
         self.message = String::from("rate cancelled");
     }
 
@@ -478,9 +452,7 @@ impl App {
         pane: &str,
         grow: bool,
     ) -> Result<()> {
-        let previous = clamp_library_pane_offset(self.library_pane_percent_offset);
-        let next = clamp_library_pane_offset(previous.saturating_add(delta));
-        self.library_pane_percent_offset = next;
+        let (previous, next) = self.layout.resize_library_pane(delta);
         self.save_pane_layout(conn)?;
 
         let direction = if grow { "larger" } else { "smaller" };
@@ -495,9 +467,7 @@ impl App {
     }
 
     fn resize_info_boundary(&mut self, conn: &Connection, delta: i16, grow: bool) -> Result<()> {
-        let previous = clamp_info_panel_offset(self.info_pane_height_offset);
-        let next = clamp_info_panel_offset(previous.saturating_add(delta));
-        self.info_pane_height_offset = next;
+        let (previous, next) = self.layout.resize_info_pane(delta);
         self.save_pane_layout(conn)?;
 
         let direction = if grow { "larger" } else { "smaller" };
@@ -515,18 +485,13 @@ impl App {
         db::save_pane_layout(
             conn,
             SavedPaneLayout {
-                library_percent_offset: self.library_pane_percent_offset,
-                info_height_offset: self.info_pane_height_offset,
+                library_percent_offset: self.layout.library_pane_percent_offset(),
+                info_height_offset: self.layout.info_pane_height_offset(),
             },
         )
     }
 
     fn dismiss_startup_info(&mut self) -> bool {
-        if self.startup_info_visible {
-            self.startup_info_visible = false;
-            true
-        } else {
-            false
-        }
+        self.layout.dismiss_startup_info()
     }
 }

@@ -8,6 +8,129 @@ use super::filter::{track_search_text, FilterQuery};
 use super::playback::PlaybackSource;
 use super::App;
 
+#[derive(Debug, Clone)]
+pub(super) struct BrowserExpansionState {
+    expanded_artists: HashSet<String>,
+    compilations_expanded: bool,
+    playlists_expanded: bool,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct BrowserState {
+    selected_tree: usize,
+    selected_track_row: usize,
+    expanded_artists: HashSet<String>,
+    compilations_expanded: bool,
+    playlists_expanded: bool,
+}
+
+impl BrowserState {
+    pub(super) fn selected_tree(&self) -> usize {
+        self.selected_tree
+    }
+
+    pub(super) fn select_tree(&mut self, position: usize) {
+        self.selected_tree = position;
+    }
+
+    pub(super) fn selected_track_row(&self) -> usize {
+        self.selected_track_row
+    }
+
+    pub(super) fn select_track_row(&mut self, position: usize) {
+        self.selected_track_row = position;
+    }
+
+    pub(super) fn reset_track_selection(&mut self) {
+        self.selected_track_row = 0;
+    }
+
+    pub(super) fn reset_selection(&mut self) {
+        self.selected_tree = 0;
+        self.selected_track_row = 0;
+    }
+
+    pub(super) fn move_tree_selection(&mut self, direction: i32, amount: usize, tree_len: usize) {
+        if tree_len == 0 {
+            return;
+        }
+        self.selected_tree = if direction >= 0 {
+            self.selected_tree.saturating_add(amount).min(tree_len - 1)
+        } else {
+            self.selected_tree.saturating_sub(amount)
+        };
+        self.reset_track_selection();
+    }
+
+    pub(super) fn clamp_tree_selection(&mut self, tree_len: usize) {
+        self.selected_tree = if tree_len == 0 {
+            0
+        } else {
+            self.selected_tree.min(tree_len - 1)
+        };
+    }
+
+    pub(super) fn clamp_track_selection(&mut self, track_len: usize) {
+        self.selected_track_row = if track_len == 0 {
+            0
+        } else {
+            self.selected_track_row.min(track_len - 1)
+        };
+    }
+
+    pub(super) fn artist_expanded(&self, artist: &str) -> bool {
+        self.expanded_artists.contains(artist)
+    }
+
+    pub(super) fn expand_artist(&mut self, artist: String) {
+        self.expanded_artists.insert(artist);
+    }
+
+    pub(super) fn collapse_artist(&mut self, artist: &str) -> bool {
+        self.expanded_artists.remove(artist)
+    }
+
+    pub(super) fn compilations_expanded(&self) -> bool {
+        self.compilations_expanded
+    }
+
+    pub(super) fn set_compilations_expanded(&mut self, expanded: bool) {
+        self.compilations_expanded = expanded;
+    }
+
+    pub(super) fn toggle_compilations_expanded(&mut self) -> bool {
+        self.compilations_expanded = !self.compilations_expanded;
+        self.compilations_expanded
+    }
+
+    pub(super) fn playlists_expanded(&self) -> bool {
+        self.playlists_expanded
+    }
+
+    pub(super) fn set_playlists_expanded(&mut self, expanded: bool) {
+        self.playlists_expanded = expanded;
+    }
+
+    pub(super) fn toggle_playlists_expanded(&mut self) -> bool {
+        self.playlists_expanded = !self.playlists_expanded;
+        self.playlists_expanded
+    }
+
+    pub(super) fn expansion_state(&self) -> BrowserExpansionState {
+        BrowserExpansionState {
+            expanded_artists: self.expanded_artists.clone(),
+            compilations_expanded: self.compilations_expanded,
+            playlists_expanded: self.playlists_expanded,
+        }
+    }
+
+    pub(super) fn restore_expansion_state(&mut self, state: BrowserExpansionState) {
+        self.expanded_artists = state.expanded_artists;
+        self.compilations_expanded = state.compilations_expanded;
+        self.playlists_expanded = state.playlists_expanded;
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum TreeEntry {
     Playlists,
@@ -74,7 +197,7 @@ impl App {
 
     pub(super) fn rebuild_filtered_indices(&mut self) {
         self.view.filtered_indices.clear();
-        let query = FilterQuery::parse(&self.filter);
+        let query = FilterQuery::parse(self.input.filter());
         if query.is_empty() {
             self.view.filtered_indices.extend(0..self.tracks.len());
             return;
@@ -99,7 +222,7 @@ impl App {
         self.view.tree_entries.clear();
         if !self.playlists.is_empty() {
             self.view.tree_entries.push(TreeEntry::Playlists);
-            if self.playlists_expanded {
+            if self.browser.playlists_expanded() {
                 self.view
                     .tree_entries
                     .extend(self.playlists.iter().map(|playlist| TreeEntry::Playlist {
@@ -115,7 +238,7 @@ impl App {
             .any(|index| self.tracks[*index].compilation)
         {
             self.view.tree_entries.push(TreeEntry::Compilation);
-            if self.compilations_expanded {
+            if self.browser.compilations_expanded() {
                 let mut seen_compilation_albums = HashSet::new();
                 let mut compilation_indices: Vec<usize> = self
                     .view
@@ -149,7 +272,7 @@ impl App {
                     artist: artist.clone(),
                 });
             }
-            if self.expanded_artists.contains(&artist) {
+            if self.browser.artist_expanded(&artist) {
                 let album = track.tree_album().to_string();
                 if seen_albums.insert((artist.clone(), album.clone())) {
                     self.view
@@ -304,11 +427,11 @@ impl App {
 
         if let Some(PlaybackSource::PlaylistTrack { playlist_id, .. }) = current.source {
             return match entry {
-                TreeEntry::Playlists => !self.playlists_expanded,
+                TreeEntry::Playlists => !self.browser.playlists_expanded(),
                 TreeEntry::Playlist {
                     playlist_id: entry_playlist_id,
                     ..
-                } => self.playlists_expanded && *entry_playlist_id == playlist_id,
+                } => self.browser.playlists_expanded() && *entry_playlist_id == playlist_id,
                 TreeEntry::Compilation
                 | TreeEntry::CompilationAlbum { .. }
                 | TreeEntry::Artist { .. }
@@ -320,23 +443,27 @@ impl App {
         let current_album = current.track.tree_album();
         match entry {
             TreeEntry::Playlists | TreeEntry::Playlist { .. } => false,
-            TreeEntry::Compilation => current.track.compilation && !self.compilations_expanded,
+            TreeEntry::Compilation => {
+                current.track.compilation && !self.browser.compilations_expanded()
+            }
             TreeEntry::CompilationAlbum { album } => {
-                current.track.compilation && current_album == album && self.compilations_expanded
+                current.track.compilation
+                    && current_album == album
+                    && self.browser.compilations_expanded()
             }
             TreeEntry::Artist { artist } => {
-                artist == current_artist && !self.expanded_artists.contains(artist)
+                artist == current_artist && !self.browser.artist_expanded(artist)
             }
             TreeEntry::Album { artist, album } => {
                 artist == current_artist
                     && album == current_album
-                    && self.expanded_artists.contains(artist)
+                    && self.browser.artist_expanded(artist)
             }
         }
     }
 
     pub(super) fn selected_tree_entry(&self) -> Option<&TreeEntry> {
-        self.view.tree_entries.get(self.selected_tree)
+        self.view.tree_entries.get(self.browser.selected_tree())
     }
 
     pub(super) fn selected_scope_tracks(&self) -> Vec<(usize, &LibraryTrack)> {
@@ -421,7 +548,7 @@ impl App {
             return None;
         }
 
-        let current = self.selected_track_row.min(rows.len() - 1);
+        let current = self.browser.selected_track_row().min(rows.len() - 1);
         if direction >= 0 {
             rows.iter()
                 .enumerate()
@@ -476,7 +603,7 @@ impl App {
         if let Some(position) = self.tree_entries().iter().position(|entry| {
             matches!(entry, TreeEntry::Artist { artist: entry_artist } if entry_artist == &artist)
         }) {
-            self.selected_tree = position;
+            self.browser.select_tree(position);
             self.rebuild_track_rows();
         } else {
             self.select_track_index(index);
@@ -487,7 +614,7 @@ impl App {
             .iter()
             .position(|row| row.track_index() == Some(index))
         {
-            self.selected_track_row = position;
+            self.browser.select_track_row(position);
         }
         self.focus = super::FocusPane::Tracks;
         self.apply_selection_state();
@@ -522,7 +649,7 @@ impl App {
             if !current_entry_matches {
                 let mut tree_changed = false;
                 if is_compilation {
-                    self.compilations_expanded = true;
+                    self.browser.set_compilations_expanded(true);
                     self.sync_selection();
                 }
                 if is_compilation {
@@ -534,7 +661,7 @@ impl App {
                             } if entry_album == &album
                         )
                     }) {
-                        self.selected_tree = position;
+                        self.browser.select_tree(position);
                         tree_changed = true;
                     }
                 } else if let Some(position) = self.tree_entries().iter().position(|entry| {
@@ -547,7 +674,7 @@ impl App {
                             && entry_album == &album
                     )
                 }) {
-                    self.selected_tree = position;
+                    self.browser.select_tree(position);
                     tree_changed = true;
                 } else if let Some(position) = self.tree_entries().iter().position(|entry| {
                     matches!(
@@ -557,7 +684,7 @@ impl App {
                         } if entry_artist == &artist
                     )
                 }) {
-                    self.selected_tree = position;
+                    self.browser.select_tree(position);
                     tree_changed = true;
                 }
                 if tree_changed {
@@ -571,7 +698,7 @@ impl App {
             .iter()
             .position(|row| row.track_index() == Some(index))
         {
-            self.selected_track_row = position;
+            self.browser.select_track_row(position);
         }
         self.apply_selection_state();
     }
@@ -621,4 +748,46 @@ fn root_label(path: &str) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or(path)
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tree_movement_clamps_and_resets_track_selection() {
+        let mut browser = BrowserState::default();
+        browser.select_tree(2);
+        browser.select_track_row(7);
+
+        browser.move_tree_selection(1, usize::MAX, 5);
+
+        assert_eq!(browser.selected_tree(), 4);
+        assert_eq!(browser.selected_track_row(), 0);
+
+        browser.move_tree_selection(-1, usize::MAX, 5);
+
+        assert_eq!(browser.selected_tree(), 0);
+    }
+
+    #[test]
+    fn expansion_snapshot_restores_tree_policy_without_cursor_state() {
+        let mut browser = BrowserState::default();
+        browser.expand_artist(String::from("Artist"));
+        browser.set_compilations_expanded(true);
+        let snapshot = browser.expansion_state();
+
+        browser.select_tree(4);
+        browser.select_track_row(8);
+        browser.collapse_artist("Artist");
+        browser.set_compilations_expanded(false);
+        browser.set_playlists_expanded(true);
+        browser.restore_expansion_state(snapshot);
+
+        assert_eq!(browser.selected_tree(), 4);
+        assert_eq!(browser.selected_track_row(), 8);
+        assert!(browser.artist_expanded("Artist"));
+        assert!(browser.compilations_expanded());
+        assert!(!browser.playlists_expanded());
+    }
 }

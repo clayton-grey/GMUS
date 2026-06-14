@@ -126,8 +126,8 @@ The TUI is organized around a cmus-style browser:
 - `k`: open or focus the keymap pane
 - In the keymap pane, `Enter` edits non-reserved mappings, `Esc` cancels
   editing, and `Backspace` resets it to default
-- `Enter`, `Esc`, and `:` are reserved for their default behaviors and cannot
-  be edited or mapped to another action
+- `Enter`, `Esc`, `:`, and `Ctrl-C` combinations are reserved for their default
+  behaviors and cannot be edited or mapped to another action
 - `{` / `}`: nudge the selected pane boundary left/up or right/down
 - `+` / `=`: add the selected track, artist, album, or playlist entry to the active playlist
 - `-`: remove the selected track or playlist entry from the active playlist
@@ -152,9 +152,10 @@ selected boundary up and `}` moves it down. With the tracks pane focused, the
 adjustment is relative to the tracks pane's own edge.
 
 The keymap pane is itself editable. Select a non-reserved row and press `Enter`
-to capture an additional key binding, or press `Backspace`/`Delete` while
-capturing to reset that action to its defaults. `Enter`, `Esc`, and `:` are
-reserved so activation, cancellation, and command entry remain recoverable.
+to capture an additional key binding, or press bare `Backspace`/`Delete` while
+capturing to reset that action to its defaults. `Enter`, `Esc`, `:`, and
+`Ctrl-C` combinations are reserved so activation, cancellation, command entry,
+and quitting remain recoverable.
 
 ### Filtering
 

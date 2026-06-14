@@ -1,10 +1,9 @@
-use std::collections::HashSet;
-
 use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::db::{self, LibraryTrack, SavedBrowserSelection};
 
+use super::browser::BrowserExpansionState;
 use super::{App, TreeEntry};
 
 const TREE_KIND_PLAYLISTS: &str = "playlists";
@@ -19,24 +18,18 @@ impl App {
         &mut self,
         selection: &SavedBrowserSelection,
     ) -> bool {
-        let previous_expanded_artists = self.expanded_artists.clone();
-        let previous_compilations_expanded = self.compilations_expanded;
-        let previous_playlists_expanded = self.playlists_expanded;
+        let previous_expansion_state = self.browser.expansion_state();
 
         self.expand_for_saved_tree(selection);
         self.rebuild_filtered_indices();
         self.rebuild_tree_entries();
 
         let Some(tree_position) = self.saved_tree_position(selection) else {
-            self.reset_browser_selection(
-                previous_expanded_artists,
-                previous_compilations_expanded,
-                previous_playlists_expanded,
-            );
+            self.reset_browser_selection(previous_expansion_state);
             return false;
         };
 
-        self.selected_tree = tree_position;
+        self.browser.select_tree(tree_position);
         self.rebuild_track_rows();
 
         if let Some(media_item_id) = selection.media_item_id {
@@ -45,16 +38,12 @@ impl App {
                 .iter()
                 .position(|row| self.track_row_media_item_id(row) == Some(media_item_id))
             else {
-                self.reset_browser_selection(
-                    previous_expanded_artists,
-                    previous_compilations_expanded,
-                    previous_playlists_expanded,
-                );
+                self.reset_browser_selection(previous_expansion_state);
                 return false;
             };
-            self.selected_track_row = track_position;
+            self.browser.select_track_row(track_position);
         } else {
-            self.selected_track_row = 0;
+            self.browser.reset_track_selection();
             self.clamp_track_selection();
         }
 
@@ -84,11 +73,11 @@ impl App {
 
     fn expand_for_saved_tree(&mut self, selection: &SavedBrowserSelection) {
         match selection.tree_kind.as_str() {
-            TREE_KIND_PLAYLIST => self.playlists_expanded = true,
-            TREE_KIND_COMPILATION_ALBUM => self.compilations_expanded = true,
+            TREE_KIND_PLAYLIST => self.browser.set_playlists_expanded(true),
+            TREE_KIND_COMPILATION_ALBUM => self.browser.set_compilations_expanded(true),
             TREE_KIND_ALBUM => {
                 if let Some(artist) = selection.artist.as_ref() {
-                    self.expanded_artists.insert(artist.clone());
+                    self.browser.expand_artist(artist.clone());
                 }
             }
             TREE_KIND_PLAYLISTS | TREE_KIND_COMPILATION | TREE_KIND_ARTIST => {}
@@ -102,17 +91,9 @@ impl App {
             .position(|entry| saved_tree_matches_entry(selection, entry))
     }
 
-    fn reset_browser_selection(
-        &mut self,
-        expanded_artists: HashSet<String>,
-        compilations_expanded: bool,
-        playlists_expanded: bool,
-    ) {
-        self.expanded_artists = expanded_artists;
-        self.compilations_expanded = compilations_expanded;
-        self.playlists_expanded = playlists_expanded;
-        self.selected_tree = 0;
-        self.selected_track_row = 0;
+    fn reset_browser_selection(&mut self, expansion_state: BrowserExpansionState) {
+        self.browser.restore_expansion_state(expansion_state);
+        self.browser.reset_selection();
         self.sync_selection();
     }
 }

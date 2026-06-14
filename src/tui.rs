@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use anyhow::Result;
 use ratatui::widgets::ListState;
@@ -13,10 +13,12 @@ mod command;
 mod control;
 mod filter;
 mod formatting;
+mod input;
 mod jobs;
 mod keymap;
 mod layout;
 mod lines;
+mod management;
 mod media_sync;
 mod mouse;
 mod persistence;
@@ -31,12 +33,17 @@ mod tests;
 
 pub use runtime::run;
 
-use browser::{TrackRow, TreeEntry};
+use browser::{BrowserState, TrackRow, TreeEntry};
 use command::CommandOutputState;
+use input::{InputKind, InputState};
 use jobs::LibraryJobRunner;
 use keymap::{KeyAction, KeySpec};
+use layout::LayoutState;
+use management::ManagementPanelState;
 use media_sync::IntegrationState;
-use playback::{PlayTarget, PlaybackEntry, PlaybackSource, PlayingTrack};
+#[cfg(test)]
+use playback::PlayTarget;
+use playback::{PlaybackModeState, PlaybackSource, PlayingTrack};
 use playlist::{PlaylistCache, PlaylistPanelEntry};
 use status::TransientStatus;
 
@@ -73,42 +80,17 @@ struct App {
     track_state: ListState,
     playlist_state: ListState,
     keymap_state: ListState,
-    selected_tree: usize,
-    selected_track_row: usize,
-    selected_playlist_row: usize,
-    selected_keymap_row: usize,
-    expanded_artists: HashSet<String>,
-    compilations_expanded: bool,
-    playlists_expanded: bool,
-    expanded_playlists: HashSet<i64>,
-    active_playlist_id: Option<i64>,
-    playlist_panel_open: bool,
-    keymap_panel_open: bool,
+    browser: BrowserState,
+    management_panel: ManagementPanelState,
     focus: FocusPane,
-    filter: String,
     restore_filter: bool,
     restore_track: bool,
-    filter_mode: bool,
-    rate_input: String,
-    rate_mode: bool,
-    command: String,
-    command_mode: bool,
+    input: InputState,
     command_output: CommandOutputState,
     key_bindings: HashMap<KeyAction, Vec<KeySpec>>,
-    keymap_capture_action: Option<KeyAction>,
     library_job: Option<LibraryJobRunner>,
-    info_panel_visible: bool,
-    startup_info_visible: bool,
-    library_pane_percent_offset: i16,
-    info_pane_height_offset: i16,
-    column_layout_width: u16,
-    play_target: PlayTarget,
-    continuous: bool,
-    repeat: bool,
-    shuffle: bool,
-    shuffle_seed: u64,
-    shuffle_scope: Vec<PlaybackEntry>,
-    shuffle_order: Vec<PlaybackEntry>,
+    layout: LayoutState,
+    playback_mode: PlaybackModeState,
     player: Box<dyn PlayerBackend>,
     integration: IntegrationState,
     current: Option<PlayingTrack>,
@@ -138,45 +120,22 @@ impl App {
             track_state: ListState::default(),
             playlist_state: ListState::default(),
             keymap_state: ListState::default(),
-            selected_tree: 0,
-            selected_track_row: 0,
-            selected_playlist_row: 0,
-            selected_keymap_row: 0,
-            expanded_artists: HashSet::new(),
-            compilations_expanded: false,
-            playlists_expanded: false,
-            expanded_playlists: HashSet::new(),
-            active_playlist_id: None,
-            playlist_panel_open: false,
-            keymap_panel_open: false,
+            browser: BrowserState::default(),
+            management_panel: ManagementPanelState::default(),
             focus: FocusPane::Tree,
-            filter: String::new(),
             restore_filter: db::restore_filter_enabled(conn)?,
             restore_track: db::restore_track_enabled(conn)?,
-            filter_mode: false,
-            rate_input: String::new(),
-            rate_mode: false,
-            command: String::new(),
-            command_mode: false,
+            input: InputState::default(),
             command_output: CommandOutputState::default(),
             key_bindings: HashMap::new(),
-            keymap_capture_action: None,
             library_job: None,
-            info_panel_visible: true,
-            startup_info_visible: true,
-            library_pane_percent_offset: pane_layout.library_percent_offset,
-            info_pane_height_offset: pane_layout.info_height_offset,
-            column_layout_width: db::column_layout_width(
-                conn,
-                layout::DEFAULT_COLUMN_LAYOUT_WIDTH,
-            )?,
-            play_target: PlayTarget::Library,
-            continuous: true,
-            repeat: false,
-            shuffle: false,
-            shuffle_seed: 0x476d_7573_2026_0528,
-            shuffle_scope: Vec::new(),
-            shuffle_order: Vec::new(),
+            layout: LayoutState::new(
+                pane_layout.library_percent_offset,
+                pane_layout.info_height_offset,
+                db::column_layout_width(conn, layout::DEFAULT_COLUMN_LAYOUT_WIDTH)?,
+                true,
+            ),
+            playback_mode: PlaybackModeState::default(),
             player,
             integration: IntegrationState::default(),
             current: None,
@@ -191,7 +150,7 @@ impl App {
         app.rebuild_search_cache();
         if app.restore_filter {
             if let Some(filter) = db::saved_filter(conn)? {
-                app.filter = filter;
+                app.input.set_filter(filter);
             }
         }
         if app.restore_track {

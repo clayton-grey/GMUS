@@ -552,15 +552,13 @@ impl App {
 
     #[cfg(test)]
     pub(super) fn execute_command(&mut self, conn: &Connection) {
-        self.command_mode = false;
-        let command = std::mem::take(&mut self.command);
+        let command = self.input.take_command().unwrap_or_default();
         let result = self.run_command(conn, command.trim());
         self.finish_command_result(result);
     }
 
     pub(super) fn submit_command(&mut self, conn: &Connection) {
-        self.command_mode = false;
-        let command = std::mem::take(&mut self.command);
+        let command = self.input.take_command().unwrap_or_default();
         if let Some(job) = library_job_for_command(command.trim()) {
             match job {
                 Ok(job) => self.start_library_job(command, job),
@@ -625,9 +623,9 @@ impl App {
     }
 
     pub(super) fn complete_command(&mut self, conn: &Connection) -> Result<()> {
-        let result = complete_command_input(conn, &self.command)?;
+        let result = complete_command_input(conn, self.input.command())?;
         if let Some(replacement) = result.replacement {
-            self.command = replacement;
+            self.input.replace_command(replacement);
         }
         if let Some(notice) = result.notice {
             self.message = notice;
@@ -681,7 +679,7 @@ impl App {
             "restore-track" => self.command_restore_track(conn, rest),
             "filter" | "f" => {
                 self.clear_command_output();
-                self.filter = rest.to_string();
+                self.input.set_filter(rest.to_string());
                 self.confirm_filter(conn)?;
                 Ok(format!("filter: {}", self.filter_display()))
             }
@@ -723,7 +721,9 @@ impl App {
     ) -> Result<String> {
         let value = raw_value.trim();
         if value.is_empty() || value.eq_ignore_ascii_case("status") {
-            return Ok(column_layout_width_message(self.column_layout_width));
+            return Ok(column_layout_width_message(
+                self.layout.column_layout_width(),
+            ));
         }
 
         let width = if value.eq_ignore_ascii_case("reset") || value.eq_ignore_ascii_case("default")
@@ -736,7 +736,7 @@ impl App {
             width
         };
 
-        self.column_layout_width = width;
+        self.layout.set_column_layout_width(width);
         db::save_column_layout_width(conn, width)?;
         Ok(column_layout_width_message(width))
     }

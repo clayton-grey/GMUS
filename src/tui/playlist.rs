@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -7,6 +7,68 @@ use crate::db;
 
 use super::playback::PlaybackEntry;
 use super::{App, FocusPane};
+
+#[derive(Debug, Default)]
+pub(super) struct PlaylistPanelState {
+    selected_row: usize,
+    expanded_playlists: HashSet<i64>,
+    active_playlist_id: Option<i64>,
+}
+
+impl PlaylistPanelState {
+    pub(super) fn selected_row(&self) -> usize {
+        self.selected_row
+    }
+
+    pub(super) fn select_row(&mut self, position: usize) {
+        self.selected_row = position;
+    }
+
+    pub(super) fn clamp_selection(&mut self, row_len: usize) {
+        self.selected_row = if row_len == 0 {
+            0
+        } else {
+            self.selected_row.min(row_len - 1)
+        };
+    }
+
+    pub(super) fn move_selection(&mut self, direction: i32, amount: usize, row_len: usize) {
+        if row_len == 0 {
+            self.selected_row = 0;
+            return;
+        }
+        self.selected_row = if direction >= 0 {
+            self.selected_row.saturating_add(amount).min(row_len - 1)
+        } else {
+            self.selected_row.saturating_sub(amount)
+        };
+    }
+
+    pub(super) fn active_playlist_id(&self) -> Option<i64> {
+        self.active_playlist_id
+    }
+
+    pub(super) fn set_active_playlist_id(&mut self, playlist_id: Option<i64>) {
+        self.active_playlist_id = playlist_id;
+    }
+
+    pub(super) fn playlist_expanded(&self, playlist_id: i64) -> bool {
+        self.expanded_playlists.contains(&playlist_id)
+    }
+
+    pub(super) fn expand_playlist(&mut self, playlist_id: i64) {
+        self.expanded_playlists.insert(playlist_id);
+    }
+
+    pub(super) fn collapse_playlist(&mut self, playlist_id: i64) -> bool {
+        self.expanded_playlists.remove(&playlist_id)
+    }
+
+    pub(super) fn activate_and_expand(&mut self, playlist_id: i64) {
+        self.active_playlist_id = Some(playlist_id);
+        self.expand_playlist(playlist_id);
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(super) enum PlaylistPanelEntry {
@@ -124,23 +186,25 @@ impl App {
         }
 
         if self
-            .active_playlist_id
+            .management_panel
+            .playlist
+            .active_playlist_id()
             .is_none_or(|id| !self.playlists.iter().any(|playlist| playlist.id == id))
         {
-            self.active_playlist_id = self.playlists.first().map(|playlist| playlist.id);
+            self.management_panel
+                .playlist
+                .set_active_playlist_id(self.playlists.first().map(|playlist| playlist.id));
         }
         Ok(())
     }
 
     pub(super) fn clamp_playlist_selection(&mut self) {
         let row_len = self.view.playlist_entries.len();
-        self.selected_playlist_row = if row_len == 0 {
-            0
-        } else {
-            self.selected_playlist_row.min(row_len - 1)
-        };
+        self.management_panel.playlist.clamp_selection(row_len);
         if let Some(playlist_id) = self.selected_playlist_entry_playlist_id() {
-            self.active_playlist_id = Some(playlist_id);
+            self.management_panel
+                .playlist
+                .set_active_playlist_id(Some(playlist_id));
         }
     }
 
@@ -153,7 +217,11 @@ impl App {
                     playlist_id: playlist.id,
                     name: playlist.name.clone(),
                 });
-            if self.expanded_playlists.contains(&playlist.id) {
+            if self
+                .management_panel
+                .playlist
+                .playlist_expanded(playlist.id)
+            {
                 self.view.playlist_entries.extend(
                     self.playlist_cache
                         .playable_entries(playlist.id)
@@ -172,33 +240,41 @@ impl App {
     }
 
     pub(super) fn selected_playlist_entry_playlist_id(&self) -> Option<i64> {
-        match self.view.playlist_entries.get(self.selected_playlist_row) {
+        match self
+            .view
+            .playlist_entries
+            .get(self.management_panel.playlist.selected_row())
+        {
             Some(PlaylistPanelEntry::Playlist { playlist_id, .. })
             | Some(PlaylistPanelEntry::Track { playlist_id, .. }) => Some(*playlist_id),
-            None => self.active_playlist_id,
+            None => self.management_panel.playlist.active_playlist_id(),
         }
     }
 
     pub(super) fn move_playlist_selection(&mut self, direction: i32, amount: usize) {
         if self.view.playlist_entries.is_empty() {
-            self.selected_playlist_row = 0;
+            self.management_panel.playlist.clamp_selection(0);
             return;
         }
-
-        if direction >= 0 {
-            self.selected_playlist_row =
-                (self.selected_playlist_row + amount).min(self.view.playlist_entries.len() - 1);
-        } else {
-            self.selected_playlist_row = self.selected_playlist_row.saturating_sub(amount);
-        }
+        self.management_panel.playlist.move_selection(
+            direction,
+            amount,
+            self.view.playlist_entries.len(),
+        );
         if let Some(playlist_id) = self.selected_playlist_entry_playlist_id() {
-            self.active_playlist_id = Some(playlist_id);
+            self.management_panel
+                .playlist
+                .set_active_playlist_id(Some(playlist_id));
         }
         self.apply_selection_state();
     }
 
     pub(super) fn activate_playlist_selection(&mut self, conn: &Connection) -> Result<()> {
-        match self.view.playlist_entries.get(self.selected_playlist_row) {
+        match self
+            .view
+            .playlist_entries
+            .get(self.management_panel.playlist.selected_row())
+        {
             Some(PlaylistPanelEntry::Playlist { playlist_id, .. }) => {
                 if let Some(entry) = self.first_playlist_panel_playback_entry(*playlist_id) {
                     self.play_entry(conn, entry)?;
@@ -234,7 +310,7 @@ impl App {
     pub(super) fn command_playlist(&mut self, conn: &Connection, name: &str) -> Result<String> {
         self.clear_command_output();
         let playlist = if name.trim().is_empty() {
-            if let Some(playlist_id) = self.active_playlist_id {
+            if let Some(playlist_id) = self.management_panel.playlist.active_playlist_id() {
                 self.playlists
                     .iter()
                     .find(|playlist| playlist.id == playlist_id)
@@ -251,10 +327,10 @@ impl App {
 
         self.playlists = db::playlists(conn)?;
         self.refresh_playlist_tracks(conn)?;
-        self.active_playlist_id = Some(playlist.id);
-        self.expanded_playlists.insert(playlist.id);
-        self.playlist_panel_open = true;
-        self.keymap_panel_open = false;
+        self.management_panel
+            .playlist
+            .activate_and_expand(playlist.id);
+        self.management_panel.show_playlist();
         if self.focus == FocusPane::Keymap {
             self.focus = FocusPane::Playlist;
         }
@@ -274,10 +350,10 @@ impl App {
         let removed = db::clear_playlist(conn, playlist.id)?;
         self.playlists = db::playlists(conn)?;
         self.refresh_playlist_tracks(conn)?;
-        self.active_playlist_id = Some(playlist.id);
-        self.expanded_playlists.insert(playlist.id);
-        self.playlist_panel_open = true;
-        self.keymap_panel_open = false;
+        self.management_panel
+            .playlist
+            .activate_and_expand(playlist.id);
+        self.management_panel.show_playlist();
         if self.focus == FocusPane::Keymap {
             self.focus = FocusPane::Playlist;
         }
@@ -297,9 +373,13 @@ impl App {
         if db::delete_playlist(conn, &playlist.name)? {
             self.playlists = db::playlists(conn)?;
             self.refresh_playlist_tracks(conn)?;
-            self.expanded_playlists.remove(&playlist.id);
+            self.management_panel
+                .playlist
+                .collapse_playlist(playlist.id);
             let fallback_playlist_id = self.playlists.first().map(|playlist| playlist.id);
-            self.active_playlist_id = fallback_playlist_id;
+            self.management_panel
+                .playlist
+                .set_active_playlist_id(fallback_playlist_id);
             self.sync_selection();
             if let Some(playlist_id) = fallback_playlist_id {
                 self.select_playlist_row_for_id(playlist_id);
@@ -320,7 +400,9 @@ impl App {
             return db::playlist_by_name(conn, name);
         }
         Ok(self
-            .active_playlist_id
+            .management_panel
+            .playlist
+            .active_playlist_id()
             .and_then(|playlist_id| {
                 self.playlists
                     .iter()
@@ -333,19 +415,26 @@ impl App {
     pub(super) fn open_playlist_panel(&mut self, conn: &Connection) -> Result<()> {
         if self.playlists.is_empty() {
             let playlist = db::create_playlist(conn, "Default")?;
-            self.active_playlist_id = Some(playlist.id);
-            self.expanded_playlists.insert(playlist.id);
+            self.management_panel
+                .playlist
+                .activate_and_expand(playlist.id);
             self.playlists = db::playlists(conn)?;
             self.refresh_playlist_tracks(conn)?;
         }
 
-        self.playlist_panel_open = true;
-        self.keymap_panel_open = false;
-        if self.active_playlist_id.is_none() {
-            self.active_playlist_id = self.playlists.first().map(|playlist| playlist.id);
+        self.management_panel.show_playlist();
+        if self
+            .management_panel
+            .playlist
+            .active_playlist_id()
+            .is_none()
+        {
+            self.management_panel
+                .playlist
+                .set_active_playlist_id(self.playlists.first().map(|playlist| playlist.id));
         }
-        if let Some(playlist_id) = self.active_playlist_id {
-            self.expanded_playlists.insert(playlist_id);
+        if let Some(playlist_id) = self.management_panel.playlist.active_playlist_id() {
+            self.management_panel.playlist.expand_playlist(playlist_id);
             self.sync_selection_preserving_browser_selection();
             self.select_playlist_row_for_id(playlist_id);
         }
@@ -353,17 +442,6 @@ impl App {
         self.apply_selection_state();
         self.message = String::from("playlist panel");
         Ok(())
-    }
-
-    pub(super) fn show_track_info_panel(&mut self) {
-        self.playlist_panel_open = false;
-        self.keymap_panel_open = false;
-        self.info_panel_visible = true;
-        if matches!(self.focus, FocusPane::Playlist | FocusPane::Keymap) {
-            self.focus = FocusPane::Tree;
-        }
-        self.apply_selection_state();
-        self.message = String::from("track info panel");
     }
 
     pub(super) fn select_playlist_row_for_id(&mut self, playlist_id: i64) {
@@ -376,9 +454,11 @@ impl App {
                 } if *entry_id == playlist_id
             )
         }) {
-            self.selected_playlist_row = position;
+            self.management_panel.playlist.select_row(position);
         }
-        self.active_playlist_id = Some(playlist_id);
+        self.management_panel
+            .playlist
+            .set_active_playlist_id(Some(playlist_id));
     }
 
     pub(super) fn toggle_selected_playlist_expansion(&mut self) {
@@ -386,12 +466,18 @@ impl App {
             self.message = String::from("no playlist selected");
             return;
         };
-        self.active_playlist_id = Some(playlist_id);
-        if self.expanded_playlists.remove(&playlist_id) {
+        self.management_panel
+            .playlist
+            .set_active_playlist_id(Some(playlist_id));
+        if self
+            .management_panel
+            .playlist
+            .collapse_playlist(playlist_id)
+        {
             self.select_playlist_row_for_id(playlist_id);
             self.message = format!("collapsed {}", self.playlist_name(playlist_id));
         } else {
-            self.expanded_playlists.insert(playlist_id);
+            self.management_panel.playlist.expand_playlist(playlist_id);
             self.message = format!("expanded {}", self.playlist_name(playlist_id));
         }
     }
@@ -400,7 +486,7 @@ impl App {
         &mut self,
         conn: &Connection,
     ) -> Result<()> {
-        if !self.playlist_panel_open {
+        if !self.management_panel.playlist_open() {
             self.message = String::from("open playlist panel with p before editing playlists");
             self.show_transient_status(self.message.clone());
             return Ok(());
@@ -422,8 +508,9 @@ impl App {
         let added = db::add_tracks_to_playlist(conn, playlist_id, &media_item_ids)?;
         self.playlists = db::playlists(conn)?;
         self.refresh_playlist_tracks(conn)?;
-        self.expanded_playlists.insert(playlist_id);
-        self.active_playlist_id = Some(playlist_id);
+        self.management_panel
+            .playlist
+            .activate_and_expand(playlist_id);
         self.sync_selection_preserving_browser_selection();
         self.select_playlist_row_for_id(playlist_id);
         self.message = format!(
@@ -438,12 +525,12 @@ impl App {
         &mut self,
         conn: &Connection,
     ) -> Result<()> {
-        if !self.playlist_panel_open {
+        if !self.management_panel.playlist_open() {
             self.message = String::from("open playlist panel with p before editing playlists");
             self.show_transient_status(self.message.clone());
             return Ok(());
         }
-        let Some(playlist_id) = self.active_playlist_id else {
+        let Some(playlist_id) = self.management_panel.playlist.active_playlist_id() else {
             self.message = String::from("no active playlist");
             self.show_transient_status(self.message.clone());
             return Ok(());
@@ -483,7 +570,9 @@ impl App {
 
         self.playlists = db::playlists(conn)?;
         self.refresh_playlist_tracks(conn)?;
-        self.active_playlist_id = Some(target_playlist_id);
+        self.management_panel
+            .playlist
+            .set_active_playlist_id(Some(target_playlist_id));
         self.sync_selection_preserving_browser_selection();
         self.message = format!(
             "removed {removed} tracks from {}",
@@ -494,13 +583,15 @@ impl App {
     }
 
     pub(super) fn ensure_active_playlist(&mut self, conn: &Connection) -> Result<i64> {
-        if let Some(playlist_id) = self.active_playlist_id {
+        if let Some(playlist_id) = self.management_panel.playlist.active_playlist_id() {
             return Ok(playlist_id);
         }
         let playlist = db::create_playlist(conn, "Default")?;
         self.playlists = db::playlists(conn)?;
         self.refresh_playlist_tracks(conn)?;
-        self.active_playlist_id = Some(playlist.id);
+        self.management_panel
+            .playlist
+            .set_active_playlist_id(Some(playlist.id));
         Ok(playlist.id)
     }
 
@@ -540,7 +631,10 @@ impl App {
             playlist_track_id,
             track_index,
             ..
-        } = self.view.playlist_entries.get(self.selected_playlist_row)?
+        } = self
+            .view
+            .playlist_entries
+            .get(self.management_panel.playlist.selected_row())?
         else {
             return None;
         };
@@ -560,5 +654,44 @@ impl App {
             .find(|playlist| playlist.id == playlist_id)
             .map(|playlist| playlist.name.clone())
             .unwrap_or_else(|| "playlist".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panel_selection_movement_and_clamping_are_owned_together() {
+        let mut panel = PlaylistPanelState::default();
+        panel.select_row(2);
+
+        panel.move_selection(1, usize::MAX, 5);
+        assert_eq!(panel.selected_row(), 4);
+
+        panel.move_selection(-1, usize::MAX, 5);
+        assert_eq!(panel.selected_row(), 0);
+
+        panel.select_row(8);
+        panel.clamp_selection(3);
+        assert_eq!(panel.selected_row(), 2);
+
+        panel.clamp_selection(0);
+        assert_eq!(panel.selected_row(), 0);
+    }
+
+    #[test]
+    fn activation_expansion_and_selection_have_independent_lifecycles() {
+        let mut panel = PlaylistPanelState::default();
+
+        panel.activate_and_expand(7);
+        panel.select_row(3);
+
+        assert_eq!(panel.active_playlist_id(), Some(7));
+        assert!(panel.playlist_expanded(7));
+        assert_eq!(panel.selected_row(), 3);
+
+        assert!(panel.collapse_playlist(7));
+        assert!(!panel.playlist_expanded(7));
     }
 }

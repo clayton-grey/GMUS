@@ -4,7 +4,6 @@ use rusqlite::Connection;
 use crate::db::{self, LibraryTrack};
 
 use super::browser::track_root_label;
-use super::layout::{BOTTOM_STATUS_ROWS, COMMAND_OUTPUT_MAX_ROWS};
 use super::{App, FocusPane};
 
 pub(super) fn track_search_text(track: &LibraryTrack) -> String {
@@ -413,21 +412,20 @@ fn optional_text_matches(value: Option<&str>, needle: &str) -> bool {
 
 impl App {
     pub(super) fn filter_display(&self) -> &str {
-        if self.filter.is_empty() {
+        if self.input.filter().is_empty() {
             "none"
         } else {
-            &self.filter
+            self.input.filter()
         }
     }
 
     pub(super) fn confirm_filter(&mut self, conn: &Connection) -> Result<()> {
-        let warning = FilterQuery::parse(&self.filter)
+        let warning = FilterQuery::parse(self.input.filter())
             .warning()
             .map(str::to_string);
-        self.filter_mode = false;
+        self.input.finish_filter();
         self.focus = FocusPane::Tree;
-        self.selected_tree = 0;
-        self.selected_track_row = 0;
+        self.browser.reset_selection();
         self.reset_shuffle_order();
         self.sync_selection();
         self.message = warning.unwrap_or_else(|| format!("filter: {}", self.filter_display()));
@@ -439,8 +437,7 @@ impl App {
         let selected_tree_entry = self.selected_tree_entry().cloned();
         let selected_media_item_id = self.selected_playable_media_item_id();
 
-        self.filter_mode = false;
-        self.filter.clear();
+        self.input.clear_filter();
         self.reset_shuffle_order();
         self.sync_selection_preserving_browser_anchors(
             selected_tree_entry.as_ref(),
@@ -453,38 +450,12 @@ impl App {
 
     pub(super) fn save_filter_state(&self, conn: &Connection) -> Result<()> {
         if self.restore_filter {
-            db::save_filter(conn, &self.filter)?;
+            db::save_filter(conn, self.input.filter())?;
         }
         Ok(())
     }
 
     pub(super) fn filter_bar_visible(&self) -> bool {
-        self.filter_mode || !self.filter.is_empty()
-    }
-
-    pub(super) fn input_bar_visible(&self) -> bool {
-        self.command_mode || self.rate_mode || self.filter_bar_visible()
-    }
-
-    pub(super) fn command_output_visible(&self) -> bool {
-        self.command_output.is_visible()
-    }
-
-    pub(super) fn info_area_visible(&self) -> bool {
-        self.info_panel_visible
-            || self.command_mode
-            || self.command_output_visible()
-            || self.filter_mode
-            || self.rate_mode
-            || self.playlist_panel_open
-            || self.keymap_panel_open
-    }
-
-    pub(super) fn command_output_height(&self) -> u16 {
-        self.command_output.height(COMMAND_OUTPUT_MAX_ROWS)
-    }
-
-    pub(super) fn reserved_bottom_rows(&self) -> u16 {
-        BOTTOM_STATUS_ROWS
+        self.input.kind() == super::InputKind::Filter || !self.input.filter().is_empty()
     }
 }

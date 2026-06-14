@@ -13,24 +13,24 @@ use super::formatting::{
 };
 use super::layout::COMMAND_OUTPUT_MAX_ROWS;
 use super::{
-    App, CommandOutputKind, FocusPane, PlaybackSource, PlaylistPanelEntry, TrackRow, TreeEntry,
+    App, CommandOutputKind, FocusPane, InputKind, PlaybackSource, PlaylistPanelEntry, TrackRow,
+    TreeEntry,
 };
 
 pub(super) fn command_info_title(app: &App) -> &'static str {
     if app.command_output.kind() == CommandOutputKind::LibraryRoots {
         "Library"
-    } else if app.filter_mode && !app.command_output_visible() {
-        "Filter"
-    } else if app.rate_mode && !app.command_output_visible() {
-        "Rate"
-    } else if app.playlist_panel_open && !app.command_mode && !app.command_output_visible() {
-        "Playlists"
-    } else if app.keymap_panel_open && !app.command_mode && !app.command_output_visible() {
-        "Keymap"
-    } else if app.command_mode || app.command_output_visible() {
+    } else if app.command_output_visible() {
         "Command"
     } else {
-        "Info"
+        match app.input.kind() {
+            InputKind::Command => "Command",
+            InputKind::Filter => "Filter",
+            InputKind::Rate => "Rate",
+            InputKind::None if app.management_panel.playlist_open() => "Playlists",
+            InputKind::None if app.management_panel.keymap_open() => "Keymap",
+            InputKind::None => "Info",
+        }
     }
 }
 
@@ -46,13 +46,11 @@ pub(super) fn pane_highlight_style(active: bool) -> Style {
 }
 
 pub(super) fn pane_active(app: &App, pane: FocusPane) -> bool {
-    !app.command_mode
-        && !app.filter_mode
-        && !app.rate_mode
+    !app.input.is_active()
         && !app.command_output.is_focused()
         && app.focus == pane
-        && (pane != FocusPane::Playlist || app.playlist_panel_open)
-        && (pane != FocusPane::Keymap || app.keymap_panel_open)
+        && (pane != FocusPane::Playlist || app.management_panel.playlist_open())
+        && (pane != FocusPane::Keymap || app.management_panel.keymap_open())
 }
 
 pub(super) fn pane_border_style(active: bool) -> Style {
@@ -64,7 +62,7 @@ pub(super) fn pane_border_style(active: bool) -> Style {
 }
 
 fn input_bar_focused(app: &App) -> bool {
-    app.command_mode || app.filter_mode || app.rate_mode
+    app.input.is_active()
 }
 
 pub(super) fn input_bar_style(app: &App) -> Style {
@@ -76,7 +74,7 @@ pub(super) fn input_bar_style(app: &App) -> Style {
 }
 
 pub(super) fn command_pane_style(app: &App) -> Style {
-    if app.command_mode {
+    if app.input.kind() == InputKind::Command {
         Style::default().fg(Color::White).bg(Color::Blue)
     } else {
         Style::default().fg(Color::Black).bg(Color::White)
@@ -84,7 +82,7 @@ pub(super) fn command_pane_style(app: &App) -> Style {
 }
 
 pub(super) fn command_border_style(app: &App) -> Style {
-    if app.command_mode {
+    if app.input.kind() == InputKind::Command {
         Style::default().fg(Color::White).bg(Color::Blue)
     } else {
         Style::default().fg(Color::Black).bg(Color::White)
@@ -118,7 +116,11 @@ pub(super) fn tree_items(app: &App) -> Vec<ListItem<'static>> {
 pub(super) fn tree_item_line(app: &App, entry: &TreeEntry) -> Line<'static> {
     match entry {
         TreeEntry::Playlists => {
-            let marker = if app.playlists_expanded { "[-]" } else { "[+]" };
+            let marker = if app.browser.playlists_expanded() {
+                "[-]"
+            } else {
+                "[+]"
+            };
             let current_prefix = if app.tree_entry_is_current(entry) {
                 "> "
             } else {
@@ -144,7 +146,7 @@ pub(super) fn tree_item_line(app: &App, entry: &TreeEntry) -> Line<'static> {
             Span::styled(name.clone(), Style::default().fg(Color::Cyan)),
         ]),
         TreeEntry::Compilation => {
-            let marker = if app.compilations_expanded {
+            let marker = if app.browser.compilations_expanded() {
                 "[-]"
             } else {
                 "[+]"
@@ -177,7 +179,7 @@ pub(super) fn tree_item_line(app: &App, entry: &TreeEntry) -> Line<'static> {
             Span::styled(album.clone(), Style::default().fg(Color::Cyan)),
         ]),
         TreeEntry::Artist { artist } => {
-            let expanded = app.expanded_artists.contains(artist);
+            let expanded = app.browser.artist_expanded(artist);
             let marker = if expanded { "[-]" } else { "[+]" };
             let current_prefix = if app.tree_entry_is_current(entry) {
                 "> "
@@ -453,7 +455,7 @@ pub(super) fn playback_line(app: &App, width: usize) -> Line<'static> {
     let mut right = vec![Span::styled(
         format!(
             "{} | {}% | ",
-            app.play_target.label(),
+            app.playback_mode.target().label(),
             progress_percent(app)
         ),
         Style::default().fg(Color::DarkGray),
@@ -468,12 +470,10 @@ pub(super) fn playback_line(app: &App, width: usize) -> Line<'static> {
 }
 
 pub(super) fn input_line(app: &App, width: usize) -> Line<'static> {
-    if app.command_mode {
-        command_line(app, width)
-    } else if app.rate_mode {
-        rate_line(app, width)
-    } else {
-        filter_line(app, width)
+    match app.input.kind() {
+        InputKind::Command => command_line(app, width),
+        InputKind::Rate => rate_line(app, width),
+        InputKind::None | InputKind::Filter => filter_line(app, width),
     }
 }
 
@@ -514,12 +514,17 @@ pub(super) fn playlist_items(app: &App, width: usize) -> Vec<ListItem<'static>> 
 pub(super) fn playlist_entry_text(app: &App, entry: &PlaylistPanelEntry) -> String {
     match entry {
         PlaylistPanelEntry::Playlist { playlist_id, name } => {
-            let marker = if app.expanded_playlists.contains(playlist_id) {
+            let marker = if app
+                .management_panel
+                .playlist
+                .playlist_expanded(*playlist_id)
+            {
                 "[-]"
             } else {
                 "[+]"
             };
-            let active = if app.active_playlist_id == Some(*playlist_id) {
+            let active = if app.management_panel.playlist.active_playlist_id() == Some(*playlist_id)
+            {
                 "> "
             } else {
                 "  "
@@ -643,7 +648,7 @@ pub(super) fn filter_info_lines(app: &App, width: usize, height: u16) -> Vec<Lin
         return Vec::new();
     }
 
-    let query = FilterQuery::parse(&app.filter);
+    let query = FilterQuery::parse(app.input.filter());
     let mut lines = vec![Line::from(Span::styled(
         " filter syntax",
         Style::default()
@@ -682,7 +687,7 @@ pub(super) fn rate_info_lines(app: &App, width: usize, height: u16) -> Vec<Line<
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
     ))];
-    if !app.rate_input.is_empty() && parse_playback_rate(&app.rate_input).is_none() {
+    if !app.input.rate().is_empty() && parse_playback_rate(app.input.rate()).is_none() {
         lines.push(Line::from(Span::styled(
             truncate_to_width(" invalid rate; use 0.25..4.0 or 25..400", width),
             Style::default().fg(Color::LightRed),
@@ -742,7 +747,7 @@ fn command_list_lines(width: usize, style: Style) -> Vec<Line<'static>> {
 }
 
 pub(super) fn metadata_lines(app: &App, width: usize) -> Vec<Line<'static>> {
-    if app.startup_info_visible {
+    if app.layout.startup_info_visible() {
         return startup_info_lines(width);
     }
 
@@ -880,7 +885,10 @@ pub(super) fn command_line(app: &App, width: usize) -> Line<'static> {
         Span::raw(" "),
         Span::styled(":", style),
         Span::styled(
-            truncate_to_width(&format!("{}_", app.command), text_width.saturating_sub(1)),
+            truncate_to_width(
+                &format!("{}_", app.input.command()),
+                text_width.saturating_sub(1),
+            ),
             style,
         ),
     ])
@@ -889,7 +897,7 @@ pub(super) fn command_line(app: &App, width: usize) -> Line<'static> {
 pub(super) fn filter_line(app: &App, width: usize) -> Line<'static> {
     let text_width = width.saturating_sub(1);
     let style = input_bar_style(app);
-    let filter = if app.filter.is_empty() {
+    let filter = if app.input.filter().is_empty() {
         Span::styled(
             truncate_to_width(
                 "none_",
@@ -897,10 +905,10 @@ pub(super) fn filter_line(app: &App, width: usize) -> Line<'static> {
             ),
             placeholder_input_style(app),
         )
-    } else if app.filter_mode {
+    } else if app.input.kind() == InputKind::Filter {
         Span::styled(
             truncate_to_width(
-                &format!("{}_", app.filter),
+                &format!("{}_", app.input.filter()),
                 text_width.saturating_sub(display_width("filter: ")),
             ),
             style,
@@ -908,7 +916,7 @@ pub(super) fn filter_line(app: &App, width: usize) -> Line<'static> {
     } else {
         Span::styled(
             truncate_to_width(
-                &app.filter,
+                app.input.filter(),
                 text_width.saturating_sub(display_width("filter: ")),
             ),
             style,
@@ -925,7 +933,7 @@ pub(super) fn filter_line(app: &App, width: usize) -> Line<'static> {
 pub(super) fn rate_line(app: &App, width: usize) -> Line<'static> {
     let text_width = width.saturating_sub(1);
     let style = input_bar_style(app);
-    let rate = if app.rate_input.is_empty() {
+    let rate = if app.input.rate().is_empty() {
         Span::styled(
             truncate_to_width(
                 "0.75 or 75_",
@@ -936,7 +944,7 @@ pub(super) fn rate_line(app: &App, width: usize) -> Line<'static> {
     } else {
         Span::styled(
             truncate_to_width(
-                &format!("{}_", app.rate_input),
+                &format!("{}_", app.input.rate()),
                 text_width.saturating_sub(display_width("rate: ")),
             ),
             style,
@@ -948,11 +956,11 @@ pub(super) fn rate_line(app: &App, width: usize) -> Line<'static> {
 
 fn playback_flag_spans(app: &App) -> Vec<Span<'static>> {
     vec![
-        Span::styled("C", active_flag_style(app.continuous)),
+        Span::styled("C", active_flag_style(app.playback_mode.continuous())),
         Span::styled(" ", Style::default().fg(Color::DarkGray)),
-        Span::styled("R", active_flag_style(app.repeat)),
+        Span::styled("R", active_flag_style(app.playback_mode.repeat())),
         Span::styled(" ", Style::default().fg(Color::DarkGray)),
-        Span::styled("S", active_flag_style(app.shuffle)),
+        Span::styled("S", active_flag_style(app.playback_mode.shuffle())),
     ]
 }
 

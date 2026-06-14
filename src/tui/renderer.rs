@@ -13,7 +13,7 @@ use super::lines::{
     now_playing_row_style, pane_active, pane_border_style, pane_highlight_style, playback_line,
     playlist_items, rate_info_lines, selected_scope_title, track_items, tree_items,
 };
-use super::{App, FocusPane};
+use super::{App, FocusPane, InputKind};
 
 pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
@@ -23,7 +23,7 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
         info_panel_height_with_offset(
             area.height.saturating_sub(BOTTOM_STATUS_ROWS),
             input_visible,
-            app.info_pane_height_offset,
+            app.layout.info_pane_height_offset(),
         )
     } else {
         0
@@ -66,7 +66,7 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
 }
 
 fn render_browser_panes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    if uses_stacked_browser_layout(area.width, app.column_layout_width) {
+    if uses_stacked_browser_layout(area.width, app.layout.column_layout_width()) {
         render_stacked_browser_panes(frame, app, area);
     } else {
         render_wide_browser_panes(frame, app, area);
@@ -74,7 +74,8 @@ fn render_browser_panes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn render_wide_browser_panes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let tree_percent = library_pane_percent(WIDE_TREE_PERCENT, app.library_pane_percent_offset);
+    let tree_percent =
+        library_pane_percent(WIDE_TREE_PERCENT, app.layout.library_pane_percent_offset());
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -88,7 +89,10 @@ fn render_wide_browser_panes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn render_stacked_browser_panes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let tree_percent = library_pane_percent(NARROW_TREE_PERCENT, app.library_pane_percent_offset);
+    let tree_percent = library_pane_percent(
+        NARROW_TREE_PERCENT,
+        app.layout.library_pane_percent_offset(),
+    );
     let stack = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -132,12 +136,21 @@ fn render_tracks_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn render_info_pane(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let command_info = app.command_mode || app.command_output_visible();
-    let filter_info = !command_info && app.filter_mode;
-    let rate_info = !command_info && !filter_info && app.rate_mode;
-    let playlist_info = !command_info && !filter_info && !rate_info && app.playlist_panel_open;
-    let keymap_info =
-        !command_info && !filter_info && !rate_info && !playlist_info && app.keymap_panel_open;
+    let (filter_info, rate_info) = match app.input.kind() {
+        InputKind::Filter => (true, false),
+        InputKind::Rate => (false, true),
+        InputKind::None | InputKind::Command => (false, false),
+    };
+    let command_info = app.input.kind() == InputKind::Command || app.command_output_visible();
+    let filter_info = !command_info && filter_info;
+    let rate_info = !command_info && rate_info;
+    let playlist_info =
+        !command_info && !filter_info && !rate_info && app.management_panel.playlist_open();
+    let keymap_info = !command_info
+        && !filter_info
+        && !rate_info
+        && !playlist_info
+        && app.management_panel.keymap_open();
     let info_inner_width = usize::from(area.width.saturating_sub(2));
     let info_inner_height = area.height.saturating_sub(2);
     if playlist_info {

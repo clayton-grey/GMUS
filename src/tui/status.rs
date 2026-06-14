@@ -16,41 +16,32 @@ pub(super) struct TransientStatus {
 
 impl App {
     pub(super) fn toggle_info_panel(&mut self) {
-        self.info_panel_visible = !self.info_panel_visible;
-        self.message = format!(
-            "info panel {}",
-            if self.info_panel_visible {
-                "shown"
-            } else {
-                "hidden"
-            }
-        );
+        let visible = self.layout.toggle_info_panel();
+        self.message = format!("info panel {}", if visible { "shown" } else { "hidden" });
         self.show_transient_status(self.message.clone());
     }
 
     pub(super) fn toggle_play_target(&mut self) {
-        self.play_target = self.play_target.next();
-        self.reset_shuffle_order();
-        self.message = format!("play target: {}", self.play_target.label());
+        let target = self.playback_mode.advance_target();
+        self.message = format!("play target: {}", target.label());
         self.show_transient_status(self.message.clone());
     }
 
     pub(super) fn toggle_continuous(&mut self) {
-        self.continuous = !self.continuous;
-        self.message = format!("continuous {}", if self.continuous { "on" } else { "off" });
+        let continuous = self.playback_mode.toggle_continuous();
+        self.message = format!("continuous {}", if continuous { "on" } else { "off" });
         self.show_transient_status(self.message.clone());
     }
 
     pub(super) fn toggle_repeat(&mut self) {
-        self.repeat = !self.repeat;
-        self.message = format!("repeat {}", if self.repeat { "on" } else { "off" });
+        let repeat = self.playback_mode.toggle_repeat();
+        self.message = format!("repeat {}", if repeat { "on" } else { "off" });
         self.show_transient_status(self.message.clone());
     }
 
     pub(super) fn toggle_shuffle(&mut self) {
-        self.shuffle = !self.shuffle;
-        self.reset_shuffle_order();
-        self.message = format!("shuffle {}", if self.shuffle { "on" } else { "off" });
+        let shuffle = self.playback_mode.toggle_shuffle();
+        self.message = format!("shuffle {}", if shuffle { "on" } else { "off" });
         self.show_transient_status(self.message.clone());
     }
 

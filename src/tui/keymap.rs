@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
@@ -9,6 +11,64 @@ use crate::db::{self, SavedKeyBinding};
 
 use super::formatting::{display_width, fit_to_width, truncate_to_width};
 use super::{App, FocusPane};
+
+#[derive(Debug, Default)]
+pub(super) struct KeymapPanelState {
+    selected_row: usize,
+    capture_action: Option<KeyAction>,
+}
+
+impl KeymapPanelState {
+    pub(super) fn selected_row(&self) -> usize {
+        self.selected_row
+    }
+
+    pub(super) fn select_row(&mut self, row: usize) {
+        if self.selected_row != row {
+            self.selected_row = row;
+            self.cancel_capture();
+        }
+    }
+
+    pub(super) fn clamp_selection(&mut self, row_count: usize) {
+        let row = if row_count == 0 {
+            0
+        } else {
+            self.selected_row.min(row_count - 1)
+        };
+        self.select_row(row);
+    }
+
+    pub(super) fn move_selection(&mut self, direction: i32, amount: usize, row_count: usize) {
+        if row_count == 0 {
+            self.selected_row = 0;
+            self.cancel_capture();
+            return;
+        }
+        self.selected_row = if direction >= 0 {
+            self.selected_row.saturating_add(amount).min(row_count - 1)
+        } else {
+            self.selected_row.saturating_sub(amount)
+        };
+        self.cancel_capture();
+    }
+
+    pub(super) fn capture_action(&self) -> Option<KeyAction> {
+        self.capture_action
+    }
+
+    pub(super) fn begin_capture(&mut self, action: KeyAction) {
+        self.capture_action = Some(action);
+    }
+
+    pub(super) fn cancel_capture(&mut self) {
+        self.capture_action = None;
+    }
+
+    pub(super) fn is_capturing(&self) -> bool {
+        self.capture_action.is_some()
+    }
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub(super) enum KeyAction {
@@ -89,47 +149,6 @@ impl KeyAction {
             Self::Quit => "quit",
         }
     }
-
-    fn from_id(id: &str) -> Option<Self> {
-        Some(match id {
-            "toggle-focus" => Self::ToggleFocus,
-            "move-down" => Self::MoveDown,
-            "move-up" => Self::MoveUp,
-            "page-down" => Self::PageDown,
-            "page-up" => Self::PageUp,
-            "activate" => Self::Activate,
-            "space-action" => Self::SpaceAction,
-            "escape" => Self::Escape,
-            "toggle-artist-expansion" => Self::ToggleArtistExpansion,
-            "toggle-keymap" => Self::ToggleKeymap,
-            "toggle-info" => Self::ToggleInfo,
-            "open-playlist" => Self::OpenPlaylist,
-            "shrink-pane" => Self::ShrinkPane,
-            "grow-pane" => Self::GrowPane,
-            "command-mode" => Self::CommandMode,
-            "filter-mode" => Self::FilterMode,
-            "rate-mode" => Self::RateMode,
-            "play-selected" => Self::PlaySelected,
-            "toggle-pause" => Self::TogglePause,
-            "stop" => Self::Stop,
-            "play-next" => Self::PlayNext,
-            "play-previous" => Self::PlayPrevious,
-            "seek-back" => Self::SeekBack,
-            "seek-forward" => Self::SeekForward,
-            "seek-back-minute" => Self::SeekBackMinute,
-            "seek-forward-minute" => Self::SeekForwardMinute,
-            "toggle-continuous" => Self::ToggleContinuous,
-            "toggle-play-target" => Self::TogglePlayTarget,
-            "toggle-repeat" => Self::ToggleRepeat,
-            "toggle-shuffle" => Self::ToggleShuffle,
-            "select-current" => Self::SelectCurrent,
-            "add-to-playlist" => Self::AddToPlaylist,
-            "remove-from-playlist" => Self::RemoveFromPlaylist,
-            "refresh-library" => Self::RefreshLibrary,
-            "quit" => Self::Quit,
-            _ => return None,
-        })
-    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -155,6 +174,9 @@ impl KeySpec {
 
     fn from_event(event: KeyEvent) -> Option<Self> {
         let modifiers = normalized_modifiers(event);
+        if modifiers.intersects(KeyModifiers::HYPER | KeyModifiers::META) {
+            return None;
+        }
         match event.code {
             KeyCode::Char(_)
             | KeyCode::Enter
@@ -179,6 +201,9 @@ impl KeySpec {
 
     fn label(&self) -> String {
         let mut parts = Vec::new();
+        if self.modifiers.contains(KeyModifiers::SHIFT) {
+            parts.push(String::from("Shift"));
+        }
         if self.modifiers.contains(KeyModifiers::CONTROL) {
             parts.push(String::from("Ctrl"));
         }
@@ -194,6 +219,9 @@ impl KeySpec {
 
     fn storage(&self) -> String {
         let mut modifiers = Vec::new();
+        if self.modifiers.contains(KeyModifiers::SHIFT) {
+            modifiers.push("shift");
+        }
         if self.modifiers.contains(KeyModifiers::CONTROL) {
             modifiers.push("ctrl");
         }
@@ -229,10 +257,15 @@ impl KeySpec {
         self.code == KeyCode::Esc && self.modifiers == KeyModifiers::NONE
     }
 
+    fn is_reserved_quit_key(&self) -> bool {
+        self.code == KeyCode::Char('c') && self.modifiers.contains(KeyModifiers::CONTROL)
+    }
+
     fn is_reserved_key(&self) -> bool {
         self.is_reserved_command_key()
             || self.is_reserved_enter_key()
             || self.is_reserved_escape_key()
+            || self.is_reserved_quit_key()
     }
 }
 
@@ -289,7 +322,10 @@ const ADD_TO_PLAYLIST_KEYS: &[KeySpec] = &[
     KeySpec::new(KeyCode::Char('=')),
 ];
 const REMOVE_FROM_PLAYLIST_KEYS: &[KeySpec] = &[KeySpec::new(KeyCode::Char('-'))];
-const QUIT_KEYS: &[KeySpec] = &[KeySpec::new(KeyCode::Char('q'))];
+const QUIT_KEYS: &[KeySpec] = &[
+    KeySpec::new(KeyCode::Char('q')),
+    KeySpec::ctrl(KeyCode::Char('c')),
+];
 const REFRESH_KEYS: &[KeySpec] = &[KeySpec::ctrl(KeyCode::Char('r'))];
 
 pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
@@ -508,35 +544,63 @@ pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
 impl App {
     pub(super) fn load_key_bindings(&mut self, conn: &Connection) -> Result<()> {
         self.key_bindings.clear();
-        for binding in db::key_bindings(conn)? {
-            let Some(action) = KeyAction::from_id(&binding.action) else {
-                continue;
-            };
-            let Some(key) = KeySpec::from_storage(&binding.key) else {
-                continue;
-            };
-            if action_is_reserved(action) || key.is_reserved_key() {
-                db::delete_key_binding_key(conn, action.id(), &binding.key)?;
-                continue;
+        let saved_bindings = db::key_bindings(conn)?;
+        let mut assigned_keys = Vec::new();
+        for known_binding in KEY_BINDINGS {
+            for binding in saved_bindings
+                .iter()
+                .filter(|binding| binding.action == known_binding.action.id())
+            {
+                let Some(key) = KeySpec::from_storage(&binding.key) else {
+                    db::delete_key_binding_key(conn, known_binding.action.id(), &binding.key)?;
+                    continue;
+                };
+                let canonical_key = key.storage();
+                if binding.key != canonical_key {
+                    db::delete_key_binding_key(conn, known_binding.action.id(), &binding.key)?;
+                    if saved_bindings.iter().any(|candidate| {
+                        candidate.action == binding.action && candidate.key == canonical_key
+                    }) {
+                        continue;
+                    }
+                }
+                if action_is_reserved(known_binding.action)
+                    || key.is_reserved_key()
+                    || assigned_keys.contains(&key)
+                {
+                    db::delete_key_binding_key(conn, known_binding.action.id(), &binding.key)?;
+                    continue;
+                }
+                if binding.key != canonical_key {
+                    db::save_key_binding(
+                        conn,
+                        &SavedKeyBinding {
+                            action: known_binding.action.id().to_string(),
+                            key: canonical_key,
+                        },
+                    )?;
+                }
+                assigned_keys.push(key.clone());
+                self.key_bindings
+                    .entry(known_binding.action)
+                    .or_default()
+                    .push(key);
             }
-            self.key_bindings.entry(action).or_default().push(key);
         }
         Ok(())
     }
 
     pub(super) fn toggle_keymap_panel(&mut self) {
-        if self.keymap_panel_open {
-            self.keymap_panel_open = false;
-            self.keymap_capture_action = None;
+        if self.management_panel.keymap_open() {
+            self.management_panel.hide_keymap();
             if self.focus == FocusPane::Keymap {
                 self.focus = FocusPane::Tree;
             }
             self.message = String::from("keymap panel hidden");
         } else {
-            self.keymap_panel_open = true;
-            self.playlist_panel_open = false;
-            if self.selected_keymap_row >= keymap_row_count() {
-                self.selected_keymap_row = 0;
+            self.management_panel.show_keymap();
+            if self.management_panel.keymap.selected_row() >= keymap_row_count() {
+                self.management_panel.keymap.select_row(0);
             }
             self.focus = FocusPane::Keymap;
             self.message = String::from("keymap panel");
@@ -546,23 +610,15 @@ impl App {
     }
 
     pub(super) fn move_keymap_selection(&mut self, direction: i32, amount: usize) {
-        let len = keymap_row_count();
-        if len == 0 {
-            self.selected_keymap_row = 0;
-            return;
-        }
-
-        if direction >= 0 {
-            self.selected_keymap_row = (self.selected_keymap_row + amount).min(len - 1);
-        } else {
-            self.selected_keymap_row = self.selected_keymap_row.saturating_sub(amount);
-        }
-        self.keymap_capture_action = None;
+        self.management_panel
+            .keymap
+            .move_selection(direction, amount, keymap_row_count());
         self.apply_selection_state();
     }
 
     pub(super) fn activate_keymap_selection(&mut self) {
-        let Some(binding) = selected_keymap_binding(self.selected_keymap_row) else {
+        let Some(binding) = selected_keymap_binding(self.management_panel.keymap.selected_row())
+        else {
             self.message = String::from("select a key binding row to edit");
             self.show_transient_status(self.message.clone());
             return;
@@ -572,35 +628,33 @@ impl App {
             self.show_transient_status(self.message.clone());
             return;
         }
-        self.keymap_capture_action = Some(binding.action);
+        self.management_panel.begin_keymap_capture(binding.action);
         self.message = format!("press new key for {}", binding.label);
         self.show_transient_status(self.message.clone());
     }
 
     pub(super) fn capture_key_binding(&mut self, conn: &Connection, key: KeyEvent) -> Result<bool> {
-        let Some(action) = self.keymap_capture_action else {
+        let Some(action) = self.management_panel.keymap.capture_action() else {
             return Ok(false);
         };
-
-        match key.code {
-            KeyCode::Esc => {
-                self.keymap_capture_action = None;
-                self.message = String::from("Esc is reserved for cancellation and recovery");
-                self.show_transient_status(self.message.clone());
-                return Ok(true);
-            }
-            KeyCode::Backspace | KeyCode::Delete => {
-                self.reset_key_binding(conn, action)?;
-                return Ok(true);
-            }
-            _ => {}
-        }
 
         let Some(spec) = KeySpec::from_event(key) else {
             self.message = String::from("unsupported key");
             self.show_transient_status(self.message.clone());
             return Ok(true);
         };
+        if spec.is_reserved_escape_key() {
+            self.management_panel.keymap.cancel_capture();
+            self.message = String::from("Esc is reserved for cancellation and recovery");
+            self.show_transient_status(self.message.clone());
+            return Ok(true);
+        }
+        if spec.modifiers == KeyModifiers::NONE
+            && matches!(spec.code, KeyCode::Backspace | KeyCode::Delete)
+        {
+            self.reset_key_binding(conn, action)?;
+            return Ok(true);
+        }
 
         self.set_key_binding(conn, action, spec)?;
         Ok(true)
@@ -627,28 +681,20 @@ impl App {
             .iter()
             .any(|key| key == &spec)
         {
-            self.keymap_capture_action = None;
+            self.management_panel.keymap.cancel_capture();
             self.message = format!("{} already includes {}", action_label(action), spec.label());
             self.show_transient_status(self.message.clone());
             return Ok(());
         }
 
-        let conflicting_actions = self
-            .key_bindings
-            .iter_mut()
-            .filter_map(|(other_action, other_specs)| {
-                if *other_action == action {
-                    return None;
-                }
-                let before = other_specs.len();
-                other_specs.retain(|other_spec| other_spec != &spec);
-                (other_specs.len() != before).then_some(*other_action)
-            })
-            .collect::<Vec<_>>();
-        for conflicting_action in &conflicting_actions {
-            db::delete_key_binding_key(conn, conflicting_action.id(), &spec.storage())?;
+        let conflicts = remove_custom_key_conflicts(
+            &mut self.key_bindings,
+            action,
+            std::slice::from_ref(&spec),
+        );
+        for (conflicting_action, conflicting_key) in conflicts {
+            db::delete_key_binding_key(conn, conflicting_action.id(), &conflicting_key.storage())?;
         }
-        self.key_bindings.retain(|_action, specs| !specs.is_empty());
         self.key_bindings
             .entry(action)
             .or_default()
@@ -660,16 +706,23 @@ impl App {
                 key: spec.storage(),
             },
         )?;
-        self.keymap_capture_action = None;
+        self.management_panel.keymap.cancel_capture();
         self.message = format!("{} mapped to {}", action_label(action), spec.label());
         self.show_transient_status(self.message.clone());
         Ok(())
     }
 
     pub(super) fn reset_key_binding(&mut self, conn: &Connection, action: KeyAction) -> Result<()> {
+        let default_keys = binding_for_action(action)
+            .map(|binding| binding.default_keys)
+            .unwrap_or_default();
+        let conflicts = remove_custom_key_conflicts(&mut self.key_bindings, action, default_keys);
+        for (conflicting_action, conflicting_key) in conflicts {
+            db::delete_key_binding_key(conn, conflicting_action.id(), &conflicting_key.storage())?;
+        }
         self.key_bindings.remove(&action);
         db::delete_key_binding(conn, action.id())?;
-        self.keymap_capture_action = None;
+        self.management_panel.keymap.cancel_capture();
         self.message = format!("{} reset to default", action_label(action));
         self.show_transient_status(self.message.clone());
         Ok(())
@@ -678,7 +731,7 @@ impl App {
     pub(super) fn reset_key_bindings(&mut self, conn: &Connection) -> Result<()> {
         self.key_bindings.clear();
         db::delete_key_bindings(conn)?;
-        self.keymap_capture_action = None;
+        self.management_panel.keymap.cancel_capture();
         self.message = String::from("keymap reset to defaults");
         self.show_transient_status(self.message.clone());
         Ok(())
@@ -695,25 +748,18 @@ impl App {
         if spec.is_reserved_escape_key() {
             return Some(KeyAction::Escape);
         }
-        self.key_bindings
-            .iter()
-            .find_map(|(action, custom_specs)| custom_specs.contains(&spec).then_some(*action))
-            .or_else(|| {
-                let any_custom_uses_key = self
-                    .key_bindings
-                    .values()
-                    .any(|custom_specs| custom_specs.contains(&spec));
-                if any_custom_uses_key {
-                    return None;
-                }
-                KEY_BINDINGS.iter().find_map(|binding| {
-                    binding
-                        .default_keys
-                        .iter()
-                        .any(|default_spec| default_spec == &spec)
-                        .then_some(binding.action)
-                })
+        if spec.is_reserved_quit_key() {
+            return Some(KeyAction::Quit);
+        }
+        custom_action_for_key(self, &spec).or_else(|| {
+            KEY_BINDINGS.iter().find_map(|binding| {
+                binding
+                    .default_keys
+                    .iter()
+                    .any(|default_spec| default_spec == &spec)
+                    .then_some(binding.action)
             })
+        })
     }
 }
 
@@ -788,14 +834,17 @@ fn keymap_binding_line(app: &App, binding: &KeyBinding, width: usize) -> Line<'s
     let key_text = fit_to_width(&format!("   {effective}"), key_width);
     let mut action = binding.label.to_string();
     let reserved = binding_has_reserved_key(binding);
-    if let Some(capture_action) = app.keymap_capture_action {
+    if let Some(capture_action) = app.management_panel.keymap.capture_action() {
         if capture_action == binding.action {
             action = String::from("press new key, Esc cancels, Backspace resets");
         }
     } else if app.key_bindings.contains_key(&binding.action) {
-        action = format!("{action}  (default {})", default_key_text(binding));
+        let defaults = default_key_text(app, binding);
+        if !defaults.is_empty() {
+            action = format!("{action}  (default {defaults})");
+        }
     }
-    if reserved && app.keymap_capture_action != Some(binding.action) {
+    if reserved && app.management_panel.keymap.capture_action() != Some(binding.action) {
         action = format!("{action}  (reserved)");
     }
     let action_width = width.saturating_sub(display_width(&key_text) + 1);
@@ -834,15 +883,20 @@ fn selected_keymap_binding(row: usize) -> Option<&'static KeyBinding> {
 }
 
 fn effective_key_text(app: &App, binding: &KeyBinding) -> String {
-    effective_keys_for_binding(app, binding)
+    let text = effective_keys_for_binding(app, binding)
         .iter()
         .map(KeySpec::label)
         .collect::<Vec<_>>()
-        .join(" / ")
+        .join(" / ");
+    if text.is_empty() {
+        String::from("unbound")
+    } else {
+        text
+    }
 }
 
 fn effective_keys_for_binding(app: &App, binding: &KeyBinding) -> Vec<KeySpec> {
-    let mut keys = binding.default_keys.to_vec();
+    let mut keys = available_default_keys_for_binding(app, binding);
     if let Some(custom_keys) = app.key_bindings.get(&binding.action) {
         for key in custom_keys {
             if !keys.contains(key) {
@@ -853,19 +907,59 @@ fn effective_keys_for_binding(app: &App, binding: &KeyBinding) -> Vec<KeySpec> {
     keys
 }
 
+fn available_default_keys_for_binding(app: &App, binding: &KeyBinding) -> Vec<KeySpec> {
+    binding
+        .default_keys
+        .iter()
+        .filter(|key| custom_action_for_key(app, key).is_none_or(|action| action == binding.action))
+        .cloned()
+        .collect()
+}
+
 fn effective_keys_for_action(app: &App, action: KeyAction) -> Vec<KeySpec> {
     binding_for_action(action)
         .map(|binding| effective_keys_for_binding(app, binding))
         .unwrap_or_default()
 }
 
-fn default_key_text(binding: &KeyBinding) -> String {
-    binding
-        .default_keys
+fn default_key_text(app: &App, binding: &KeyBinding) -> String {
+    available_default_keys_for_binding(app, binding)
         .iter()
         .map(KeySpec::label)
         .collect::<Vec<_>>()
         .join(" / ")
+}
+
+fn custom_action_for_key(app: &App, key: &KeySpec) -> Option<KeyAction> {
+    KEY_BINDINGS.iter().find_map(|binding| {
+        app.key_bindings
+            .get(&binding.action)
+            .is_some_and(|custom_keys| custom_keys.contains(key))
+            .then_some(binding.action)
+    })
+}
+
+fn remove_custom_key_conflicts(
+    bindings: &mut HashMap<KeyAction, Vec<KeySpec>>,
+    action: KeyAction,
+    keys: &[KeySpec],
+) -> Vec<(KeyAction, KeySpec)> {
+    let mut conflicts = Vec::new();
+    for (other_action, other_keys) in bindings.iter_mut() {
+        if *other_action == action {
+            continue;
+        }
+        other_keys.retain(|other_key| {
+            if keys.contains(other_key) {
+                conflicts.push((*other_action, other_key.clone()));
+                false
+            } else {
+                true
+            }
+        });
+    }
+    bindings.retain(|_action, keys| !keys.is_empty());
+    conflicts
 }
 
 fn action_label(action: KeyAction) -> &'static str {
@@ -885,6 +979,8 @@ fn reserved_key_message(action: KeyAction, spec: &KeySpec) -> Option<&'static st
         Some("Enter is reserved for activation and confirmation")
     } else if spec.is_reserved_escape_key() && action != KeyAction::Escape {
         Some("Esc is reserved for cancellation and recovery")
+    } else if spec.is_reserved_quit_key() {
+        Some("Ctrl-C combinations are reserved for quitting")
     } else {
         None
     }
@@ -904,7 +1000,9 @@ fn reserved_action_message(action: KeyAction) -> &'static str {
 }
 
 fn binding_has_reserved_key(binding: &KeyBinding) -> bool {
-    binding.default_keys.iter().any(KeySpec::is_reserved_key)
+    binding.default_keys.iter().any(|key| {
+        key.is_reserved_command_key() || key.is_reserved_enter_key() || key.is_reserved_escape_key()
+    })
 }
 
 fn normalized_modifiers(event: KeyEvent) -> KeyModifiers {
@@ -958,7 +1056,12 @@ fn code_storage(code: &KeyCode) -> String {
 
 fn code_from_storage(value: &str) -> Option<KeyCode> {
     if let Some(character) = value.strip_prefix("char:") {
-        return character.chars().next().map(KeyCode::Char);
+        let mut characters = character.chars();
+        let character = characters.next()?;
+        return characters
+            .next()
+            .is_none()
+            .then_some(KeyCode::Char(character));
     }
     Some(match value {
         "enter" => KeyCode::Enter,
@@ -986,6 +1089,7 @@ fn modifiers_from_storage(value: &str) -> Option<KeyModifiers> {
     let mut modifiers = KeyModifiers::NONE;
     for part in value.split(',') {
         match part {
+            "shift" => modifiers.insert(KeyModifiers::SHIFT),
             "ctrl" => modifiers.insert(KeyModifiers::CONTROL),
             "alt" => modifiers.insert(KeyModifiers::ALT),
             "super" => modifiers.insert(KeyModifiers::SUPER),
@@ -993,4 +1097,64 @@ fn modifiers_from_storage(value: &str) -> Option<KeyModifiers> {
         }
     }
     Some(modifiers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_movement_and_clamping_are_owned_together() {
+        let mut panel = KeymapPanelState::default();
+        panel.select_row(2);
+
+        panel.move_selection(1, usize::MAX, 5);
+        assert_eq!(panel.selected_row(), 4);
+
+        panel.move_selection(-1, usize::MAX, 5);
+        assert_eq!(panel.selected_row(), 0);
+
+        panel.select_row(8);
+        panel.clamp_selection(3);
+        assert_eq!(panel.selected_row(), 2);
+
+        panel.clamp_selection(0);
+        assert_eq!(panel.selected_row(), 0);
+    }
+
+    #[test]
+    fn closing_or_moving_cancels_capture_without_resetting_selection() {
+        let mut panel = KeymapPanelState::default();
+        panel.select_row(3);
+        panel.begin_capture(KeyAction::ToggleInfo);
+        panel.cancel_capture();
+
+        assert!(!panel.is_capturing());
+        assert_eq!(panel.selected_row(), 3);
+
+        panel.begin_capture(KeyAction::ToggleInfo);
+        panel.move_selection(1, 1, 6);
+        assert!(!panel.is_capturing());
+        assert_eq!(panel.selected_row(), 4);
+
+        panel.begin_capture(KeyAction::ToggleInfo);
+        panel.select_row(2);
+        assert!(!panel.is_capturing());
+
+        panel.begin_capture(KeyAction::ToggleInfo);
+        panel.clamp_selection(1);
+        assert!(!panel.is_capturing());
+        assert_eq!(panel.selected_row(), 0);
+    }
+
+    #[test]
+    fn key_specs_round_trip_supported_modifiers_and_reject_unsupported_ones() {
+        let spec = KeySpec::from_event(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT)).unwrap();
+
+        assert_eq!(spec.label(), "Shift-Up");
+        assert_eq!(spec.storage(), "shift:up");
+        assert_eq!(KeySpec::from_storage(&spec.storage()), Some(spec));
+        assert!(KeySpec::from_event(KeyEvent::new(KeyCode::Up, KeyModifiers::HYPER)).is_none());
+        assert!(KeySpec::from_event(KeyEvent::new(KeyCode::Up, KeyModifiers::META)).is_none());
+    }
 }
