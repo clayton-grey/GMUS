@@ -190,6 +190,8 @@ than the immediate reliability payoff justified.
 - Made root-level filesystem unavailability an explicit scan outcome, kept
   unavailable roots from hiding database failures, and reserved
   `last_scanned_at` for complete scans.
+- Documented macOS and Linux as the supported platforms while Windows path,
+  data-directory, and CI support remain intentionally out of scope.
 
 ## Later Reliability And Performance Work
 
@@ -197,5 +199,3 @@ than the immediate reliability payoff justified.
   modification time with stable filesystem identity evidence.
 - Skip metadata and artwork parsing for unchanged files during rescans.
 - Preserve non-UTF-8 filesystem paths without lossy string conversion.
-- Either add Windows path handling and CI or explicitly document Unix-like
-  platform support.

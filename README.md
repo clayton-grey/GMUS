@@ -45,10 +45,17 @@ cargo build --features bundled-sqlite
 cargo build --all-features
 ```
 
+### Supported Platforms
+
+GMUS supports macOS and Linux. CI runs the full test suite on both platforms,
+and the application currently assumes Unix-like filesystem paths and data
+directories. Windows is not supported yet.
+
 On Linux, the Rodio/CPAL stack may require system audio development packages
 such as ALSA headers. The CI workflow installs `libasound2-dev` and
 `pkg-config` for this. For the most portable SQLite build on Linux or Windows,
-use `--features bundled-sqlite`.
+use `--features bundled-sqlite`; this makes SQLite itself portable but does not
+add Windows application support.
 
 ## Development Checks
 
