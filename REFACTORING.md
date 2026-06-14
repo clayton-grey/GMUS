@@ -173,14 +173,22 @@ than the immediate reliability payoff justified.
 - Continue future TUI work from concrete feature, reliability, accessibility,
   or performance needs rather than field-count reduction.
 
+## Completed After Structural Refactoring
+
+- Gave background library-job threads explicit ownership through retained join
+  handles.
+- Kept normal job polling nonblocking while joining completed workers, and made
+  application shutdown wait for any active library job instead of detaching it.
+- Restored the terminal before shutdown waits for a running scan, so an owned
+  join cannot leave the user in a frozen raw-mode screen.
+- Added a final drop-time join guarantee for unexpected runner exit paths.
+
 ## Later Reliability And Performance Work
 
 - Replace conservative rename matching based on metadata, file size, and
   modification time with stable filesystem identity evidence.
 - Define an explicit best-effort policy for nested filesystem read failures
   during scans, not only metadata and artwork failures.
-- Give background library jobs explicit owned shutdown semantics instead of
-  detaching worker threads.
 - Define explicit complete, partial, and unavailable scan outcomes, including
   deleted single-file roots and unavailable volumes.
 - Skip metadata and artwork parsing for unchanged files during rescans.

@@ -33,8 +33,9 @@ pub fn run(conn: &Connection, paths: &AppPaths) -> Result<()> {
         }
     };
     let result = run_loop(&mut terminal, conn, &mut app);
-    let shutdown_result = app.shutdown(conn);
+    // Restore the user's terminal before shutdown waits for an active library scan.
     let restore_result = terminal.restore();
+    let shutdown_result = app.shutdown(conn);
     result.and(shutdown_result).and(restore_result)
 }
 

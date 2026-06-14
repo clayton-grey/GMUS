@@ -633,6 +633,29 @@ fn background_scan_completion_returns_to_idle() {
 }
 
 #[test]
+fn shutdown_joins_active_background_scan() {
+    let data_dir = tempdir().unwrap();
+    let db_path = data_dir.path().join("gmus.sqlite3");
+    let conn = db::open(&db_path).unwrap();
+    let mut app = test_app(Vec::new());
+    app.paths = AppPaths {
+        data_dir: data_dir.path().to_path_buf(),
+        db_path,
+        art_dir: data_dir.path().join("art"),
+    };
+    app.input.enter_command();
+    set_command_input(&mut app, String::from("update"));
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.library_job.is_some());
+
+    app.shutdown(&conn).unwrap();
+
+    assert!(app.library_job.is_none());
+}
+
+#[test]
 fn playlist_commands_run_while_background_scan_is_active() {
     let data_dir = tempdir().unwrap();
     let db_path = data_dir.path().join("gmus.sqlite3");

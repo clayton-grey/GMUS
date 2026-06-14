@@ -594,7 +594,7 @@ impl App {
     }
 
     pub(super) fn poll_library_job(&mut self, conn: &Connection) -> Result<bool> {
-        let result = match self.library_job.as_ref() {
+        let result = match self.library_job.as_mut() {
             Some(job) => match job.try_finish() {
                 Ok(Some(result)) => result,
                 Ok(None) => return Ok(false),
@@ -612,6 +612,13 @@ impl App {
         });
         self.finish_command_result(result);
         Ok(true)
+    }
+
+    pub(super) fn finish_library_job(&mut self) -> Result<()> {
+        let Some(mut job) = self.library_job.take() else {
+            return Ok(());
+        };
+        job.finish().map(|_| ())
     }
 
     fn finish_command_result(&mut self, result: Result<String>) {

@@ -612,10 +612,13 @@ impl App {
     }
 
     pub(super) fn shutdown(&mut self, conn: &Connection) -> Result<()> {
-        self.finish_current(conn, false)?;
-        self.player.stop()?;
-        self.sync_integration_playback(true);
-        Ok(())
+        let playback_result = self.finish_current(conn, false).and_then(|()| {
+            self.player.stop()?;
+            self.sync_integration_playback(true);
+            Ok(())
+        });
+        let library_job_result = self.finish_library_job();
+        playback_result.and(library_job_result)
     }
 
     fn increment_cached_play_count(&mut self, media_item_id: i64) {
