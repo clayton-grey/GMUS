@@ -184,15 +184,16 @@ than the immediate reliability payoff justified.
 - Added a final drop-time join guarantee for unexpected runner exit paths.
 - Counted all positive backend playback progress across long event-loop stalls,
   while preserving explicit-seek realignment and backward-jump protection.
+- Defined complete and partial scan outcomes: nested filesystem failures now
+  preserve readable progress while suppressing unsafe missing-file
+  reconciliation, and root-level unavailability still fails the root.
 
 ## Later Reliability And Performance Work
 
 - Replace conservative rename matching based on metadata, file size, and
   modification time with stable filesystem identity evidence.
-- Define an explicit best-effort policy for nested filesystem read failures
-  during scans, not only metadata and artwork failures.
-- Define explicit complete, partial, and unavailable scan outcomes, including
-  deleted single-file roots and unavailable volumes.
+- Define explicit unavailable scan results for deleted single-file roots and
+  unavailable volumes.
 - Skip metadata and artwork parsing for unchanged files during rescans.
 - Preserve non-UTF-8 filesystem paths without lossy string conversion.
 - Either add Windows path handling and CI or explicitly document Unix-like

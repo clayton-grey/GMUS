@@ -90,8 +90,12 @@ fn main() -> Result<()> {
                 unreachable!("add_root always scans one root");
             };
             println!(
-                "scanned {} files, stored {} tracks, cached {} covers, skipped {} files",
-                report.files_seen, report.tracks_stored, report.art_cached, report.files_skipped
+                "{} scan: scanned {} files, stored {} tracks, cached {} covers, skipped {} files",
+                report.outcome.label(),
+                report.files_seen,
+                report.tracks_stored,
+                report.art_cached,
+                report.files_skipped
             );
             if !report.errors.is_empty() {
                 println!("{} files had metadata/read errors:", report.errors.len());
@@ -186,7 +190,8 @@ fn main() -> Result<()> {
                     unreachable!("add_root always scans one root");
                 };
                 eprintln!(
-                    "scanned {} files, stored {} tracks, cached {} covers, skipped {} files",
+                    "{} scan: scanned {} files, stored {} tracks, cached {} covers, skipped {} files",
+                    report.outcome.label(),
                     report.files_seen,
                     report.tracks_stored,
                     report.art_cached,

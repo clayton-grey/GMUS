@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use crate::config::AppPaths;
 use crate::db;
-use crate::scanner::{self, ScanReport};
+use crate::scanner::{self, ScanOutcome, ScanReport};
 
 #[derive(Debug, Clone)]
 pub enum LibraryJob {
@@ -71,6 +71,7 @@ pub fn update_all_roots(conn: &Connection, paths: &AppPaths) -> Result<LibraryJo
                 successful_roots += 1;
             }
             Err(error) => {
+                report.outcome = ScanOutcome::Partial;
                 report.errors.push(format!("{}: {error:#}", path.display()));
             }
         }
@@ -106,9 +107,10 @@ pub fn job_status(result: &LibraryJobResult) -> String {
             attempted_roots,
             report,
         } => format!(
-            "updated {} of {} roots, scanned {} files, stored {} tracks, cached {} covers, skipped {}, missing {}, merged {}, errors {}",
+            "updated {} of {} roots ({}), scanned {} files, stored {} tracks, cached {} covers, skipped {}, missing {}, merged {}, errors {}",
             roots,
             attempted_roots,
+            report.outcome.label(),
             report.files_seen,
             report.tracks_stored,
             report.art_cached,
@@ -123,8 +125,9 @@ pub fn job_status(result: &LibraryJobResult) -> String {
 
 fn scan_status(action: &str, root: &Path, report: &ScanReport) -> String {
     let mut status = format!(
-        "{action} {}: stored {} tracks, cached {} covers, skipped {}",
+        "{action} {} ({}): stored {} tracks, cached {} covers, skipped {}",
         root.display(),
+        report.outcome.label(),
         report.tracks_stored,
         report.art_cached,
         report.files_skipped
@@ -142,6 +145,9 @@ fn scan_status(action: &str, root: &Path, report: &ScanReport) -> String {
 }
 
 fn merge_reports(report: &mut ScanReport, root_report: ScanReport) {
+    if root_report.outcome == ScanOutcome::Partial {
+        report.outcome = ScanOutcome::Partial;
+    }
     report.files_seen += root_report.files_seen;
     report.tracks_stored += root_report.tracks_stored;
     report.art_cached += root_report.art_cached;
@@ -178,8 +184,22 @@ mod tests {
         };
         assert_eq!(*roots, 1);
         assert_eq!(*attempted_roots, 2);
+        assert_eq!(report.outcome, ScanOutcome::Partial);
         assert_eq!(report.errors.len(), 1);
-        assert!(job_status(&result).starts_with("updated 1 of 2 roots"));
+        assert!(job_status(&result).starts_with("updated 1 of 2 roots (partial)"));
+    }
+
+    #[test]
+    fn statuses_surface_complete_and_partial_outcomes() {
+        let root = Path::new("/music");
+        let complete = ScanReport::default();
+        let partial = ScanReport {
+            outcome: ScanOutcome::Partial,
+            ..ScanReport::default()
+        };
+
+        assert!(scan_status("updated", root, &complete).contains("(complete)"));
+        assert!(scan_status("updated", root, &partial).contains("(partial)"));
     }
 
     fn test_paths(data_dir: &Path) -> AppPaths {

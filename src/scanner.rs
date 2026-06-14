@@ -9,8 +9,25 @@ use crate::config::AppPaths;
 use crate::db;
 use crate::media;
 
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum ScanOutcome {
+    #[default]
+    Complete,
+    Partial,
+}
+
+impl ScanOutcome {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Partial => "partial",
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ScanReport {
+    pub outcome: ScanOutcome,
     pub files_seen: usize,
     pub tracks_stored: usize,
     pub art_cached: usize,
@@ -70,9 +87,11 @@ fn reconcile_canonical_path(
 ) -> Result<ScanReport> {
     let mut report = ScanReport::default();
     let mut seen_paths = Vec::new();
-    scan_inner(conn, paths, root, &mut report, &mut seen_paths)?;
-    report.files_marked_missing =
-        db::mark_locations_missing_under_root_except(conn, root, &seen_paths)?;
+    scan_inner(conn, paths, root, &mut report, &mut seen_paths, false)?;
+    if report.outcome == ScanOutcome::Complete {
+        report.files_marked_missing =
+            db::mark_locations_missing_under_root_except(conn, root, &seen_paths)?;
+    }
     Ok(report)
 }
 
@@ -87,15 +106,42 @@ fn scan_inner(
     path: &Path,
     report: &mut ScanReport,
     seen_paths: &mut Vec<PathBuf>,
+    nested: bool,
 ) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("reading filesystem metadata for {}", path.display()))?;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if nested => {
+            report.outcome = ScanOutcome::Partial;
+            report.errors.push(format!(
+                "{}: reading filesystem metadata: {error:#}",
+                path.display()
+            ));
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("reading filesystem metadata for {}", path.display()));
+        }
+    };
     let metadata = if metadata.file_type().is_symlink() {
         match fs::metadata(path) {
             Ok(target) if target.is_file() => target,
-            _ => {
+            Ok(_) => {
                 report.files_skipped += 1;
                 return Ok(());
+            }
+            Err(error) if nested => {
+                report.outcome = ScanOutcome::Partial;
+                report.errors.push(format!(
+                    "{}: reading symlink target metadata: {error:#}",
+                    path.display()
+                ));
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("reading symlink target metadata for {}", path.display())
+                });
             }
         }
     } else {
@@ -103,11 +149,30 @@ fn scan_inner(
     };
 
     if metadata.is_dir() {
-        for entry in
-            fs::read_dir(path).with_context(|| format!("reading directory {}", path.display()))?
-        {
-            let entry = entry?;
-            scan_inner(conn, paths, &entry.path(), report, seen_paths)?;
+        let entries = match fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(error) if nested => {
+                report.outcome = ScanOutcome::Partial;
+                report
+                    .errors
+                    .push(format!("{}: reading directory: {error:#}", path.display()));
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading directory {}", path.display()));
+            }
+        };
+        for entry in entries {
+            match entry {
+                Ok(entry) => scan_inner(conn, paths, &entry.path(), report, seen_paths, true)?,
+                Err(error) => {
+                    report.outcome = ScanOutcome::Partial;
+                    report.errors.push(format!(
+                        "reading directory entry in {}: {error:#}",
+                        path.display()
+                    ));
+                }
+            }
         }
         return Ok(());
     }
@@ -209,6 +274,134 @@ mod tests {
         assert_eq!(report.errors.len(), 1);
         assert!(report.errors[0].contains("caching cover art"));
         assert_eq!(db::library_tracks(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn nested_filesystem_failure_marks_scan_partial_and_preserves_missing_tracks() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let missing_nested_path = root.join("missing").join("song.wav");
+        let existing_path = root.join("existing.wav");
+        write_test_wav(&existing_path);
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        db::upsert_track(&conn, &test_track_metadata(missing_nested_path.clone())).unwrap();
+        let paths = test_paths(data_dir.path().join("art"));
+        let mut report = ScanReport::default();
+        let mut seen_paths = Vec::new();
+
+        scan_inner(
+            &conn,
+            &paths,
+            &missing_nested_path,
+            &mut report,
+            &mut seen_paths,
+            true,
+        )
+        .unwrap();
+        scan_inner(
+            &conn,
+            &paths,
+            &existing_path,
+            &mut report,
+            &mut seen_paths,
+            true,
+        )
+        .unwrap();
+        if report.outcome == ScanOutcome::Complete {
+            report.files_marked_missing =
+                db::mark_locations_missing_under_root_except(&conn, &root, &seen_paths).unwrap();
+        }
+
+        assert_eq!(report.outcome, ScanOutcome::Partial);
+        assert_eq!(report.tracks_stored, 1);
+        assert_eq!(report.files_marked_missing, 0);
+        assert_eq!(report.errors.len(), 1);
+        assert_eq!(db::library_tracks(&conn).unwrap().len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unavailable_nested_symlink_target_makes_real_scan_partial_and_preserves_track() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let target_path = root.join("target.wav");
+        let symlink_path = root.join("linked.wav");
+        let sibling_path = root.join("sibling.wav");
+        write_test_wav(&target_path);
+        std::os::unix::fs::symlink(&target_path, &symlink_path).unwrap();
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        let paths = test_paths(data_dir.path().join("art"));
+
+        let complete = reconcile_canonical_path(&conn, &paths, &root).unwrap();
+        assert_eq!(complete.outcome, ScanOutcome::Complete);
+        assert_eq!(db::library_tracks(&conn).unwrap().len(), 2);
+
+        fs::remove_file(&target_path).unwrap();
+        write_test_wav(&sibling_path);
+        let partial = reconcile_canonical_path(&conn, &paths, &root).unwrap();
+
+        assert_eq!(partial.outcome, ScanOutcome::Partial);
+        assert_eq!(partial.files_marked_missing, 0);
+        assert_eq!(partial.errors.len(), 1);
+        assert!(partial.errors[0].contains("reading symlink target metadata"));
+        let tracks = db::library_tracks(&conn).unwrap();
+        assert_eq!(tracks.len(), 3);
+        assert!(tracks
+            .iter()
+            .any(|track| track.path == symlink_path.to_string_lossy()));
+        assert!(tracks
+            .iter()
+            .any(|track| track.path == sibling_path.to_string_lossy()));
+    }
+
+    #[test]
+    fn root_filesystem_failure_remains_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let missing_root = dir.path().join("missing");
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        let paths = test_paths(data_dir.path().join("art"));
+
+        let mut report = ScanReport::default();
+        let mut seen_paths = Vec::new();
+        let error = scan_inner(
+            &conn,
+            &paths,
+            &missing_root,
+            &mut report,
+            &mut seen_paths,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("reading filesystem metadata"));
+    }
+
+    #[test]
+    fn nested_database_failure_still_aborts_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let audio_path = root.join("song.wav");
+        write_test_wav(&audio_path);
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TRIGGER fail_location_insert
+            BEFORE INSERT ON locations
+            BEGIN
+                SELECT RAISE(FAIL, 'location insert failed');
+            END;
+            "#,
+        )
+        .unwrap();
+        let paths = test_paths(data_dir.path().join("art"));
+
+        let error = reconcile_canonical_path(&conn, &paths, &root).unwrap_err();
+
+        assert!(error.to_string().contains("location insert failed"));
     }
 
     #[cfg(unix)]
