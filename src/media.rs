@@ -20,6 +20,8 @@ pub struct TrackMetadata {
     pub path: PathBuf,
     pub file_size: i64,
     pub modified_at: Option<i64>,
+    pub fs_device: Option<i64>,
+    pub fs_inode: Option<i64>,
     pub title: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,
@@ -69,6 +71,7 @@ pub fn read_track(path: &Path) -> Result<TrackMetadata> {
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs() as i64);
+    let (fs_device, fs_inode) = filesystem_identity(&metadata);
 
     let tagged = lofty::read_from_path(path)
         .with_context(|| format!("reading audio metadata from {}", path.display()))?;
@@ -79,6 +82,8 @@ pub fn read_track(path: &Path) -> Result<TrackMetadata> {
         path: path.to_path_buf(),
         file_size: metadata.len() as i64,
         modified_at,
+        fs_device,
+        fs_inode,
         title: tag.and_then(|tag| tag.title().map(|value| value.to_string())),
         artist: tag.and_then(|tag| tag.artist().map(|value| value.to_string())),
         album: tag.and_then(|tag| tag.album().map(|value| value.to_string())),
@@ -96,6 +101,18 @@ pub fn read_track(path: &Path) -> Result<TrackMetadata> {
         duration_ms: Some(properties.duration().as_millis() as i64).filter(|value| *value > 0),
         compilation: tag_bool(tag, ItemKey::FlagCompilation),
     })
+}
+
+#[cfg(unix)]
+fn filesystem_identity(metadata: &fs::Metadata) -> (Option<i64>, Option<i64>) {
+    use std::os::unix::fs::MetadataExt;
+
+    (Some(metadata.dev() as i64), Some(metadata.ino() as i64))
+}
+
+#[cfg(not(unix))]
+fn filesystem_identity(_metadata: &fs::Metadata) -> (Option<i64>, Option<i64>) {
+    (None, None)
 }
 
 pub fn read_embedded_art(path: &Path) -> Result<Option<EmbeddedArt>> {
@@ -302,6 +319,8 @@ mod tests {
             path: PathBuf::from("/tmp/song.flac"),
             file_size: 10,
             modified_at: Some(1),
+            fs_device: None,
+            fs_inode: None,
             title: title.map(str::to_owned),
             artist: artist.map(str::to_owned),
             album: Some("album".into()),

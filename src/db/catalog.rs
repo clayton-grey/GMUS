@@ -81,16 +81,26 @@ pub fn upsert_track(conn: &Connection, track: &TrackMetadata) -> Result<StoredTr
     tx.execute(
         r#"
         INSERT INTO locations (
-            media_item_id, path, file_size, modified_at, seen_at, missing
-        ) VALUES (?1, ?2, ?3, ?4, ?5, 0)
+            media_item_id, path, file_size, modified_at, fs_device, fs_inode, seen_at, missing
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)
         ON CONFLICT(path) DO UPDATE SET
             media_item_id = excluded.media_item_id,
             file_size = excluded.file_size,
             modified_at = excluded.modified_at,
+            fs_device = excluded.fs_device,
+            fs_inode = excluded.fs_inode,
             seen_at = excluded.seen_at,
             missing = 0
         "#,
-        params![media_item_id, path, track.file_size, track.modified_at, now],
+        params![
+            media_item_id,
+            path,
+            track.file_size,
+            track.modified_at,
+            track.fs_device,
+            track.fs_inode,
+            now
+        ],
     )?;
 
     let location_id: i64 = tx.query_row(
@@ -358,38 +368,32 @@ pub fn mark_locations_missing_under_root_except(
     Ok(marked)
 }
 
-pub fn merge_similar_media_items(conn: &Connection) -> Result<usize> {
+pub fn reconcile_renamed_media_items(conn: &Connection) -> Result<usize> {
     let tx = conn.unchecked_transaction()?;
-    let mut groups: HashMap<String, Vec<MergeCandidate>> = HashMap::new();
+    let mut groups: HashMap<(i64, i64), Vec<MergeCandidate>> = HashMap::new();
     {
-        let sql = format!(
-            r#"
+        let sql = r#"
             SELECT
                 id,
-                title,
-                artist,
-                album,
-                album_artist,
-                track_number,
-                disc_number,
-                duration_ms,
-                COALESCE(
-                    (
-                        SELECT library_roots.path
-                        FROM locations
-                        JOIN library_roots
-                            ON {}
-                        WHERE locations.media_item_id = media_items.id
-                        ORDER BY locations.missing ASC, length(library_roots.path) DESC
-                        LIMIT 1
-                    ),
-                    ''
-                ),
                 (
                     SELECT COUNT(*)
                     FROM locations
                     WHERE locations.media_item_id = media_items.id
                         AND locations.missing = 0
+                ),
+                (
+                    SELECT fs_device
+                    FROM locations
+                    WHERE locations.media_item_id = media_items.id
+                    ORDER BY locations.missing ASC, locations.seen_at DESC, locations.id DESC
+                    LIMIT 1
+                ),
+                (
+                    SELECT fs_inode
+                    FROM locations
+                    WHERE locations.media_item_id = media_items.id
+                    ORDER BY locations.missing ASC, locations.seen_at DESC, locations.id DESC
+                    LIMIT 1
                 ),
                 (
                     SELECT file_size
@@ -407,30 +411,22 @@ pub fn merge_similar_media_items(conn: &Connection) -> Result<usize> {
                 )
             FROM media_items
             ORDER BY id
-            "#,
-            path_matches_root_sql("locations.path", "library_roots.path")
-        );
-        let mut stmt = tx.prepare(&sql)?;
+            "#;
+        let mut stmt = tx.prepare(sql)?;
         let rows = stmt.query_map([], |row| {
             Ok(MergeCandidate {
                 id: row.get(0)?,
-                title: row.get(1)?,
-                artist: row.get(2)?,
-                album: row.get(3)?,
-                album_artist: row.get(4)?,
-                track_number: row.get(5)?,
-                disc_number: row.get(6)?,
-                duration_ms: row.get(7)?,
-                library_root: row.get(8)?,
-                present_locations: row.get(9)?,
-                file_size: row.get(10)?,
-                modified_at: row.get(11)?,
+                present_locations: row.get(1)?,
+                fs_device: row.get(2)?,
+                fs_inode: row.get(3)?,
+                file_size: row.get(4)?,
+                modified_at: row.get(5)?,
             })
         })?;
 
         for row in rows {
             let candidate = row?;
-            if let Some(key) = candidate.similarity_key() {
+            if let Some(key) = candidate.filesystem_identity() {
                 groups.entry(key).or_default().push(candidate);
             }
         }
@@ -471,32 +467,16 @@ pub fn merge_similar_media_items(conn: &Connection) -> Result<usize> {
 #[derive(Debug)]
 struct MergeCandidate {
     id: i64,
-    title: Option<String>,
-    artist: Option<String>,
-    album: Option<String>,
-    album_artist: Option<String>,
-    track_number: Option<i64>,
-    disc_number: Option<i64>,
-    duration_ms: Option<i64>,
-    library_root: String,
     present_locations: i64,
+    fs_device: Option<i64>,
+    fs_inode: Option<i64>,
     file_size: Option<i64>,
     modified_at: Option<i64>,
 }
 
 impl MergeCandidate {
-    fn similarity_key(&self) -> Option<String> {
-        let title = normalize_identity_part(self.title.as_deref())?;
-        let artist =
-            normalize_identity_part(self.album_artist.as_deref().or(self.artist.as_deref()))?;
-        let album = normalize_identity_part(self.album.as_deref())?;
-        let disc = self.disc_number.unwrap_or(0);
-        let track = self.track_number.unwrap_or(0);
-        let duration_bucket = self.duration_ms.unwrap_or_default().max(0) / 3_000;
-        Some(format!(
-            "{}|{artist}|{album}|{disc}|{track}|{title}|{duration_bucket}",
-            self.library_root
-        ))
+    fn filesystem_identity(&self) -> Option<(i64, i64)> {
+        Some((self.fs_device?, self.fs_inode?))
     }
 
     fn file_signature(&self) -> Option<(i64, i64)> {
@@ -713,16 +693,6 @@ fn add_media_stats(conn: &Connection, media_item_id: i64, stats: &MediaStatsRow)
         ],
     )?;
     Ok(())
-}
-
-fn normalize_identity_part(value: Option<&str>) -> Option<String> {
-    let normalized = value?
-        .trim()
-        .to_ascii_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    (!normalized.is_empty()).then_some(normalized)
 }
 
 pub fn set_cover_path(conn: &Connection, media_item_id: i64, path: &Path) -> Result<()> {

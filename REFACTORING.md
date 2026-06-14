@@ -192,10 +192,11 @@ than the immediate reliability payoff justified.
   `last_scanned_at` for complete scans.
 - Documented macOS and Linux as the supported platforms while Windows path,
   data-directory, and CI support remain intentionally out of scope.
+- Replaced metadata-based rename guesses with persisted Unix device/inode
+  identity, guarded against inode reuse with exact file signatures, and kept
+  legacy rows without identity from merging speculatively.
 
 ## Later Reliability And Performance Work
 
-- Replace conservative rename matching based on metadata, file size, and
-  modification time with stable filesystem identity evidence.
 - Skip metadata and artwork parsing for unchanged files during rescans.
 - Preserve non-UTF-8 filesystem paths without lossy string conversion.

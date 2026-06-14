@@ -80,7 +80,7 @@ pub fn update_all_roots(conn: &Connection, paths: &AppPaths) -> Result<LibraryJo
         merge_reports(&mut report, root_report);
     }
     if successful_roots > 0 {
-        report.duplicate_tracks_merged = db::merge_similar_media_items(conn)?;
+        report.duplicate_tracks_merged = db::reconcile_renamed_media_items(conn)?;
     }
     report.outcome = if successful_roots == 0 {
         ScanOutcome::Unavailable

@@ -101,7 +101,7 @@ pub(crate) fn rescan_path_deferred_merge(
 fn rescan_canonical_path(conn: &Connection, paths: &AppPaths, root: &Path) -> Result<ScanReport> {
     let mut report = reconcile_canonical_path(conn, paths, root)?;
     if report.outcome != ScanOutcome::Unavailable {
-        report.duplicate_tracks_merged = db::merge_similar_media_items(conn)?;
+        report.duplicate_tracks_merged = db::reconcile_renamed_media_items(conn)?;
     }
     Ok(report)
 }
@@ -282,6 +282,38 @@ mod tests {
 
         assert_eq!(report.files_marked_missing, 1);
         assert!(db::library_tracks(&conn).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rescan_preserves_history_after_real_file_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let old_path = root.join("old.wav");
+        let new_path = root.join("new.wav");
+        write_test_wav(&old_path);
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        let paths = test_paths(data_dir.path().join("art"));
+        add_library_root(&conn, &paths, &root).unwrap();
+        let original = db::library_tracks(&conn).unwrap().remove(0);
+        db::record_play(
+            &conn,
+            original.media_item_id,
+            original.location_id,
+            100,
+            true,
+        )
+        .unwrap();
+        fs::rename(&old_path, &new_path).unwrap();
+
+        let (_, report) = update_library_root(&conn, &paths, &root).unwrap();
+
+        assert_eq!(report.duplicate_tracks_merged, 1);
+        let tracks = db::library_tracks(&conn).unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].path, new_path.to_string_lossy());
+        assert_eq!(tracks[0].play_count, 1);
     }
 
     #[test]
@@ -530,6 +562,8 @@ mod tests {
             path,
             file_size: 10,
             modified_at: Some(1),
+            fs_device: None,
+            fs_inode: None,
             title: Some("Song".into()),
             artist: Some("Artist".into()),
             album: Some("Album".into()),

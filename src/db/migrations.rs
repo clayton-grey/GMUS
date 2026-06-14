@@ -5,7 +5,7 @@ use super::catalog::split_legacy_location;
 use super::playlists::ensure_playlist_tracks_allow_duplicates;
 use super::settings::ensure_key_bindings_allow_duplicates;
 
-pub(super) const SCHEMA_VERSION: i64 = 2;
+pub(super) const SCHEMA_VERSION: i64 = 3;
 
 pub(super) fn migrate(conn: &Connection) -> Result<()> {
     migrate_to_version(conn, SCHEMA_VERSION)
@@ -49,6 +49,7 @@ fn migrate_in_transaction(conn: &Connection, target_version: i64) -> Result<()> 
         match next_version {
             1 => migrate_v1(&tx)?,
             2 => migrate_v2(&tx)?,
+            3 => migrate_v3(&tx)?,
             _ => unreachable!("schema migration is defined"),
         }
         tx.pragma_update(None, "user_version", next_version)?;
@@ -234,6 +235,19 @@ fn migrate_v2(conn: &Connection) -> Result<()> {
         CREATE UNIQUE INDEX idx_locations_one_present_per_media_item
             ON locations(media_item_id)
             WHERE missing = 0;
+        "#,
+    )?;
+    Ok(())
+}
+
+fn migrate_v3(conn: &Connection) -> Result<()> {
+    ensure_column(conn, "locations", "fs_device", "INTEGER")?;
+    ensure_column(conn, "locations", "fs_inode", "INTEGER")?;
+    conn.execute_batch(
+        r#"
+        CREATE INDEX idx_locations_filesystem_identity
+            ON locations(fs_device, fs_inode)
+            WHERE fs_device IS NOT NULL AND fs_inode IS NOT NULL;
         "#,
     )?;
     Ok(())

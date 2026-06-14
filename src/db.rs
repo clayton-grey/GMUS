@@ -19,7 +19,7 @@ pub use catalog::mark_locations_missing_under_root;
 use catalog::media_stats_row;
 #[allow(unused_imports)]
 pub use catalog::{
-    library_tracks, mark_locations_missing_under_root_except, merge_similar_media_items,
+    library_tracks, mark_locations_missing_under_root_except, reconcile_renamed_media_items,
     set_cover_path, upsert_track, LibraryTrack, StoredTrack,
 };
 #[cfg(test)]
@@ -352,6 +352,17 @@ mod tests {
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
         assert_eq!(library_tracks(&conn).unwrap().len(), 1);
         assert!(table_has_column(&conn, "media_items", "duplicate_key"));
+        assert!(table_has_column(&conn, "locations", "fs_device"));
+        assert!(table_has_column(&conn, "locations", "fs_inode"));
+        assert_eq!(
+            conn.query_row(
+                "SELECT fs_device, fs_inode FROM locations WHERE id = 1",
+                [],
+                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?))
+            )
+            .unwrap(),
+            (None, None)
+        );
         assert!(foreign_keys_enabled(&conn));
         assert_eq!(integrity_check(&conn), "ok");
     }
@@ -554,6 +565,8 @@ mod tests {
             path: "/tmp/song.flac".into(),
             file_size: 10,
             modified_at: Some(1),
+            fs_device: None,
+            fs_inode: None,
             title: Some("Track".into()),
             artist: Some("Artist".into()),
             album: Some("Album".into()),
@@ -600,6 +613,8 @@ mod tests {
             path: "/tmp/alpha.flac".into(),
             file_size: 10,
             modified_at: Some(1),
+            fs_device: None,
+            fs_inode: None,
             title: Some("Newer Track".into()),
             artist: Some("Artist".into()),
             album: Some("Alpha".into()),
@@ -619,6 +634,8 @@ mod tests {
             path: "/tmp/zulu.flac".into(),
             file_size: 10,
             modified_at: Some(1),
+            fs_device: None,
+            fs_inode: None,
             title: Some("Older Track".into()),
             artist: Some("Artist".into()),
             album: Some("Zulu".into()),
@@ -716,6 +733,8 @@ mod tests {
             path: "/tmp/music/song.flac".into(),
             file_size: 10,
             modified_at: Some(1),
+            fs_device: None,
+            fs_inode: None,
             title: Some("In Root".into()),
             artist: Some("Artist".into()),
             album: Some("Album".into()),
@@ -735,6 +754,8 @@ mod tests {
             path: "/tmp/other/song.flac".into(),
             file_size: 10,
             modified_at: Some(1),
+            fs_device: None,
+            fs_inode: None,
             title: Some("Outside Root".into()),
             artist: Some("Artist".into()),
             album: Some("Album".into()),
@@ -934,7 +955,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_similar_media_items_combines_play_counts_for_renamed_tracks() {
+    fn rename_reconciliation_combines_play_counts() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         let old = test_track_metadata("/tmp/music/wrong-name.flac", "Same Track", 1, 120_000);
@@ -952,7 +973,7 @@ mod tests {
         mark_locations_missing_under_root(&conn, Path::new("/tmp/music")).unwrap();
         upsert_track(&conn, &renamed).unwrap();
 
-        let merged = merge_similar_media_items(&conn).unwrap();
+        let merged = reconcile_renamed_media_items(&conn).unwrap();
         let tracks = library_tracks(&conn).unwrap();
 
         assert_eq!(merged, 1);
@@ -963,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_similar_media_items_preserves_playlist_entries() {
+    fn rename_reconciliation_preserves_playlist_entries() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         let old = test_track_metadata("/tmp/music/wrong-name.flac", "Same Track", 1, 120_000);
@@ -994,7 +1015,7 @@ mod tests {
         mark_locations_missing_under_root(&conn, Path::new("/tmp/music")).unwrap();
         let renamed_stored = upsert_track(&conn, &renamed).unwrap();
 
-        let merged = merge_similar_media_items(&conn).unwrap();
+        let merged = reconcile_renamed_media_items(&conn).unwrap();
 
         assert_eq!(merged, 1);
         assert_eq!(
@@ -1017,7 +1038,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_similar_media_items_refuses_groups_with_multiple_present_candidates() {
+    fn rename_reconciliation_refuses_groups_with_multiple_present_candidates() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         let first = test_track_metadata("/tmp/music/first.flac", "Same Track", 1, 120_000);
@@ -1026,7 +1047,7 @@ mod tests {
         upsert_track(&conn, &first).unwrap();
         upsert_track(&conn, &second).unwrap();
 
-        let merged = merge_similar_media_items(&conn).unwrap();
+        let merged = reconcile_renamed_media_items(&conn).unwrap();
 
         assert_eq!(merged, 0);
         assert_eq!(stats(&conn).unwrap().media_items, 2);
@@ -1043,7 +1064,7 @@ mod tests {
 
         let first_stored = upsert_track(&conn, &first).unwrap();
         let second_stored = upsert_track(&conn, &second).unwrap();
-        let merged = merge_similar_media_items(&conn).unwrap();
+        let merged = reconcile_renamed_media_items(&conn).unwrap();
         second.track_number = Some(2);
         let retagged_second = upsert_track(&conn, &second).unwrap();
         let tracks = library_tracks(&conn).unwrap();
@@ -1062,7 +1083,26 @@ mod tests {
     }
 
     #[test]
-    fn merge_similar_media_items_requires_matching_file_signature() {
+    fn rename_reconciliation_requires_matching_filesystem_identity() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let first = test_track_metadata("/tmp/music/first.flac", "Same Track", 1, 120_000);
+        let mut second = first.clone();
+        second.path = "/tmp/music/second.flac".into();
+        second.fs_inode = Some(2);
+
+        let first_stored = upsert_track(&conn, &first).unwrap();
+        let second_stored = upsert_track(&conn, &second).unwrap();
+        mark_locations_missing_under_root(&conn, Path::new("/tmp/music")).unwrap();
+        upsert_track(&conn, &first).unwrap();
+
+        assert_eq!(reconcile_renamed_media_items(&conn).unwrap(), 0);
+        assert_eq!(stats(&conn).unwrap().media_items, 2);
+        assert_ne!(first_stored.media_item_id, second_stored.media_item_id);
+    }
+
+    #[test]
+    fn rename_reconciliation_rejects_reused_identity_with_different_file_signature() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         let first = test_track_metadata("/tmp/music/first.flac", "Same Track", 1, 120_000);
@@ -1070,14 +1110,30 @@ mod tests {
         second.path = "/tmp/music/second.flac".into();
         second.modified_at = Some(2);
 
-        let first_stored = upsert_track(&conn, &first).unwrap();
-        let second_stored = upsert_track(&conn, &second).unwrap();
-        mark_locations_missing_under_root(&conn, Path::new("/tmp/music")).unwrap();
         upsert_track(&conn, &first).unwrap();
+        mark_locations_missing_under_root(&conn, Path::new("/tmp/music")).unwrap();
+        upsert_track(&conn, &second).unwrap();
 
-        assert_eq!(merge_similar_media_items(&conn).unwrap(), 0);
+        assert_eq!(reconcile_renamed_media_items(&conn).unwrap(), 0);
         assert_eq!(stats(&conn).unwrap().media_items, 2);
-        assert_ne!(first_stored.media_item_id, second_stored.media_item_id);
+    }
+
+    #[test]
+    fn rename_reconciliation_does_not_guess_legacy_rename_without_filesystem_identity() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let mut old = test_track_metadata("/tmp/music/old.flac", "Same Track", 1, 120_000);
+        old.fs_device = None;
+        old.fs_inode = None;
+        let mut renamed = old.clone();
+        renamed.path = "/tmp/music/renamed.flac".into();
+
+        upsert_track(&conn, &old).unwrap();
+        mark_locations_missing_under_root(&conn, Path::new("/tmp/music")).unwrap();
+        upsert_track(&conn, &renamed).unwrap();
+
+        assert_eq!(reconcile_renamed_media_items(&conn).unwrap(), 0);
+        assert_eq!(stats(&conn).unwrap().media_items, 2);
     }
 
     #[test]
@@ -1099,7 +1155,7 @@ mod tests {
         .unwrap();
         mark_locations_missing_under_root(&conn, Path::new("/tmp/music")).unwrap();
         let renamed_stored = upsert_track(&conn, &renamed).unwrap();
-        assert_eq!(merge_similar_media_items(&conn).unwrap(), 1);
+        assert_eq!(reconcile_renamed_media_items(&conn).unwrap(), 1);
         set_cover_path(
             &conn,
             renamed_stored.media_item_id,
@@ -1113,7 +1169,7 @@ mod tests {
             reappeared_stored.media_item_id,
             renamed_stored.media_item_id
         );
-        assert_eq!(merge_similar_media_items(&conn).unwrap(), 0);
+        assert_eq!(reconcile_renamed_media_items(&conn).unwrap(), 0);
         assert_eq!(library_tracks(&conn).unwrap().len(), 2);
         assert_eq!(
             media_stats_row(&conn, renamed_stored.media_item_id)
@@ -1150,7 +1206,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_similar_media_items_refuses_groups_without_a_present_candidate() {
+    fn rename_reconciliation_refuses_groups_without_a_present_candidate() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         let first = test_track_metadata("/tmp/music/first.flac", "Same Track", 1, 120_000);
@@ -1160,7 +1216,7 @@ mod tests {
         upsert_track(&conn, &second).unwrap();
         mark_locations_missing_under_root(&conn, Path::new("/tmp/music")).unwrap();
 
-        let merged = merge_similar_media_items(&conn).unwrap();
+        let merged = reconcile_renamed_media_items(&conn).unwrap();
 
         assert_eq!(merged, 0);
         assert_eq!(stats(&conn).unwrap().media_items, 2);
@@ -1284,6 +1340,8 @@ mod tests {
             path: path.into(),
             file_size: 10,
             modified_at: Some(1),
+            fs_device: Some(1),
+            fs_inode: Some(track_number),
             title: Some(title.into()),
             artist: Some("Artist".into()),
             album: Some("Album".into()),
