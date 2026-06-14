@@ -9,6 +9,8 @@ use lofty::prelude::Accessor;
 use lofty::tag::{ItemKey, Tag};
 use sha2::{Digest, Sha256};
 
+pub const SCAN_VERSION: i64 = 1;
+
 #[derive(Debug, Clone)]
 pub struct EmbeddedArt {
     pub bytes: Vec<u8>,
@@ -20,6 +22,7 @@ pub struct TrackMetadata {
     pub path: PathBuf,
     pub file_size: i64,
     pub modified_at: Option<i64>,
+    pub modified_at_ns: Option<i64>,
     pub fs_device: Option<i64>,
     pub fs_inode: Option<i64>,
     pub title: Option<String>,
@@ -36,6 +39,15 @@ pub struct TrackMetadata {
     pub disc_total: Option<i64>,
     pub duration_ms: Option<i64>,
     pub compilation: bool,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct FileStamp {
+    pub file_size: i64,
+    pub modified_at: Option<i64>,
+    pub modified_at_ns: Option<i64>,
+    pub fs_device: Option<i64>,
+    pub fs_inode: Option<i64>,
 }
 
 impl TrackMetadata {
@@ -66,13 +78,10 @@ impl TrackMetadata {
 pub fn read_track(path: &Path) -> Result<TrackMetadata> {
     let metadata = fs::metadata(path)
         .with_context(|| format!("reading filesystem metadata for {}", path.display()))?;
-    let modified_at = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs() as i64);
-    let (fs_device, fs_inode) = filesystem_identity(&metadata);
+    read_track_with_stamp(path, file_stamp(&metadata))
+}
 
+pub fn read_track_with_stamp(path: &Path, stamp: FileStamp) -> Result<TrackMetadata> {
     let tagged = lofty::read_from_path(path)
         .with_context(|| format!("reading audio metadata from {}", path.display()))?;
     let properties = tagged.properties();
@@ -80,10 +89,11 @@ pub fn read_track(path: &Path) -> Result<TrackMetadata> {
 
     Ok(TrackMetadata {
         path: path.to_path_buf(),
-        file_size: metadata.len() as i64,
-        modified_at,
-        fs_device,
-        fs_inode,
+        file_size: stamp.file_size,
+        modified_at: stamp.modified_at,
+        modified_at_ns: stamp.modified_at_ns,
+        fs_device: stamp.fs_device,
+        fs_inode: stamp.fs_inode,
         title: tag.and_then(|tag| tag.title().map(|value| value.to_string())),
         artist: tag.and_then(|tag| tag.artist().map(|value| value.to_string())),
         album: tag.and_then(|tag| tag.album().map(|value| value.to_string())),
@@ -101,6 +111,21 @@ pub fn read_track(path: &Path) -> Result<TrackMetadata> {
         duration_ms: Some(properties.duration().as_millis() as i64).filter(|value| *value > 0),
         compilation: tag_bool(tag, ItemKey::FlagCompilation),
     })
+}
+
+pub fn file_stamp(metadata: &fs::Metadata) -> FileStamp {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok());
+    let (fs_device, fs_inode) = filesystem_identity(metadata);
+    FileStamp {
+        file_size: metadata.len() as i64,
+        modified_at: modified.map(|duration| duration.as_secs() as i64),
+        modified_at_ns: modified.and_then(|duration| i64::try_from(duration.as_nanos()).ok()),
+        fs_device,
+        fs_inode,
+    }
 }
 
 #[cfg(unix)]
@@ -319,6 +344,7 @@ mod tests {
             path: PathBuf::from("/tmp/song.flac"),
             file_size: 10,
             modified_at: Some(1),
+            modified_at_ns: Some(1_000_000_000),
             fs_device: None,
             fs_inode: None,
             title: title.map(str::to_owned),

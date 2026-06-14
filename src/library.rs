@@ -117,13 +117,14 @@ pub fn job_status(result: &LibraryJobResult) -> String {
             attempted_roots,
             report,
         } => format!(
-            "updated {} of {} roots ({}), scanned {} files, stored {} tracks, cached {} covers, skipped {}, missing {}, merged {}, errors {}",
+            "updated {} of {} roots ({}), scanned {} files, stored {} tracks, cached {} covers, unchanged {}, skipped {}, missing {}, merged {}, errors {}",
             roots,
             attempted_roots,
             report.outcome.label(),
             report.files_seen,
             report.tracks_stored,
             report.art_cached,
+            report.files_unchanged,
             report.files_skipped,
             report.files_marked_missing,
             report.duplicate_tracks_merged,
@@ -135,11 +136,12 @@ pub fn job_status(result: &LibraryJobResult) -> String {
 
 fn scan_status(action: &str, root: &Path, report: &ScanReport) -> String {
     let mut status = format!(
-        "{action} {} ({}): stored {} tracks, cached {} covers, skipped {}",
+        "{action} {} ({}): stored {} tracks, cached {} covers, unchanged {}, skipped {}",
         root.display(),
         report.outcome.label(),
         report.tracks_stored,
         report.art_cached,
+        report.files_unchanged,
         report.files_skipped
     );
     if !report.errors.is_empty() {
@@ -158,6 +160,7 @@ fn merge_reports(report: &mut ScanReport, root_report: ScanReport) {
     report.files_seen += root_report.files_seen;
     report.tracks_stored += root_report.tracks_stored;
     report.art_cached += root_report.art_cached;
+    report.files_unchanged += root_report.files_unchanged;
     report.files_skipped += root_report.files_skipped;
     report.files_marked_missing += root_report.files_marked_missing;
     report.duplicate_tracks_merged += root_report.duplicate_tracks_merged;

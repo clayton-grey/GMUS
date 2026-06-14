@@ -33,6 +33,7 @@ pub struct ScanReport {
     pub files_seen: usize,
     pub tracks_stored: usize,
     pub art_cached: usize,
+    pub files_unchanged: usize,
     pub files_skipped: usize,
     pub files_marked_missing: usize,
     pub duplicate_tracks_merged: usize,
@@ -210,17 +211,23 @@ fn scan_inner(
         return Ok(());
     }
     seen_paths.push(path.to_path_buf());
+    let stamp = media::file_stamp(&metadata);
+    if db::location_scan_is_current(conn, path, stamp)? {
+        report.files_unchanged += 1;
+        return Ok(());
+    }
 
-    match media::read_track(path) {
+    match media::read_track_with_stamp(path, stamp) {
         Ok(track) => {
             let stored = db::upsert_track(conn, &track)?;
             report.tracks_stored += 1;
             match art::cache_cover_for_track(&track, &paths.art_dir, stored.media_item_id) {
                 Ok(Some(cover_path)) => {
                     db::set_cover_path(conn, stored.media_item_id, &cover_path)?;
+                    db::mark_location_scan_current(conn, path)?;
                     report.art_cached += 1;
                 }
-                Ok(None) => {}
+                Ok(None) => db::mark_location_scan_current(conn, path)?,
                 Err(error) => report
                     .errors
                     .push(format!("{}: caching cover art: {error:#}", path.display())),
@@ -284,6 +291,51 @@ mod tests {
         assert!(db::library_tracks(&conn).unwrap().is_empty());
     }
 
+    #[test]
+    fn repeated_scan_skips_unchanged_audio_metadata_and_artwork() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let audio_path = root.join("song.wav");
+        write_test_wav(&audio_path);
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        let paths = test_paths(data_dir.path().join("art"));
+
+        add_library_root(&conn, &paths, &root).unwrap();
+        let stamp = media::file_stamp(&fs::metadata(&audio_path).unwrap());
+        assert!(db::location_scan_is_current(&conn, &audio_path, stamp).unwrap());
+        let changed_stamp = media::FileStamp {
+            modified_at_ns: stamp.modified_at_ns.map(|value| value + 1),
+            ..stamp
+        };
+        assert!(!db::location_scan_is_current(&conn, &audio_path, changed_stamp).unwrap());
+        let (_, report) = update_library_root(&conn, &paths, &root).unwrap();
+
+        assert_eq!(report.files_seen, 1);
+        assert_eq!(report.files_unchanged, 1);
+        assert_eq!(report.tracks_stored, 0);
+        assert_eq!(report.art_cached, 0);
+    }
+
+    #[test]
+    fn stale_scan_version_forces_metadata_and_artwork_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let audio_path = root.join("song.wav");
+        write_test_wav(&audio_path);
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        let paths = test_paths(data_dir.path().join("art"));
+        add_library_root(&conn, &paths, &root).unwrap();
+        conn.execute("UPDATE locations SET scan_version = 0", [])
+            .unwrap();
+
+        let (_, report) = update_library_root(&conn, &paths, &root).unwrap();
+
+        assert_eq!(report.files_unchanged, 0);
+        assert_eq!(report.tracks_stored, 1);
+    }
+
     #[cfg(unix)]
     #[test]
     fn rescan_preserves_history_after_real_file_rename() {
@@ -336,6 +388,11 @@ mod tests {
         assert_eq!(report.errors.len(), 1);
         assert!(report.errors[0].contains("caching cover art"));
         assert_eq!(db::library_tracks(&conn).unwrap().len(), 1);
+
+        let (_, retry) = update_library_root(&conn, &paths, &root).unwrap();
+        assert_eq!(retry.files_unchanged, 0);
+        assert_eq!(retry.tracks_stored, 1);
+        assert_eq!(retry.errors.len(), 1);
     }
 
     #[test]
@@ -562,6 +619,7 @@ mod tests {
             path,
             file_size: 10,
             modified_at: Some(1),
+            modified_at_ns: Some(1_000_000_000),
             fs_device: None,
             fs_inode: None,
             title: Some("Song".into()),

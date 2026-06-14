@@ -19,8 +19,9 @@ pub use catalog::mark_locations_missing_under_root;
 use catalog::media_stats_row;
 #[allow(unused_imports)]
 pub use catalog::{
-    library_tracks, mark_locations_missing_under_root_except, reconcile_renamed_media_items,
-    set_cover_path, upsert_track, LibraryTrack, StoredTrack,
+    library_tracks, location_scan_is_current, mark_location_scan_current,
+    mark_locations_missing_under_root_except, reconcile_renamed_media_items, set_cover_path,
+    upsert_track, LibraryTrack, StoredTrack,
 };
 #[cfg(test)]
 use history::count;
@@ -354,14 +355,23 @@ mod tests {
         assert!(table_has_column(&conn, "media_items", "duplicate_key"));
         assert!(table_has_column(&conn, "locations", "fs_device"));
         assert!(table_has_column(&conn, "locations", "fs_inode"));
+        assert!(table_has_column(&conn, "locations", "modified_at_ns"));
+        assert!(table_has_column(&conn, "locations", "scan_version"));
         assert_eq!(
             conn.query_row(
-                "SELECT fs_device, fs_inode FROM locations WHERE id = 1",
+                "SELECT fs_device, fs_inode, modified_at_ns, scan_version FROM locations WHERE id = 1",
                 [],
-                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?))
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                }
             )
             .unwrap(),
-            (None, None)
+            (None, None, None, None)
         );
         assert!(foreign_keys_enabled(&conn));
         assert_eq!(integrity_check(&conn), "ok");
@@ -565,6 +575,7 @@ mod tests {
             path: "/tmp/song.flac".into(),
             file_size: 10,
             modified_at: Some(1),
+            modified_at_ns: Some(1_000_000_000),
             fs_device: None,
             fs_inode: None,
             title: Some("Track".into()),
@@ -613,6 +624,7 @@ mod tests {
             path: "/tmp/alpha.flac".into(),
             file_size: 10,
             modified_at: Some(1),
+            modified_at_ns: Some(1_000_000_000),
             fs_device: None,
             fs_inode: None,
             title: Some("Newer Track".into()),
@@ -634,6 +646,7 @@ mod tests {
             path: "/tmp/zulu.flac".into(),
             file_size: 10,
             modified_at: Some(1),
+            modified_at_ns: Some(1_000_000_000),
             fs_device: None,
             fs_inode: None,
             title: Some("Older Track".into()),
@@ -733,6 +746,7 @@ mod tests {
             path: "/tmp/music/song.flac".into(),
             file_size: 10,
             modified_at: Some(1),
+            modified_at_ns: Some(1_000_000_000),
             fs_device: None,
             fs_inode: None,
             title: Some("In Root".into()),
@@ -754,6 +768,7 @@ mod tests {
             path: "/tmp/other/song.flac".into(),
             file_size: 10,
             modified_at: Some(1),
+            modified_at_ns: Some(1_000_000_000),
             fs_device: None,
             fs_inode: None,
             title: Some("Outside Root".into()),
@@ -1340,6 +1355,7 @@ mod tests {
             path: path.into(),
             file_size: 10,
             modified_at: Some(1),
+            modified_at_ns: Some(1_000_000_000),
             fs_device: Some(1),
             fs_inode: Some(track_number),
             title: Some(title.into()),

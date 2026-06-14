@@ -154,6 +154,7 @@ fn test_track_metadata(path: &str, title: &str, track_number: i64) -> crate::med
         path: path.into(),
         file_size: 10,
         modified_at: Some(1),
+        modified_at_ns: Some(1_000_000_000),
         fs_device: None,
         fs_inode: None,
         title: Some(title.to_string()),

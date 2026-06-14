@@ -90,11 +90,12 @@ fn main() -> Result<()> {
                 unreachable!("add_root always scans one root");
             };
             println!(
-                "{} scan: scanned {} files, stored {} tracks, cached {} covers, skipped {} files",
+                "{} scan: scanned {} files, stored {} tracks, cached {} covers, unchanged {} files, skipped {} files",
                 report.outcome.label(),
                 report.files_seen,
                 report.tracks_stored,
                 report.art_cached,
+                report.files_unchanged,
                 report.files_skipped
             );
             if !report.errors.is_empty() {
@@ -190,11 +191,12 @@ fn main() -> Result<()> {
                     unreachable!("add_root always scans one root");
                 };
                 eprintln!(
-                    "{} scan: scanned {} files, stored {} tracks, cached {} covers, skipped {} files",
+                    "{} scan: scanned {} files, stored {} tracks, cached {} covers, unchanged {} files, skipped {} files",
                     report.outcome.label(),
                     report.files_seen,
                     report.tracks_stored,
                     report.art_cached,
+                    report.files_unchanged,
                     report.files_skipped
                 );
             }

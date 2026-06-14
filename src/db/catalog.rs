@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::media::TrackMetadata;
+use crate::media::{FileStamp, TrackMetadata, SCAN_VERSION};
 
 use super::now_unix;
 
@@ -81,22 +81,26 @@ pub fn upsert_track(conn: &Connection, track: &TrackMetadata) -> Result<StoredTr
     tx.execute(
         r#"
         INSERT INTO locations (
-            media_item_id, path, file_size, modified_at, fs_device, fs_inode, seen_at, missing
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)
+            media_item_id, path, file_size, modified_at, modified_at_ns,
+            fs_device, fs_inode, seen_at, missing, scan_version
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, NULL)
         ON CONFLICT(path) DO UPDATE SET
             media_item_id = excluded.media_item_id,
             file_size = excluded.file_size,
             modified_at = excluded.modified_at,
+            modified_at_ns = excluded.modified_at_ns,
             fs_device = excluded.fs_device,
             fs_inode = excluded.fs_inode,
             seen_at = excluded.seen_at,
-            missing = 0
+            missing = 0,
+            scan_version = NULL
         "#,
         params![
             media_item_id,
             path,
             track.file_size,
             track.modified_at,
+            track.modified_at_ns,
             track.fs_device,
             track.fs_inode,
             now
@@ -123,6 +127,42 @@ pub fn upsert_track(conn: &Connection, track: &TrackMetadata) -> Result<StoredTr
         media_item_id,
         location_id,
     })
+}
+
+pub fn location_scan_is_current(conn: &Connection, path: &Path, stamp: FileStamp) -> Result<bool> {
+    conn.query_row(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM locations
+            WHERE path = ?1
+                AND missing = 0
+                AND file_size IS ?2
+                AND modified_at_ns IS ?3
+                AND fs_device IS ?4
+                AND fs_inode IS ?5
+                AND scan_version = ?6
+        )
+        "#,
+        params![
+            path.to_string_lossy(),
+            stamp.file_size,
+            stamp.modified_at_ns,
+            stamp.fs_device,
+            stamp.fs_inode,
+            SCAN_VERSION
+        ],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+pub fn mark_location_scan_current(conn: &Connection, path: &Path) -> Result<()> {
+    conn.execute(
+        "UPDATE locations SET scan_version = ?1 WHERE path = ?2 AND missing = 0",
+        params![SCAN_VERSION, path.to_string_lossy()],
+    )?;
+    Ok(())
 }
 
 fn insert_media_item(conn: &Connection, track: &TrackMetadata, now: i64) -> Result<i64> {
