@@ -10,8 +10,6 @@ use crate::player::{self, PlaybackState};
 
 use super::{App, TrackRow, TreeEntry};
 
-const MAX_LISTENED_DELTA_MS: i64 = 10_000;
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum PlayTarget {
     Library,
@@ -283,9 +281,9 @@ impl PlayingTrack {
     pub(super) fn tick_position(&mut self, position: Duration, state: PlaybackState) {
         let position_ms = position.as_millis() as i64;
         if state == PlaybackState::Playing {
-            let delta = position_ms - self.last_position_ms;
-            if delta > 0 && delta <= MAX_LISTENED_DELTA_MS {
-                self.listened_ms += delta;
+            let delta = position_ms.saturating_sub(self.last_position_ms);
+            if delta > 0 {
+                self.listened_ms = self.listened_ms.saturating_add(delta);
             }
         }
         self.align_position(position_ms);

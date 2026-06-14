@@ -182,6 +182,8 @@ than the immediate reliability payoff justified.
 - Restored the terminal before shutdown waits for a running scan, so an owned
   join cannot leave the user in a frozen raw-mode screen.
 - Added a final drop-time join guarantee for unexpected runner exit paths.
+- Counted all positive backend playback progress across long event-loop stalls,
+  while preserving explicit-seek realignment and backward-jump protection.
 
 ## Later Reliability And Performance Work
 
@@ -192,7 +194,6 @@ than the immediate reliability payoff justified.
 - Define explicit complete, partial, and unavailable scan outcomes, including
   deleted single-file roots and unavailable volumes.
 - Skip metadata and artwork parsing for unchanged files during rescans.
-- Revisit playback listened-time accounting after long event-loop stalls.
 - Preserve non-UTF-8 filesystem paths without lossy string conversion.
 - Either add Windows path handling and CI or explicitly document Unix-like
   platform support.

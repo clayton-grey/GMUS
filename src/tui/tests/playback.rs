@@ -131,6 +131,68 @@ fn active_tick_interval_tracks_playback_rate() {
 }
 
 #[test]
+fn long_event_loop_stall_counts_backend_playback_progress() {
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: app.tracks[0].clone(),
+        last_position_ms: 1_000,
+        listened_ms: 1_000,
+    });
+
+    app.current
+        .as_mut()
+        .unwrap()
+        .tick_position(Duration::from_millis(31_000), PlaybackState::Playing);
+
+    assert_eq!(app.current.as_ref().unwrap().last_position_ms, 31_000);
+    assert_eq!(app.current.as_ref().unwrap().listened_ms, 31_000);
+}
+
+#[test]
+fn explicit_seek_realigns_progress_without_counting_seek_distance() {
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: app.tracks[0].clone(),
+        last_position_ms: 0,
+        listened_ms: 0,
+    });
+    app.player.play().unwrap();
+
+    app.seek_to(30_000).unwrap();
+    assert_eq!(app.current.as_ref().unwrap().listened_ms, 0);
+    assert_eq!(app.current.as_ref().unwrap().last_position_ms, 30_000);
+
+    app.player.seek(Duration::from_millis(35_000)).unwrap();
+    app.capture_current_progress();
+
+    assert_eq!(app.current.as_ref().unwrap().listened_ms, 5_000);
+    assert_eq!(app.current.as_ref().unwrap().last_position_ms, 35_000);
+}
+
+#[test]
+fn backward_backend_jump_realigns_without_reducing_listened_time() {
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: app.tracks[0].clone(),
+        last_position_ms: 30_000,
+        listened_ms: 30_000,
+    });
+
+    let current = app.current.as_mut().unwrap();
+    current.tick_position(Duration::from_millis(20_000), PlaybackState::Playing);
+    current.tick_position(Duration::from_millis(25_000), PlaybackState::Playing);
+
+    assert_eq!(current.last_position_ms, 25_000);
+    assert_eq!(current.listened_ms, 35_000);
+}
+
+#[test]
 fn mode_toggles_show_transient_playback_status() {
     let mut app = test_app(vec![test_track(1, "first track")]);
 
