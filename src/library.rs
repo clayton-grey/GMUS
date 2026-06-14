@@ -62,23 +62,33 @@ pub fn update_all_roots(conn: &Connection, paths: &AppPaths) -> Result<LibraryJo
     let mut report = ScanReport::default();
     let attempted_roots = roots.len();
     let mut successful_roots = 0;
+    let mut complete_roots = 0;
     for root in &roots {
         let path = PathBuf::from(&root.path);
-        match scanner::rescan_path_deferred_merge(conn, paths, &path) {
-            Ok(root_report) => {
-                merge_reports(&mut report, root_report);
+        let root_report = scanner::rescan_path_deferred_merge(conn, paths, &path)?;
+        match root_report.outcome {
+            ScanOutcome::Complete => {
                 db::mark_library_root_scanned(conn, &path)?;
                 successful_roots += 1;
+                complete_roots += 1;
             }
-            Err(error) => {
-                report.outcome = ScanOutcome::Partial;
-                report.errors.push(format!("{}: {error:#}", path.display()));
+            ScanOutcome::Partial => {
+                successful_roots += 1;
             }
+            ScanOutcome::Unavailable => {}
         }
+        merge_reports(&mut report, root_report);
     }
     if successful_roots > 0 {
         report.duplicate_tracks_merged = db::merge_similar_media_items(conn)?;
     }
+    report.outcome = if successful_roots == 0 {
+        ScanOutcome::Unavailable
+    } else if complete_roots == attempted_roots {
+        ScanOutcome::Complete
+    } else {
+        ScanOutcome::Partial
+    };
 
     Ok(LibraryJobResult::AllRoots {
         roots: successful_roots,
@@ -145,9 +155,6 @@ fn scan_status(action: &str, root: &Path, report: &ScanReport) -> String {
 }
 
 fn merge_reports(report: &mut ScanReport, root_report: ScanReport) {
-    if root_report.outcome == ScanOutcome::Partial {
-        report.outcome = ScanOutcome::Partial;
-    }
     report.files_seen += root_report.files_seen;
     report.tracks_stored += root_report.tracks_stored;
     report.art_cached += root_report.art_cached;
@@ -197,9 +204,79 @@ mod tests {
             outcome: ScanOutcome::Partial,
             ..ScanReport::default()
         };
+        let unavailable = ScanReport {
+            outcome: ScanOutcome::Unavailable,
+            ..ScanReport::default()
+        };
 
         assert!(scan_status("updated", root, &complete).contains("(complete)"));
         assert!(scan_status("updated", root, &partial).contains("(partial)"));
+        assert!(scan_status("updated", root, &unavailable).contains("(unavailable)"));
+    }
+
+    #[test]
+    fn update_all_reports_unavailable_when_no_roots_can_be_scanned() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let missing_root = dir.path().join("missing");
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        db::upsert_library_root(&conn, &missing_root).unwrap();
+        conn.execute(
+            "UPDATE library_roots SET last_scanned_at = 123 WHERE path = ?1",
+            [missing_root.to_string_lossy()],
+        )
+        .unwrap();
+        let paths = test_paths(data_dir.path());
+
+        let result = update_all_roots(&conn, &paths).unwrap();
+
+        let LibraryJobResult::AllRoots {
+            roots,
+            attempted_roots,
+            report,
+        } = &result
+        else {
+            panic!("expected all-roots result");
+        };
+        assert_eq!(*roots, 0);
+        assert_eq!(*attempted_roots, 1);
+        assert_eq!(report.outcome, ScanOutcome::Unavailable);
+        assert_eq!(report.errors.len(), 1);
+        assert!(job_status(&result).starts_with("updated 0 of 1 roots (unavailable)"));
+        let last_scanned_at: Option<i64> = conn
+            .query_row(
+                "SELECT last_scanned_at FROM library_roots WHERE path = ?1",
+                [missing_root.to_string_lossy()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(last_scanned_at, Some(123));
+    }
+
+    #[test]
+    fn update_all_propagates_database_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let audio_path = root.join("song.wav");
+        write_test_wav(&audio_path);
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        db::upsert_library_root(&conn, &root).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TRIGGER fail_location_insert
+            BEFORE INSERT ON locations
+            BEGIN
+                SELECT RAISE(FAIL, 'location insert failed');
+            END;
+            "#,
+        )
+        .unwrap();
+        let paths = test_paths(data_dir.path());
+
+        let error = update_all_roots(&conn, &paths).unwrap_err();
+
+        assert!(error.to_string().contains("location insert failed"));
     }
 
     fn test_paths(data_dir: &Path) -> AppPaths {
@@ -208,5 +285,23 @@ mod tests {
             db_path: data_dir.join("gmus.sqlite3"),
             art_dir: data_dir.join("art"),
         }
+    }
+
+    fn write_test_wav(path: &Path) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&38_u32.to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&8_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&16_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&2_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_i16.to_le_bytes());
+        std::fs::write(path, bytes).unwrap();
     }
 }

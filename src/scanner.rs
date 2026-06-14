@@ -14,6 +14,7 @@ pub enum ScanOutcome {
     #[default]
     Complete,
     Partial,
+    Unavailable,
 }
 
 impl ScanOutcome {
@@ -21,6 +22,7 @@ impl ScanOutcome {
         match self {
             Self::Complete => "complete",
             Self::Partial => "partial",
+            Self::Unavailable => "unavailable",
         }
     }
 }
@@ -42,7 +44,21 @@ pub fn add_library_root(
     paths: &AppPaths,
     root: &Path,
 ) -> Result<(PathBuf, ScanReport)> {
-    reconcile_library_root(conn, paths, root)
+    let root = canonical_root(root)?;
+    let report = rescan_canonical_path(conn, paths, &root)?;
+    if report.outcome == ScanOutcome::Unavailable {
+        anyhow::bail!(
+            "scanning {}: {}",
+            root.display(),
+            report
+                .errors
+                .first()
+                .map(String::as_str)
+                .unwrap_or("root became unavailable")
+        );
+    }
+    persist_scanned_root(conn, &root, &report)?;
+    Ok((root, report))
 }
 
 pub fn update_library_root(
@@ -50,19 +66,24 @@ pub fn update_library_root(
     paths: &AppPaths,
     root: &Path,
 ) -> Result<(PathBuf, ScanReport)> {
-    reconcile_library_root(conn, paths, root)
+    let root = match canonical_root(root) {
+        Ok(root) => root,
+        Err(error) => return Ok((root.to_path_buf(), unavailable_report(root, error))),
+    };
+    let report = rescan_canonical_path(conn, paths, &root)?;
+    persist_scanned_root(conn, &root, &report)?;
+    Ok((root, report))
 }
 
-fn reconcile_library_root(
-    conn: &Connection,
-    paths: &AppPaths,
-    root: &Path,
-) -> Result<(PathBuf, ScanReport)> {
-    let root = canonical_root(root)?;
-    let report = rescan_canonical_path(conn, paths, &root)?;
-    db::upsert_library_root(conn, &root)?;
-    db::mark_library_root_scanned(conn, &root)?;
-    Ok((root, report))
+fn persist_scanned_root(conn: &Connection, root: &Path, report: &ScanReport) -> Result<()> {
+    if report.outcome == ScanOutcome::Unavailable {
+        return Ok(());
+    }
+    db::upsert_library_root(conn, root)?;
+    if report.outcome == ScanOutcome::Complete {
+        db::mark_library_root_scanned(conn, root)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn rescan_path_deferred_merge(
@@ -70,13 +91,18 @@ pub(crate) fn rescan_path_deferred_merge(
     paths: &AppPaths,
     root: &Path,
 ) -> Result<ScanReport> {
-    let root = canonical_root(root)?;
+    let root = match canonical_root(root) {
+        Ok(root) => root,
+        Err(error) => return Ok(unavailable_report(root, error)),
+    };
     reconcile_canonical_path(conn, paths, &root)
 }
 
 fn rescan_canonical_path(conn: &Connection, paths: &AppPaths, root: &Path) -> Result<ScanReport> {
     let mut report = reconcile_canonical_path(conn, paths, root)?;
-    report.duplicate_tracks_merged = db::merge_similar_media_items(conn)?;
+    if report.outcome != ScanOutcome::Unavailable {
+        report.duplicate_tracks_merged = db::merge_similar_media_items(conn)?;
+    }
     Ok(report)
 }
 
@@ -95,6 +121,14 @@ fn reconcile_canonical_path(
     Ok(report)
 }
 
+fn unavailable_report(root: &Path, error: anyhow::Error) -> ScanReport {
+    ScanReport {
+        outcome: ScanOutcome::Unavailable,
+        errors: vec![format!("{}: {error:#}", root.display())],
+        ..ScanReport::default()
+    }
+}
+
 pub fn canonical_root(root: &Path) -> Result<PathBuf> {
     root.canonicalize()
         .with_context(|| format!("resolving scan path {}", root.display()))
@@ -110,17 +144,13 @@ fn scan_inner(
 ) -> Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if nested => {
-            report.outcome = ScanOutcome::Partial;
+        Err(error) => {
+            record_filesystem_error(report, nested);
             report.errors.push(format!(
                 "{}: reading filesystem metadata: {error:#}",
                 path.display()
             ));
             return Ok(());
-        }
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("reading filesystem metadata for {}", path.display()));
         }
     };
     let metadata = if metadata.file_type().is_symlink() {
@@ -130,18 +160,13 @@ fn scan_inner(
                 report.files_skipped += 1;
                 return Ok(());
             }
-            Err(error) if nested => {
-                report.outcome = ScanOutcome::Partial;
+            Err(error) => {
+                record_filesystem_error(report, nested);
                 report.errors.push(format!(
                     "{}: reading symlink target metadata: {error:#}",
                     path.display()
                 ));
                 return Ok(());
-            }
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("reading symlink target metadata for {}", path.display())
-                });
             }
         }
     } else {
@@ -151,15 +176,12 @@ fn scan_inner(
     if metadata.is_dir() {
         let entries = match fs::read_dir(path) {
             Ok(entries) => entries,
-            Err(error) if nested => {
-                report.outcome = ScanOutcome::Partial;
+            Err(error) => {
+                record_filesystem_error(report, nested);
                 report
                     .errors
                     .push(format!("{}: reading directory: {error:#}", path.display()));
                 return Ok(());
-            }
-            Err(error) => {
-                return Err(error).with_context(|| format!("reading directory {}", path.display()));
             }
         };
         for entry in entries {
@@ -210,6 +232,14 @@ fn scan_inner(
     }
 
     Ok(())
+}
+
+fn record_filesystem_error(report: &mut ScanReport, nested: bool) {
+    report.outcome = if nested {
+        ScanOutcome::Partial
+    } else {
+        ScanOutcome::Unavailable
+    };
 }
 
 #[cfg(test)]
@@ -357,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn root_filesystem_failure_remains_unavailable() {
+    fn root_filesystem_failure_reports_unavailable() {
         let dir = tempfile::tempdir().unwrap();
         let data_dir = tempfile::tempdir().unwrap();
         let missing_root = dir.path().join("missing");
@@ -366,7 +396,7 @@ mod tests {
 
         let mut report = ScanReport::default();
         let mut seen_paths = Vec::new();
-        let error = scan_inner(
+        scan_inner(
             &conn,
             &paths,
             &missing_root,
@@ -374,9 +404,70 @@ mod tests {
             &mut seen_paths,
             false,
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error.to_string().contains("reading filesystem metadata"));
+        assert_eq!(report.outcome, ScanOutcome::Unavailable);
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].contains("reading filesystem metadata"));
+    }
+
+    #[test]
+    fn deleted_single_file_root_is_unavailable_without_advancing_last_complete_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let audio_path = dir.path().join("song.wav");
+        write_test_wav(&audio_path);
+        let root = audio_path.canonicalize().unwrap();
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        let paths = test_paths(data_dir.path().join("art"));
+        add_library_root(&conn, &paths, &root).unwrap();
+        set_last_scanned_at(&conn, &root, 123);
+        fs::remove_file(&root).unwrap();
+
+        let (reported_root, report) = update_library_root(&conn, &paths, &root).unwrap();
+
+        assert_eq!(reported_root, root);
+        assert_eq!(report.outcome, ScanOutcome::Unavailable);
+        assert_eq!(report.files_marked_missing, 0);
+        assert_eq!(last_scanned_at(&conn, &root), Some(123));
+        assert_eq!(db::library_tracks(&conn).unwrap().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_scan_does_not_advance_last_complete_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let target_path = root.join("target.wav");
+        let symlink_path = root.join("linked.wav");
+        write_test_wav(&target_path);
+        std::os::unix::fs::symlink(&target_path, &symlink_path).unwrap();
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        let paths = test_paths(data_dir.path().join("art"));
+        add_library_root(&conn, &paths, &root).unwrap();
+        set_last_scanned_at(&conn, &root, 123);
+        fs::remove_file(&target_path).unwrap();
+
+        let (_, report) = update_library_root(&conn, &paths, &root).unwrap();
+
+        assert_eq!(report.outcome, ScanOutcome::Partial);
+        assert_eq!(last_scanned_at(&conn, &root), Some(123));
+    }
+
+    #[test]
+    fn complete_scan_records_last_scanned_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        db::upsert_library_root(&conn, &root).unwrap();
+        let paths = test_paths(data_dir.path().join("art"));
+
+        let (_, report) = update_library_root(&conn, &paths, &root).unwrap();
+
+        assert_eq!(report.outcome, ScanOutcome::Complete);
+        assert!(last_scanned_at(&conn, &root).is_some());
     }
 
     #[test]
@@ -454,6 +545,23 @@ mod tests {
             duration_ms: Some(120_000),
             compilation: false,
         }
+    }
+
+    fn last_scanned_at(conn: &Connection, root: &Path) -> Option<i64> {
+        conn.query_row(
+            "SELECT last_scanned_at FROM library_roots WHERE path = ?1",
+            [root.to_string_lossy()],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    fn set_last_scanned_at(conn: &Connection, root: &Path, timestamp: i64) {
+        conn.execute(
+            "UPDATE library_roots SET last_scanned_at = ?1 WHERE path = ?2",
+            rusqlite::params![timestamp, root.to_string_lossy()],
+        )
+        .unwrap();
     }
 
     fn write_test_wav(path: &Path) {

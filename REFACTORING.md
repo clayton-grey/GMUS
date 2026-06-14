@@ -186,14 +186,15 @@ than the immediate reliability payoff justified.
   while preserving explicit-seek realignment and backward-jump protection.
 - Defined complete and partial scan outcomes: nested filesystem failures now
   preserve readable progress while suppressing unsafe missing-file
-  reconciliation, and root-level unavailability still fails the root.
+  reconciliation.
+- Made root-level filesystem unavailability an explicit scan outcome, kept
+  unavailable roots from hiding database failures, and reserved
+  `last_scanned_at` for complete scans.
 
 ## Later Reliability And Performance Work
 
 - Replace conservative rename matching based on metadata, file size, and
   modification time with stable filesystem identity evidence.
-- Define explicit unavailable scan results for deleted single-file roots and
-  unavailable volumes.
 - Skip metadata and artwork parsing for unchanged files during rescans.
 - Preserve non-UTF-8 filesystem paths without lossy string conversion.
 - Either add Windows path handling and CI or explicitly document Unix-like
