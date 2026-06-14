@@ -1,19 +1,21 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use rusqlite::{params, Connection};
 
 use super::now_unix;
+use super::path;
 
 #[derive(Debug, Clone)]
 pub struct LibraryRoot {
     pub path: String,
+    pub file_path: PathBuf,
     pub active: bool,
 }
 
 pub fn upsert_library_root(conn: &Connection, path: &Path) -> Result<()> {
     let now = now_unix();
-    let path = path.to_string_lossy();
+    let path = path::encode(path);
     conn.execute(
         r#"
         INSERT INTO library_roots (path, active, added_at, updated_at)
@@ -29,7 +31,7 @@ pub fn upsert_library_root(conn: &Connection, path: &Path) -> Result<()> {
 
 pub fn mark_library_root_scanned(conn: &Connection, path: &Path) -> Result<()> {
     let now = now_unix();
-    let path = path.to_string_lossy();
+    let path = path::encode(path);
     conn.execute(
         "UPDATE library_roots SET updated_at = ?1, last_scanned_at = ?1 WHERE path = ?2",
         params![now, path],
@@ -43,7 +45,7 @@ pub fn deactivate_library_root(conn: &Connection, path: &Path) -> Result<bool> {
 
 pub fn set_library_root_active(conn: &Connection, path: &Path, active: bool) -> Result<bool> {
     let now = now_unix();
-    let path = path.to_string_lossy();
+    let path = path::encode(path);
     let changed = conn.execute(
         "UPDATE library_roots SET active = ?1, updated_at = ?2 WHERE path = ?3",
         params![i64::from(active), now, path],
@@ -60,8 +62,11 @@ pub fn library_roots(conn: &Connection) -> Result<Vec<LibraryRoot>> {
         "#,
     )?;
     let rows = stmt.query_map([], |row| {
+        let encoded: String = row.get(0)?;
+        let file_path = path::decode(&encoded);
         Ok(LibraryRoot {
-            path: row.get(0)?,
+            path: path::display(&file_path),
+            file_path,
             active: row.get::<_, i64>(1)? != 0,
         })
     })?;

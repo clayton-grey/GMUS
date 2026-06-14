@@ -66,7 +66,7 @@ impl TrackMetadata {
             basis.extend_from_slice(b"file:v2");
             push_i64(&mut basis, self.file_size);
             push_optional_i64(&mut basis, self.modified_at);
-            push_bytes(&mut basis, self.path.to_string_lossy().as_bytes());
+            push_bytes(&mut basis, native_path_bytes(&self.path));
         }
 
         let mut hasher = Sha256::new();
@@ -281,6 +281,18 @@ fn push_i64(out: &mut Vec<u8>, value: i64) {
 fn push_bytes(out: &mut Vec<u8>, value: &[u8]) {
     out.extend_from_slice(&(value.len() as u64).to_be_bytes());
     out.extend_from_slice(value);
+}
+
+#[cfg(unix)]
+fn native_path_bytes(path: &Path) -> &[u8] {
+    use std::os::unix::ffi::OsStrExt;
+
+    path.as_os_str().as_bytes()
+}
+
+#[cfg(not(unix))]
+fn native_path_bytes(path: &Path) -> &[u8] {
+    path.to_str().unwrap_or_default().as_bytes()
 }
 
 #[cfg(test)]

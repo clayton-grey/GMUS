@@ -1,9 +1,9 @@
-# Refactoring Backlog
+# Refactoring Review
 
 This file captures cleanup identified during the feature-complete review. The
 first pass prioritized correctness, lifecycle ownership, and data integrity.
-The items below are intentionally deferred because they require broader changes
-than the immediate reliability payoff justified.
+Subsequent passes completed the structural, reliability, portability, and
+performance work that review identified.
 
 ## Completed In The First Pass
 
@@ -198,7 +198,11 @@ than the immediate reliability payoff justified.
 - Skipped metadata and artwork parsing for exactly unchanged files using
   high-resolution modification times, filesystem identity, and an explicit
   scan-policy version; failed artwork work remains retryable.
+- Preserved non-UTF-8 Unix paths with reversible database keys while keeping
+  lossy text conversion limited to presentation and search labels.
 
-## Later Reliability And Performance Work
+## Refactoring Plan Complete
 
-- Preserve non-UTF-8 filesystem paths without lossy string conversion.
+- All cleanup identified during the feature-complete review is complete.
+- Continue future work from concrete product, reliability, accessibility, or
+  performance needs rather than open-ended structural refactoring.

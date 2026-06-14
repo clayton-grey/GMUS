@@ -129,6 +129,7 @@ fn test_track(id: i64, title: &str) -> LibraryTrack {
         media_item_id: id,
         location_id: id,
         path: format!("/tmp/{title}.flac"),
+        file_path: PathBuf::from(format!("/tmp/{title}.flac")),
         library_root: None,
         title: Some(title.to_string()),
         artist: Some("Artist".to_string()),

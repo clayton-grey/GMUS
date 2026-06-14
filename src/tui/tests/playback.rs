@@ -568,7 +568,7 @@ fn repeated_integration_failures_do_not_keep_overwriting_messages() {
 fn track_changed_event_uses_owned_track_snapshot() {
     let events = Rc::new(RefCell::new(Vec::new()));
     let mut track = test_track(1, "first track");
-    track.cover_path = Some(String::from("/tmp/cover.jpg"));
+    track.cover_path = Some(PathBuf::from("/tmp/cover.jpg"));
     let mut app = test_app(vec![track]);
     app.integration.backend = Box::new(RecordingIntegration {
         events: Rc::clone(&events),

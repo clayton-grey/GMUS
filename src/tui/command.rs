@@ -78,7 +78,7 @@ impl CommandOutputState {
         self.focus = false;
     }
 
-    fn show_library_roots(&mut self, roots: Vec<db::LibraryRoot>, selected_path: Option<&str>) {
+    fn show_library_roots(&mut self, roots: Vec<db::LibraryRoot>, selected_path: Option<&Path>) {
         let active_count = roots.iter().filter(|root| root.active).count();
         let mut lines = vec![format!(
             "library roots ({active_count} active / {} total)",
@@ -91,7 +91,7 @@ impl CommandOutputState {
         );
 
         self.selected = selected_path
-            .and_then(|path| roots.iter().position(|root| root.path == path))
+            .and_then(|path| roots.iter().position(|root| root.file_path == path))
             .unwrap_or(0)
             .min(roots.len().saturating_sub(1));
         self.focus = !roots.is_empty();
@@ -542,7 +542,7 @@ impl App {
         self.command_output.show_text(lines);
     }
 
-    fn show_library_roots(&mut self, roots: Vec<db::LibraryRoot>, selected_path: Option<&str>) {
+    fn show_library_roots(&mut self, roots: Vec<db::LibraryRoot>, selected_path: Option<&Path>) {
         self.command_output.show_library_roots(roots, selected_path);
     }
 
@@ -885,10 +885,10 @@ impl App {
         };
 
         let next_active = !root.active;
-        if db::set_library_root_active(conn, Path::new(&root.path), next_active)? {
+        if db::set_library_root_active(conn, &root.file_path, next_active)? {
             self.refresh(conn)?;
             let roots = db::library_roots(conn)?;
-            self.show_library_roots(roots, Some(&root.path));
+            self.show_library_roots(roots, Some(&root.file_path));
             self.message = format!(
                 "{} {}",
                 if next_active { "enabled" } else { "disabled" },

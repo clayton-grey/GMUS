@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -389,9 +388,9 @@ impl App {
             return Ok(());
         };
 
-        let path = current.track.path.clone();
-        if let Err(error) = self.player.load_and_play(Path::new(&path)) {
-            self.message = format!("could not resume {path}: {error:#}");
+        let path = current.track.file_path.clone();
+        if let Err(error) = self.player.load_and_play(&path) {
+            self.message = format!("could not resume {}: {error:#}", path.display());
             self.sync_integration_playback(true);
             return Ok(());
         }
@@ -484,7 +483,7 @@ impl App {
 
         self.finish_current(conn, false)?;
         let track = self.tracks[entry.track_index].clone();
-        match self.player.load_and_play(Path::new(&track.path)) {
+        match self.player.load_and_play(&track.file_path) {
             Ok(()) => {
                 self.suspended_position_ms = None;
                 self.message = format!("playing {}", track.display_title());

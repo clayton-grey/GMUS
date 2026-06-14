@@ -317,6 +317,38 @@ mod tests {
         assert_eq!(report.art_cached, 0);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_utf8_roots_and_audio_paths_round_trip_without_colliding() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(OsString::from_vec(b"music-\xff".to_vec()));
+        fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let first = root.join(OsString::from_vec(b"\xfe.wav".to_vec()));
+        let second = root.join(OsString::from_vec(b"\xff.wav".to_vec()));
+        write_test_wav(&first);
+        write_test_wav(&second);
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        let paths = test_paths(data_dir.path().join("art"));
+
+        add_library_root(&conn, &paths, &root).unwrap();
+
+        let tracks = db::library_tracks(&conn).unwrap();
+        assert_eq!(tracks.len(), 2);
+        assert!(tracks.iter().any(|track| track.file_path == first));
+        assert!(tracks.iter().any(|track| track.file_path == second));
+        let roots = db::active_library_roots(&conn).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].file_path, root);
+
+        let (_, report) = update_library_root(&conn, &paths, &root).unwrap();
+        assert_eq!(report.files_unchanged, 2);
+    }
+
     #[test]
     fn stale_scan_version_forces_metadata_and_artwork_refresh() {
         let dir = tempfile::tempdir().unwrap();
@@ -639,21 +671,16 @@ mod tests {
         }
     }
 
-    fn last_scanned_at(conn: &Connection, root: &Path) -> Option<i64> {
-        conn.query_row(
-            "SELECT last_scanned_at FROM library_roots WHERE path = ?1",
-            [root.to_string_lossy()],
-            |row| row.get(0),
-        )
+    fn last_scanned_at(conn: &Connection, _root: &Path) -> Option<i64> {
+        conn.query_row("SELECT last_scanned_at FROM library_roots", [], |row| {
+            row.get(0)
+        })
         .unwrap()
     }
 
-    fn set_last_scanned_at(conn: &Connection, root: &Path, timestamp: i64) {
-        conn.execute(
-            "UPDATE library_roots SET last_scanned_at = ?1 WHERE path = ?2",
-            rusqlite::params![timestamp, root.to_string_lossy()],
-        )
-        .unwrap();
+    fn set_last_scanned_at(conn: &Connection, _root: &Path, timestamp: i64) {
+        conn.execute("UPDATE library_roots SET last_scanned_at = ?1", [timestamp])
+            .unwrap();
     }
 
     fn write_test_wav(path: &Path) {

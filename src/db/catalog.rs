@@ -7,6 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::media::{FileStamp, TrackMetadata, SCAN_VERSION};
 
 use super::now_unix;
+use super::path;
 
 #[derive(Debug, Clone, Copy)]
 pub struct StoredTrack {
@@ -19,6 +20,7 @@ pub struct LibraryTrack {
     pub media_item_id: i64,
     pub location_id: i64,
     pub path: String,
+    pub file_path: PathBuf,
     pub library_root: Option<String>,
     pub title: Option<String>,
     pub artist: Option<String>,
@@ -28,7 +30,7 @@ pub struct LibraryTrack {
     pub release_date: Option<String>,
     pub composer: Option<String>,
     pub genre: Option<String>,
-    pub cover_path: Option<String>,
+    pub cover_path: Option<PathBuf>,
     pub track_number: Option<i64>,
     pub track_total: Option<i64>,
     pub disc_number: Option<i64>,
@@ -66,7 +68,7 @@ impl LibraryTrack {
 pub fn upsert_track(conn: &Connection, track: &TrackMetadata) -> Result<StoredTrack> {
     let tx = conn.unchecked_transaction()?;
     let now = now_unix();
-    let path = track.path.to_string_lossy();
+    let path = path::encode(&track.path);
     let media_item_id = match location_identity_for_path(&tx, &path)? {
         Some((location_id, media_item_id))
             if media_item_has_other_present_location(&tx, media_item_id, location_id)? =>
@@ -145,7 +147,7 @@ pub fn location_scan_is_current(conn: &Connection, path: &Path, stamp: FileStamp
         )
         "#,
         params![
-            path.to_string_lossy(),
+            path::encode(path),
             stamp.file_size,
             stamp.modified_at_ns,
             stamp.fs_device,
@@ -160,7 +162,7 @@ pub fn location_scan_is_current(conn: &Connection, path: &Path, stamp: FileStamp
 pub fn mark_location_scan_current(conn: &Connection, path: &Path) -> Result<()> {
     conn.execute(
         "UPDATE locations SET scan_version = ?1 WHERE path = ?2 AND missing = 0",
-        params![SCAN_VERSION, path.to_string_lossy()],
+        params![SCAN_VERSION, path::encode(path)],
     )?;
     Ok(())
 }
@@ -383,11 +385,11 @@ pub fn mark_locations_missing_under_root_except(
         let mut stmt =
             tx.prepare("INSERT OR IGNORE INTO gmus_scan_seen_paths (path) VALUES (?1)")?;
         for path in seen_paths {
-            stmt.execute(params![path.to_string_lossy()])?;
+            stmt.execute(params![path::encode(path)])?;
         }
     }
 
-    let root = root.to_string_lossy();
+    let root = path::encode(root);
     let sql = format!(
         r#"
         UPDATE locations
@@ -738,7 +740,7 @@ fn add_media_stats(conn: &Connection, media_item_id: i64, stats: &MediaStatsRow)
 pub fn set_cover_path(conn: &Connection, media_item_id: i64, path: &Path) -> Result<()> {
     conn.execute(
         "UPDATE media_items SET cover_path = ?1, updated_at = ?2 WHERE id = ?3",
-        params![path.to_string_lossy(), now_unix(), media_item_id],
+        params![path::encode(path), now_unix(), media_item_id],
     )?;
     Ok(())
 }
@@ -828,11 +830,16 @@ pub fn library_tracks(conn: &Connection) -> Result<Vec<LibraryTrack>> {
     let mut stmt = conn.prepare(&sql)?;
 
     let rows = stmt.query_map([], |row| {
+        let encoded_path: String = row.get(2)?;
+        let file_path = path::decode(&encoded_path);
+        let encoded_root: Option<String> = row.get(18)?;
+        let encoded_cover: Option<String> = row.get(11)?;
         Ok(LibraryTrack {
             media_item_id: row.get(0)?,
             location_id: row.get(1)?,
-            path: row.get(2)?,
-            library_root: row.get(18)?,
+            path: path::display(&file_path),
+            file_path,
+            library_root: encoded_root.map(|root| path::display(&path::decode(&root))),
             title: row.get(3)?,
             artist: row.get(4)?,
             album: row.get(5)?,
@@ -841,7 +848,7 @@ pub fn library_tracks(conn: &Connection) -> Result<Vec<LibraryTrack>> {
             release_date: row.get(8)?,
             composer: row.get(9)?,
             genre: row.get(10)?,
-            cover_path: row.get(11)?,
+            cover_path: encoded_cover.map(|cover| path::decode(&cover)),
             track_number: row.get(12)?,
             track_total: row.get(13)?,
             disc_number: row.get(14)?,
@@ -861,6 +868,17 @@ pub fn library_tracks(conn: &Connection) -> Result<Vec<LibraryTrack>> {
 
 fn path_matches_root_sql(path: &str, root: &str) -> String {
     format!(
-        "({path} = {root} OR {root} = '/' OR substr({path}, 1, length({root}) + 1) = {root} || '/')"
+        r#"(
+            {path} = {root}
+            OR {root} = 'unix:2f'
+            OR (
+                substr({root}, 1, 5) = 'unix:'
+                AND substr({path}, 1, length({root}) + 2) = {root} || '2f'
+            )
+            OR (
+                substr({root}, 1, 5) != 'unix:'
+                AND ({root} = '/' OR substr({path}, 1, length({root}) + 1) = {root} || '/')
+            )
+        )"#
     )
 }

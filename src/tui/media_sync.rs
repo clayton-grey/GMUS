@@ -77,7 +77,7 @@ impl App {
             artist: current.track.artist.clone(),
             album: current.track.album.clone(),
             duration_ms: current.track.duration_ms,
-            artwork_path: current.track.cover_path.clone().map(Into::into),
+            artwork_path: current.track.cover_path.clone(),
         };
         match self
             .integration

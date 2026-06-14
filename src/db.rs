@@ -9,6 +9,7 @@ use rusqlite::{params, OptionalExtension};
 mod catalog;
 mod history;
 mod migrations;
+mod path;
 mod playlists;
 mod roots;
 mod settings;
@@ -351,7 +352,9 @@ mod tests {
         let conn = open(&path).unwrap();
 
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(library_tracks(&conn).unwrap().len(), 1);
+        let tracks = library_tracks(&conn).unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].file_path, Path::new("/tmp/legacy.flac"));
         assert!(table_has_column(&conn, "media_items", "duplicate_key"));
         assert!(table_has_column(&conn, "locations", "fs_device"));
         assert!(table_has_column(&conn, "locations", "fs_inode"));
@@ -807,6 +810,37 @@ mod tests {
         assert!(deactivate_library_root(&conn, Path::new("/tmp/music")).unwrap());
         assert!(library_tracks(&conn).unwrap().is_empty());
         assert_eq!(stats(&conn).unwrap().completed_plays, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_paths_and_roots_round_trip_without_lossy_collisions() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let root = std::path::PathBuf::from(OsString::from_vec(b"/tmp/music-\xff".to_vec()));
+        let first_path = root.join(OsString::from_vec(b"\xfe.flac".to_vec()));
+        let second_path = root.join(OsString::from_vec(b"\xff.flac".to_vec()));
+        let mut first = test_track_metadata("/tmp/placeholder.flac", "First", 1, 120_000);
+        first.path = first_path.clone();
+        let mut second = first.clone();
+        second.path = second_path.clone();
+        second.title = Some("Second".into());
+        second.fs_inode = Some(2);
+
+        upsert_track(&conn, &first).unwrap();
+        upsert_track(&conn, &second).unwrap();
+        upsert_library_root(&conn, &root).unwrap();
+
+        let tracks = library_tracks(&conn).unwrap();
+        assert_eq!(tracks.len(), 2);
+        assert!(tracks.iter().any(|track| track.file_path == first_path));
+        assert!(tracks.iter().any(|track| track.file_path == second_path));
+        let roots = active_library_roots(&conn).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].file_path, root);
     }
 
     #[test]

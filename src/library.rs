@@ -64,7 +64,7 @@ pub fn update_all_roots(conn: &Connection, paths: &AppPaths) -> Result<LibraryJo
     let mut successful_roots = 0;
     let mut complete_roots = 0;
     for root in &roots {
-        let path = PathBuf::from(&root.path);
+        let path = root.file_path.clone();
         let root_report = scanner::rescan_path_deferred_merge(conn, paths, &path)?;
         match root_report.outcome {
             ScanOutcome::Complete => {
@@ -224,11 +224,8 @@ mod tests {
         let missing_root = dir.path().join("missing");
         let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
         db::upsert_library_root(&conn, &missing_root).unwrap();
-        conn.execute(
-            "UPDATE library_roots SET last_scanned_at = 123 WHERE path = ?1",
-            [missing_root.to_string_lossy()],
-        )
-        .unwrap();
+        conn.execute("UPDATE library_roots SET last_scanned_at = 123", [])
+            .unwrap();
         let paths = test_paths(data_dir.path());
 
         let result = update_all_roots(&conn, &paths).unwrap();
@@ -247,11 +244,9 @@ mod tests {
         assert_eq!(report.errors.len(), 1);
         assert!(job_status(&result).starts_with("updated 0 of 1 roots (unavailable)"));
         let last_scanned_at: Option<i64> = conn
-            .query_row(
-                "SELECT last_scanned_at FROM library_roots WHERE path = ?1",
-                [missing_root.to_string_lossy()],
-                |row| row.get(0),
-            )
+            .query_row("SELECT last_scanned_at FROM library_roots", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(last_scanned_at, Some(123));
     }
