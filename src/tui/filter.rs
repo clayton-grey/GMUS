@@ -361,12 +361,8 @@ fn parse_number_matcher(value: &str) -> Option<NumberMatcher> {
     }
 
     if let Some((start, end)) = value.split_once("..") {
-        let start = (!start.trim().is_empty())
-            .then(|| parse_filter_i64(start))
-            .flatten();
-        let end = (!end.trim().is_empty())
-            .then(|| parse_filter_i64(end))
-            .flatten();
+        let start = parse_optional_filter_i64(start)?;
+        let end = parse_optional_filter_i64(end)?;
         return (start.is_some() || end.is_some()).then_some(NumberMatcher::Range(start, end));
     }
 
@@ -375,6 +371,15 @@ fn parse_number_matcher(value: &str) -> Option<NumberMatcher> {
 
 fn parse_filter_i64(value: &str) -> Option<i64> {
     value.trim().parse().ok()
+}
+
+fn parse_optional_filter_i64(value: &str) -> Option<Option<i64>> {
+    let value = value.trim();
+    if value.is_empty() {
+        Some(None)
+    } else {
+        parse_filter_i64(value).map(Some)
+    }
 }
 
 fn track_year(track: &LibraryTrack) -> Option<i64> {

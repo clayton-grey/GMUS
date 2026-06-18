@@ -212,22 +212,54 @@ fn scan_inner(
     }
     seen_paths.push(path.to_path_buf());
     let stamp = media::file_stamp(&metadata);
-    if db::location_scan_is_current(conn, path, stamp)? {
-        report.files_unchanged += 1;
-        return Ok(());
+    let folder_art_signature = match art::folder_art_signature(path) {
+        Ok(signature) => Some(signature),
+        Err(error) => {
+            report.errors.push(format!(
+                "{}: checking folder cover art: {error:#}",
+                path.display()
+            ));
+            None
+        }
+    };
+    if let Some(folder_art_signature) = &folder_art_signature {
+        if db::location_scan_is_current(conn, path, stamp, folder_art_signature.as_deref())? {
+            report.files_unchanged += 1;
+            return Ok(());
+        }
     }
 
-    match media::read_track_with_stamp(path, stamp) {
-        Ok(track) => {
-            let stored = db::upsert_track(conn, &track)?;
+    match media::read_track_and_art_with_stamp(path, stamp) {
+        Ok(parsed) => {
+            let stored = db::upsert_track(conn, &parsed.metadata)?;
             report.tracks_stored += 1;
-            match art::cache_cover_for_track(&track, &paths.art_dir, stored.media_item_id) {
+            match art::cache_cover_for_track(
+                &parsed.metadata,
+                parsed.embedded_art.as_ref(),
+                &paths.art_dir,
+                stored.media_item_id,
+            ) {
                 Ok(Some(cover_path)) => {
                     db::set_cover_path(conn, stored.media_item_id, &cover_path)?;
-                    db::mark_location_scan_current(conn, path)?;
+                    if let Some(folder_art_signature) = &folder_art_signature {
+                        db::mark_location_scan_current(
+                            conn,
+                            path,
+                            folder_art_signature.as_deref(),
+                        )?;
+                    }
                     report.art_cached += 1;
                 }
-                Ok(None) => db::mark_location_scan_current(conn, path)?,
+                Ok(None) => {
+                    db::clear_cover_path(conn, stored.media_item_id)?;
+                    if let Some(folder_art_signature) = &folder_art_signature {
+                        db::mark_location_scan_current(
+                            conn,
+                            path,
+                            folder_art_signature.as_deref(),
+                        )?;
+                    }
+                }
                 Err(error) => report
                     .errors
                     .push(format!("{}: caching cover art: {error:#}", path.display())),
@@ -303,18 +335,72 @@ mod tests {
 
         add_library_root(&conn, &paths, &root).unwrap();
         let stamp = media::file_stamp(&fs::metadata(&audio_path).unwrap());
-        assert!(db::location_scan_is_current(&conn, &audio_path, stamp).unwrap());
+        let folder_art_signature = art::folder_art_signature(&audio_path).unwrap();
+        assert!(db::location_scan_is_current(
+            &conn,
+            &audio_path,
+            stamp,
+            folder_art_signature.as_deref()
+        )
+        .unwrap());
         let changed_stamp = media::FileStamp {
             modified_at_ns: stamp.modified_at_ns.map(|value| value + 1),
             ..stamp
         };
-        assert!(!db::location_scan_is_current(&conn, &audio_path, changed_stamp).unwrap());
+        assert!(!db::location_scan_is_current(
+            &conn,
+            &audio_path,
+            changed_stamp,
+            folder_art_signature.as_deref()
+        )
+        .unwrap());
         let (_, report) = update_library_root(&conn, &paths, &root).unwrap();
 
         assert_eq!(report.files_seen, 1);
         assert_eq!(report.files_unchanged, 1);
         assert_eq!(report.tracks_stored, 0);
         assert_eq!(report.art_cached, 0);
+    }
+
+    #[test]
+    fn unchanged_audio_refreshes_added_replaced_and_removed_folder_art() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let audio_path = root.join("song.wav");
+        let folder_art = root.join("cover.jpg");
+        write_test_wav(&audio_path);
+        let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+        let paths = test_paths(data_dir.path().join("art"));
+
+        add_library_root(&conn, &paths, &root).unwrap();
+        assert!(db::library_tracks(&conn).unwrap()[0].cover_path.is_none());
+
+        fs::write(&folder_art, b"first cover").unwrap();
+        let (_, added) = update_library_root(&conn, &paths, &root).unwrap();
+        let first_cached = db::library_tracks(&conn).unwrap()[0]
+            .cover_path
+            .clone()
+            .unwrap();
+        assert_eq!(added.files_unchanged, 0);
+        assert_eq!(fs::read(&first_cached).unwrap(), b"first cover");
+
+        fs::write(&folder_art, b"longer replacement cover").unwrap();
+        let (_, replaced) = update_library_root(&conn, &paths, &root).unwrap();
+        let replaced_cached = db::library_tracks(&conn).unwrap()[0]
+            .cover_path
+            .clone()
+            .unwrap();
+        assert_eq!(replaced.files_unchanged, 0);
+        assert_eq!(
+            fs::read(&replaced_cached).unwrap(),
+            b"longer replacement cover"
+        );
+
+        fs::remove_file(&folder_art).unwrap();
+        let (_, removed) = update_library_root(&conn, &paths, &root).unwrap();
+        assert_eq!(removed.files_unchanged, 0);
+        assert!(db::library_tracks(&conn).unwrap()[0].cover_path.is_none());
     }
 
     #[cfg(target_os = "linux")]

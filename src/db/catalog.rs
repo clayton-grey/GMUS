@@ -131,7 +131,12 @@ pub fn upsert_track(conn: &Connection, track: &TrackMetadata) -> Result<StoredTr
     })
 }
 
-pub fn location_scan_is_current(conn: &Connection, path: &Path, stamp: FileStamp) -> Result<bool> {
+pub fn location_scan_is_current(
+    conn: &Connection,
+    path: &Path,
+    stamp: FileStamp,
+    folder_art_signature: Option<&str>,
+) -> Result<bool> {
     conn.query_row(
         r#"
         SELECT EXISTS(
@@ -144,6 +149,7 @@ pub fn location_scan_is_current(conn: &Connection, path: &Path, stamp: FileStamp
                 AND fs_device IS ?4
                 AND fs_inode IS ?5
                 AND scan_version = ?6
+                AND folder_art_signature IS ?7
         )
         "#,
         params![
@@ -152,19 +158,34 @@ pub fn location_scan_is_current(conn: &Connection, path: &Path, stamp: FileStamp
             stamp.modified_at_ns,
             stamp.fs_device,
             stamp.fs_inode,
-            SCAN_VERSION
+            SCAN_VERSION,
+            folder_art_signature
         ],
         |row| row.get(0),
     )
     .map_err(Into::into)
 }
 
-pub fn mark_location_scan_current(conn: &Connection, path: &Path) -> Result<()> {
+pub fn mark_location_scan_current(
+    conn: &Connection,
+    path: &Path,
+    folder_art_signature: Option<&str>,
+) -> Result<()> {
     conn.execute(
-        "UPDATE locations SET scan_version = ?1 WHERE path = ?2 AND missing = 0",
-        params![SCAN_VERSION, path::encode(path)],
+        "UPDATE locations SET scan_version = ?1, folder_art_signature = ?2 WHERE path = ?3 AND missing = 0",
+        params![SCAN_VERSION, folder_art_signature, path::encode(path)],
     )?;
     Ok(())
+}
+
+pub fn media_item_id_for_location(conn: &Connection, location_id: i64) -> Result<Option<i64>> {
+    conn.query_row(
+        "SELECT media_item_id FROM locations WHERE id = ?1",
+        params![location_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 fn insert_media_item(conn: &Connection, track: &TrackMetadata, now: i64) -> Result<i64> {
@@ -450,6 +471,13 @@ pub fn reconcile_renamed_media_items(conn: &Connection) -> Result<usize> {
                     WHERE locations.media_item_id = media_items.id
                     ORDER BY locations.missing ASC, locations.seen_at DESC, locations.id DESC
                     LIMIT 1
+                ),
+                (
+                    SELECT modified_at_ns
+                    FROM locations
+                    WHERE locations.media_item_id = media_items.id
+                    ORDER BY locations.missing ASC, locations.seen_at DESC, locations.id DESC
+                    LIMIT 1
                 )
             FROM media_items
             ORDER BY id
@@ -463,6 +491,7 @@ pub fn reconcile_renamed_media_items(conn: &Connection) -> Result<usize> {
                 fs_inode: row.get(3)?,
                 file_size: row.get(4)?,
                 modified_at: row.get(5)?,
+                modified_at_ns: row.get(6)?,
             })
         })?;
 
@@ -514,6 +543,7 @@ struct MergeCandidate {
     fs_inode: Option<i64>,
     file_size: Option<i64>,
     modified_at: Option<i64>,
+    modified_at_ns: Option<i64>,
 }
 
 impl MergeCandidate {
@@ -521,8 +551,8 @@ impl MergeCandidate {
         Some((self.fs_device?, self.fs_inode?))
     }
 
-    fn file_signature(&self) -> Option<(i64, i64)> {
-        Some((self.file_size?, self.modified_at?))
+    fn file_signature(&self) -> Option<(i64, i64, i64)> {
+        Some((self.file_size?, self.modified_at?, self.modified_at_ns?))
     }
 }
 
@@ -575,6 +605,9 @@ fn merge_media_item(conn: &Connection, canonical_id: i64, duplicate_id: i64) -> 
         UPDATE media_items
         SET first_seen_at = MIN(first_seen_at, (
                 SELECT first_seen_at FROM media_items WHERE id = ?2
+            )),
+            cover_path = COALESCE(cover_path, (
+                SELECT cover_path FROM media_items WHERE id = ?2
             ))
         WHERE id = ?1
         "#,
@@ -741,6 +774,14 @@ pub fn set_cover_path(conn: &Connection, media_item_id: i64, path: &Path) -> Res
     conn.execute(
         "UPDATE media_items SET cover_path = ?1, updated_at = ?2 WHERE id = ?3",
         params![path::encode(path), now_unix(), media_item_id],
+    )?;
+    Ok(())
+}
+
+pub fn clear_cover_path(conn: &Connection, media_item_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE media_items SET cover_path = NULL, updated_at = ?1 WHERE id = ?2",
+        params![now_unix(), media_item_id],
     )?;
     Ok(())
 }

@@ -68,6 +68,12 @@ cargo test --all-targets --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
+For interactive development, use `./scripts/dev-tui.sh [PATH]` instead of
+`cargo run -- tui [PATH]`. The script checks the dev output before and after
+the run and cleans the dev profile if it exceeds 4 GiB. Set
+`GMUS_TARGET_MAX_GIB` to a different positive integer to change the limit.
+Cargo does not otherwise prune stale target artifacts automatically.
+
 ## CLI Commands
 
 ```sh

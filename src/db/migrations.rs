@@ -5,7 +5,7 @@ use super::catalog::split_legacy_location;
 use super::playlists::ensure_playlist_tracks_allow_duplicates;
 use super::settings::ensure_key_bindings_allow_duplicates;
 
-pub(super) const SCHEMA_VERSION: i64 = 5;
+pub(super) const SCHEMA_VERSION: i64 = 6;
 
 pub(super) fn migrate(conn: &Connection) -> Result<()> {
     migrate_to_version(conn, SCHEMA_VERSION)
@@ -52,6 +52,7 @@ fn migrate_in_transaction(conn: &Connection, target_version: i64) -> Result<()> 
             3 => migrate_v3(&tx)?,
             4 => migrate_v4(&tx)?,
             5 => migrate_v5(&tx)?,
+            6 => migrate_v6(&tx)?,
             _ => unreachable!("schema migration is defined"),
         }
         tx.pragma_update(None, "user_version", next_version)?;
@@ -275,6 +276,12 @@ fn migrate_v5(conn: &Connection) -> Result<()> {
         WHERE cover_path IS NOT NULL;
         "#,
     )?;
+    Ok(())
+}
+
+fn migrate_v6(conn: &Connection) -> Result<()> {
+    ensure_column(conn, "locations", "folder_art_signature", "TEXT")?;
+    conn.execute("UPDATE locations SET scan_version = NULL", [])?;
     Ok(())
 }
 

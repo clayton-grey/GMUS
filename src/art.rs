@@ -1,8 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::media::{self, TrackMetadata};
+use crate::media::{self, EmbeddedArt, TrackMetadata};
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 
 const FOLDER_ART_NAMES: &[&str] = &[
     "cover.jpg",
@@ -18,10 +19,11 @@ const FOLDER_ART_NAMES: &[&str] = &[
 
 pub fn cache_cover_for_track(
     track: &TrackMetadata,
+    embedded_art: Option<&EmbeddedArt>,
     art_dir: &Path,
     media_item_id: i64,
 ) -> Result<Option<PathBuf>> {
-    if let Some(embedded) = media::read_embedded_art(&track.path)? {
+    if let Some(embedded) = embedded_art {
         fs::create_dir_all(art_dir)
             .with_context(|| format!("creating art cache {}", art_dir.display()))?;
         let path = art_dir.join(format!("{media_item_id}.{}", embedded.extension));
@@ -61,15 +63,56 @@ pub fn find_folder_art(audio_path: &Path) -> Option<PathBuf> {
         }
     }
 
-    let stem = audio_path.file_stem()?.to_str()?;
+    let stem = audio_path.file_stem()?;
     for extension in ["jpg", "jpeg", "png", "webp"] {
-        let candidate = dir.join(format!("{stem}.{extension}"));
+        let mut file_name = stem.to_os_string();
+        file_name.push(".");
+        file_name.push(extension);
+        let candidate = dir.join(file_name);
         if candidate.is_file() {
             return Some(candidate);
         }
     }
 
     None
+}
+
+pub fn folder_art_signature(audio_path: &Path) -> Result<Option<String>> {
+    let Some(path) = find_folder_art(audio_path) else {
+        return Ok(None);
+    };
+    let metadata = fs::metadata(&path)
+        .with_context(|| format!("reading folder cover art metadata {}", path.display()))?;
+    let stamp = media::file_stamp(&metadata);
+    let mut hasher = Sha256::new();
+    hasher.update(native_path_bytes(&path));
+    hasher.update(stamp.file_size.to_be_bytes());
+    hash_optional_i64(&mut hasher, stamp.modified_at_ns);
+    hash_optional_i64(&mut hasher, stamp.fs_device);
+    hash_optional_i64(&mut hasher, stamp.fs_inode);
+    Ok(Some(hex::encode(hasher.finalize())))
+}
+
+fn hash_optional_i64(hasher: &mut Sha256, value: Option<i64>) {
+    match value {
+        Some(value) => {
+            hasher.update([1]);
+            hasher.update(value.to_be_bytes());
+        }
+        None => hasher.update([0]),
+    }
+}
+
+#[cfg(unix)]
+fn native_path_bytes(path: &Path) -> &[u8] {
+    use std::os::unix::ffi::OsStrExt;
+
+    path.as_os_str().as_bytes()
+}
+
+#[cfg(not(unix))]
+fn native_path_bytes(path: &Path) -> &[u8] {
+    path.to_str().unwrap_or_default().as_bytes()
 }
 
 fn copy_cover_if_changed(source: &Path, destination: &Path) -> Result<()> {
@@ -91,7 +134,7 @@ fn write_cover_bytes_if_changed(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{copy_cover_if_changed, write_cover_bytes_if_changed};
+    use super::{copy_cover_if_changed, folder_art_signature, write_cover_bytes_if_changed};
 
     #[test]
     fn cover_cache_writes_only_when_content_differs() {
@@ -109,5 +152,44 @@ mod tests {
         std::fs::write(&source, b"second").unwrap();
         copy_cover_if_changed(&source, &cached).unwrap();
         assert_eq!(std::fs::read(&cached).unwrap(), b"second");
+    }
+
+    #[test]
+    fn folder_art_signature_changes_with_selected_artwork() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("song.flac");
+        let cover = dir.path().join("cover.jpg");
+        std::fs::write(&audio, b"audio").unwrap();
+
+        assert_eq!(folder_art_signature(&audio).unwrap(), None);
+
+        std::fs::write(&cover, b"first").unwrap();
+        let first = folder_art_signature(&audio).unwrap();
+
+        std::fs::write(&cover, b"longer second").unwrap();
+        let second = folder_art_signature(&audio).unwrap();
+
+        assert!(first.is_some());
+        assert!(second.is_some());
+        assert_ne!(first, second);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finds_same_stem_art_for_non_utf8_audio_name() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir
+            .path()
+            .join(OsString::from_vec(b"song-\xff.flac".to_vec()));
+        let cover = dir
+            .path()
+            .join(OsString::from_vec(b"song-\xff.jpg".to_vec()));
+        std::fs::write(&audio, b"audio").unwrap();
+        std::fs::write(&cover, b"cover").unwrap();
+
+        assert_eq!(super::find_folder_art(&audio), Some(cover));
     }
 }

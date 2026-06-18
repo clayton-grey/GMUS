@@ -1,10 +1,9 @@
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::Result;
-use rusqlite::Connection;
-#[cfg(test)]
-use rusqlite::{params, OptionalExtension};
+use anyhow::{Context, Result};
+use rusqlite::{params, Connection, OptionalExtension};
 
 mod catalog;
 mod history;
@@ -20,9 +19,9 @@ pub use catalog::mark_locations_missing_under_root;
 use catalog::media_stats_row;
 #[allow(unused_imports)]
 pub use catalog::{
-    library_tracks, location_scan_is_current, mark_location_scan_current,
-    mark_locations_missing_under_root_except, reconcile_renamed_media_items, set_cover_path,
-    upsert_track, LibraryTrack, StoredTrack,
+    clear_cover_path, library_tracks, location_scan_is_current, mark_location_scan_current,
+    mark_locations_missing_under_root_except, media_item_id_for_location,
+    reconcile_renamed_media_items, set_cover_path, upsert_track, LibraryTrack, StoredTrack,
 };
 #[cfg(test)]
 use history::count;
@@ -60,6 +59,96 @@ pub fn open(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+pub fn prepare_art_cache(conn: &Connection, art_dir: &Path) -> Result<()> {
+    const NAMESPACE_KEY: &str = "art-cache-namespace";
+
+    fs::create_dir_all(art_dir)
+        .with_context(|| format!("creating cover-art directory {}", art_dir.display()))?;
+    let art_dir = art_dir
+        .canonicalize()
+        .with_context(|| format!("resolving cover-art directory {}", art_dir.display()))?;
+    let namespace = path::encode(&art_dir);
+    let saved_namespace = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            params![NAMESPACE_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if saved_namespace.as_deref() == Some(namespace.as_str()) {
+        return Ok(());
+    }
+
+    let covers = {
+        let mut stmt =
+            conn.prepare("SELECT id, cover_path FROM media_items WHERE cover_path IS NOT NULL")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let migrated = covers
+        .into_iter()
+        .map(|(media_item_id, cover_path)| {
+            let source = path::decode(&cover_path);
+            migrate_cached_cover(&source, &art_dir, media_item_id)
+                .map(|destination| (media_item_id, destination))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let tx = conn.unchecked_transaction()?;
+    for (media_item_id, destination) in migrated {
+        tx.execute(
+            "UPDATE media_items SET cover_path = ?1 WHERE id = ?2",
+            params![destination.as_deref().map(path::encode), media_item_id],
+        )?;
+    }
+    tx.execute("UPDATE locations SET scan_version = NULL", [])?;
+    tx.execute(
+        r#"
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (?1, ?2, ?3)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = excluded.updated_at
+        "#,
+        params![NAMESPACE_KEY, namespace, now_unix()],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_cached_cover(
+    source: &Path,
+    art_dir: &Path,
+    media_item_id: i64,
+) -> Result<Option<PathBuf>> {
+    if !source.is_file() {
+        return Ok(None);
+    }
+
+    let mut destination = art_dir.join(media_item_id.to_string());
+    if let Some(extension) = source.extension() {
+        destination.set_extension(extension);
+    }
+    let same_file = source == destination
+        || source
+            .canonicalize()
+            .ok()
+            .zip(destination.canonicalize().ok())
+            .is_some_and(|(source, destination)| source == destination);
+    if !same_file {
+        fs::copy(source, &destination).with_context(|| {
+            format!(
+                "copying cached cover art from {} to {}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+    }
+    Ok(Some(destination))
+}
+
 #[cfg(test)]
 pub(crate) fn open_in_memory_for_tests() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
@@ -89,7 +178,7 @@ pub(super) fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::TrackMetadata;
+    use crate::media::{TrackMetadata, SCAN_VERSION};
     use std::sync::{Arc, Barrier};
     use std::thread;
     use tempfile::tempdir;
@@ -339,8 +428,8 @@ mod tests {
             conn.execute_batch(
                 r#"
                 INSERT INTO media_items (
-                    id, fingerprint, title, first_seen_at, updated_at
-                ) VALUES (1, 'legacy', 'Legacy', 1, 1);
+                    id, fingerprint, title, cover_path, first_seen_at, updated_at
+                ) VALUES (1, 'legacy', 'Legacy', '/tmp/shared-art/1.jpg', 1, 1);
                 INSERT INTO locations (
                     id, media_item_id, path, seen_at, missing
                 ) VALUES (1, 1, '/tmp/legacy.flac', 1, 0);
@@ -360,9 +449,14 @@ mod tests {
         assert!(table_has_column(&conn, "locations", "fs_inode"));
         assert!(table_has_column(&conn, "locations", "modified_at_ns"));
         assert!(table_has_column(&conn, "locations", "scan_version"));
+        assert!(table_has_column(&conn, "locations", "folder_art_signature"));
+        assert_eq!(
+            tracks[0].cover_path.as_deref(),
+            Some(Path::new("/tmp/shared-art/1.jpg"))
+        );
         assert_eq!(
             conn.query_row(
-                "SELECT fs_device, fs_inode, modified_at_ns, scan_version FROM locations WHERE id = 1",
+                "SELECT fs_device, fs_inode, modified_at_ns, scan_version, folder_art_signature FROM locations WHERE id = 1",
                 [],
                 |row| {
                     Ok((
@@ -370,11 +464,12 @@ mod tests {
                         row.get::<_, Option<i64>>(1)?,
                         row.get::<_, Option<i64>>(2)?,
                         row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
                     ))
                 }
             )
             .unwrap(),
-            (None, None, None, None)
+            (None, None, None, None, None)
         );
         assert!(foreign_keys_enabled(&conn));
         assert_eq!(integrity_check(&conn), "ok");
@@ -435,6 +530,76 @@ mod tests {
         let conn = open(&path).unwrap();
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
         assert!(foreign_key_violation(&conn).is_none());
+    }
+
+    #[test]
+    fn art_cache_namespace_migrates_covers_and_invalidates_scan_state() {
+        let dir = tempdir().unwrap();
+        let legacy_dir = dir.path().join("legacy-art");
+        let first_dir = dir.path().join("first-art");
+        let second_dir = dir.path().join("second-art");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_cover = legacy_dir.join("cover.jpg");
+        fs::write(&legacy_cover, b"cover").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let track = test_track_metadata("/tmp/music/song.flac", "Song", 1, 120_000);
+        let stored = upsert_track(&conn, &track).unwrap();
+        set_cover_path(&conn, stored.media_item_id, &legacy_cover).unwrap();
+        mark_location_scan_current(&conn, &track.path, None).unwrap();
+
+        prepare_art_cache(&conn, &first_dir).unwrap();
+
+        let first_cover = first_dir
+            .canonicalize()
+            .unwrap()
+            .join(format!("{}.jpg", stored.media_item_id));
+        assert_eq!(fs::read(&first_cover).unwrap(), b"cover");
+        assert_eq!(
+            library_tracks(&conn).unwrap()[0].cover_path.as_deref(),
+            Some(first_cover.as_path())
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT scan_version FROM locations WHERE id = ?1",
+                params![stored.location_id],
+                |row| row.get::<_, Option<i64>>(0)
+            )
+            .unwrap(),
+            None
+        );
+
+        mark_location_scan_current(&conn, &track.path, None).unwrap();
+        prepare_art_cache(&conn, &first_dir).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT scan_version FROM locations WHERE id = ?1",
+                params![stored.location_id],
+                |row| row.get::<_, Option<i64>>(0)
+            )
+            .unwrap(),
+            Some(SCAN_VERSION)
+        );
+
+        prepare_art_cache(&conn, &second_dir).unwrap();
+        let second_cover = second_dir
+            .canonicalize()
+            .unwrap()
+            .join(format!("{}.jpg", stored.media_item_id));
+        assert_eq!(fs::read(&second_cover).unwrap(), b"cover");
+        assert_eq!(
+            library_tracks(&conn).unwrap()[0].cover_path.as_deref(),
+            Some(second_cover.as_path())
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT scan_version FROM locations WHERE id = ?1",
+                params![stored.location_id],
+                |row| row.get::<_, Option<i64>>(0)
+            )
+            .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -1082,7 +1247,7 @@ mod tests {
                 |row| row.get::<_, Option<String>>(0)
             )
             .unwrap(),
-            None
+            Some(path::encode(Path::new("/tmp/old-id-cover.jpg")))
         );
     }
 
@@ -1157,7 +1322,7 @@ mod tests {
         let first = test_track_metadata("/tmp/music/first.flac", "Same Track", 1, 120_000);
         let mut second = first.clone();
         second.path = "/tmp/music/second.flac".into();
-        second.modified_at = Some(2);
+        second.modified_at_ns = Some(1_000_000_001);
 
         upsert_track(&conn, &first).unwrap();
         mark_locations_missing_under_root(&conn, Path::new("/tmp/music")).unwrap();
@@ -1273,31 +1438,84 @@ mod tests {
     }
 
     #[test]
-    fn record_play_rejects_location_from_another_media_item() {
+    fn record_play_resolves_media_item_after_rename_reconciliation() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let old = test_track_metadata("/tmp/music/old.flac", "Same Track", 1, 120_000);
+        let mut renamed = old.clone();
+        renamed.path = "/tmp/music/renamed.flac".into();
+        let old_stored = upsert_track(&conn, &old).unwrap();
+        mark_locations_missing_under_root(&conn, Path::new("/tmp/music")).unwrap();
+        let renamed_stored = upsert_track(&conn, &renamed).unwrap();
+        assert_eq!(reconcile_renamed_media_items(&conn).unwrap(), 1);
+
+        record_play(
+            &conn,
+            old_stored.media_item_id,
+            old_stored.location_id,
+            120_000,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(stats(&conn).unwrap().play_events, 1);
+        assert_eq!(
+            media_stats_row(&conn, renamed_stored.media_item_id)
+                .unwrap()
+                .unwrap()
+                .play_count,
+            1
+        );
+    }
+
+    #[test]
+    fn record_play_preserves_existing_media_when_location_is_reassigned() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         let first = test_track_metadata("/tmp/music/first.flac", "First Track", 1, 120_000);
         let second = test_track_metadata("/tmp/music/second.flac", "Second Track", 2, 120_000);
         let first_stored = upsert_track(&conn, &first).unwrap();
         let second_stored = upsert_track(&conn, &second).unwrap();
+        conn.execute(
+            "UPDATE locations SET missing = 1 WHERE id = ?1",
+            params![second_stored.location_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE locations SET media_item_id = ?1 WHERE id = ?2",
+            params![second_stored.media_item_id, first_stored.location_id],
+        )
+        .unwrap();
 
-        let error = record_play(
+        let recorded_media_item_id = record_play(
             &conn,
             first_stored.media_item_id,
-            second_stored.location_id,
+            first_stored.location_id,
             120_000,
             true,
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error.to_string().contains("does not belong"));
-        assert_eq!(stats(&conn).unwrap().play_events, 0);
+        assert_eq!(recorded_media_item_id, first_stored.media_item_id);
         assert_eq!(
             media_stats_row(&conn, first_stored.media_item_id)
                 .unwrap()
                 .unwrap()
                 .play_count,
+            1
+        );
+        assert_eq!(
+            media_stats_row(&conn, second_stored.media_item_id)
+                .unwrap()
+                .unwrap()
+                .play_count,
             0
+        );
+        assert_eq!(
+            conn.query_row("SELECT location_id FROM play_events", [], |row| row
+                .get::<_, Option<i64>>(0))
+                .unwrap(),
+            None
         );
     }
 

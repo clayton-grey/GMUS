@@ -100,6 +100,18 @@ fn unknown_filter_field_shows_hint_and_matches_nothing() {
 }
 
 #[test]
+fn malformed_numeric_range_shows_hint_and_matches_nothing() {
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    app.input.set_filter("year:abc..2020".to_string());
+    app.sync_selection();
+
+    let query = FilterQuery::parse(app.input.filter());
+
+    assert_eq!(app.playback_sequence_indices(), Vec::<usize>::new());
+    assert_eq!(query.warning(), Some("expected a number for year"));
+}
+
+#[test]
 fn filter_info_pane_hints_fields_while_typing() {
     let mut app = test_app(vec![test_track(1, "first track")]);
     app.input.enter_filter();

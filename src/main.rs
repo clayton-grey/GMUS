@@ -81,6 +81,7 @@ fn main() -> Result<()> {
     let paths = config::AppPaths::resolve(cli.db)?;
     let conn = db::open(&paths.db_path)
         .with_context(|| format!("opening database at {}", paths.db_path.display()))?;
+    db::prepare_art_cache(&conn, &paths.art_dir)?;
 
     match cli.command.unwrap_or(Command::Tui { path: None }) {
         Command::Scan { path } => {
@@ -109,14 +110,22 @@ fn main() -> Result<()> {
             }
         }
         Command::Art { path } => {
-            let track = media::read_track(&path)?;
-            let stored = db::upsert_track(&conn, &track)?;
-            match art::cache_cover_for_track(&track, &paths.art_dir, stored.media_item_id)? {
+            let parsed = media::read_track_and_art(&path)?;
+            let stored = db::upsert_track(&conn, &parsed.metadata)?;
+            match art::cache_cover_for_track(
+                &parsed.metadata,
+                parsed.embedded_art.as_ref(),
+                &paths.art_dir,
+                stored.media_item_id,
+            )? {
                 Some(cached) => {
                     db::set_cover_path(&conn, stored.media_item_id, &cached)?;
                     println!("{}", cached.display());
                 }
-                None => println!("no embedded or folder cover art found"),
+                None => {
+                    db::clear_cover_path(&conn, stored.media_item_id)?;
+                    println!("no embedded or folder cover art found");
+                }
             }
         }
         Command::Stats => {
@@ -150,11 +159,6 @@ fn main() -> Result<()> {
         Command::Play { path } => {
             let track = media::read_track(&path)?;
             let stored = db::upsert_track(&conn, &track)?;
-            if let Some(cover_path) =
-                art::cache_cover_for_track(&track, &paths.art_dir, stored.media_item_id)?
-            {
-                db::set_cover_path(&conn, stored.media_item_id, &cover_path)?;
-            }
 
             let mut player = player::default_player_backend()?;
             player.load_and_play(&path)?;

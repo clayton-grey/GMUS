@@ -31,5 +31,13 @@ souvlaki = { version = "0.8.3", optional = true }
 [dev-dependencies]
 tempfile = "3.27"
 
+# Keep dev builds useful for backtraces without storing full debug data.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.dev.package."*"]
+debug = false
 opt-level = 2
+
+[profile.dev.build-override]
+debug = false

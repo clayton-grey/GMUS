@@ -18,6 +18,12 @@ pub struct EmbeddedArt {
 }
 
 #[derive(Debug, Clone)]
+pub struct ParsedTrack {
+    pub metadata: TrackMetadata,
+    pub embedded_art: Option<EmbeddedArt>,
+}
+
+#[derive(Debug, Clone)]
 pub struct TrackMetadata {
     pub path: PathBuf,
     pub file_size: i64,
@@ -81,13 +87,48 @@ pub fn read_track(path: &Path) -> Result<TrackMetadata> {
     read_track_with_stamp(path, file_stamp(&metadata))
 }
 
+pub fn read_track_and_art(path: &Path) -> Result<ParsedTrack> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("reading filesystem metadata for {}", path.display()))?;
+    read_track_and_art_with_stamp(path, file_stamp(&metadata))
+}
+
 pub fn read_track_with_stamp(path: &Path, stamp: FileStamp) -> Result<TrackMetadata> {
     let tagged = lofty::read_from_path(path)
         .with_context(|| format!("reading audio metadata from {}", path.display()))?;
     let properties = tagged.properties();
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
+    Ok(track_metadata_from_tag(
+        path,
+        stamp,
+        properties.duration().as_millis() as i64,
+        tag,
+    ))
+}
 
-    Ok(TrackMetadata {
+pub fn read_track_and_art_with_stamp(path: &Path, stamp: FileStamp) -> Result<ParsedTrack> {
+    let tagged = lofty::read_from_path(path)
+        .with_context(|| format!("reading audio metadata from {}", path.display()))?;
+    let properties = tagged.properties();
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
+    Ok(ParsedTrack {
+        metadata: track_metadata_from_tag(
+            path,
+            stamp,
+            properties.duration().as_millis() as i64,
+            tag,
+        ),
+        embedded_art: embedded_art_from_tag(tag),
+    })
+}
+
+fn track_metadata_from_tag(
+    path: &Path,
+    stamp: FileStamp,
+    duration_ms: i64,
+    tag: Option<&Tag>,
+) -> TrackMetadata {
+    TrackMetadata {
         path: path.to_path_buf(),
         file_size: stamp.file_size,
         modified_at: stamp.modified_at,
@@ -108,9 +149,9 @@ pub fn read_track_with_stamp(path: &Path, stamp: FileStamp) -> Result<TrackMetad
         track_total: tag.and_then(|tag| tag.track_total().map(i64::from)),
         disc_number: tag.and_then(|tag| tag.disk().map(i64::from)),
         disc_total: tag.and_then(|tag| tag.disk_total().map(i64::from)),
-        duration_ms: Some(properties.duration().as_millis() as i64).filter(|value| *value > 0),
+        duration_ms: Some(duration_ms).filter(|value| *value > 0),
         compilation: tag_bool(tag, ItemKey::FlagCompilation),
-    })
+    }
 }
 
 pub fn file_stamp(metadata: &fs::Metadata) -> FileStamp {
@@ -138,13 +179,6 @@ fn filesystem_identity(metadata: &fs::Metadata) -> (Option<i64>, Option<i64>) {
 #[cfg(not(unix))]
 fn filesystem_identity(_metadata: &fs::Metadata) -> (Option<i64>, Option<i64>) {
     (None, None)
-}
-
-pub fn read_embedded_art(path: &Path) -> Result<Option<EmbeddedArt>> {
-    let tagged = lofty::read_from_path(path)
-        .with_context(|| format!("reading embedded cover art from {}", path.display()))?;
-    let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
-    Ok(embedded_art_from_tag(tag))
 }
 
 pub fn is_audio_path(path: &Path) -> bool {

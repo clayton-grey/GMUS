@@ -174,6 +174,26 @@ fn explicit_seek_realigns_progress_without_counting_seek_distance() {
 }
 
 #[test]
+fn explicit_seek_to_end_does_not_record_a_full_play() {
+    let conn = test_conn();
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: app.tracks[0].clone(),
+        last_position_ms: 0,
+        listened_ms: 0,
+    });
+    app.player.play().unwrap();
+
+    app.seek_to(100_000).unwrap();
+    assert!(app.update_playback(&conn).unwrap());
+
+    assert!(app.current.is_none());
+    assert_eq!(db::stats(&conn).unwrap().play_events, 0);
+}
+
+#[test]
 fn backward_backend_jump_realigns_without_reducing_listened_time() {
     let mut app = test_app(vec![test_track(1, "first track")]);
     app.current = Some(PlayingTrack {
@@ -410,6 +430,7 @@ fn failed_record_play_during_stop_retains_current_for_retry() {
         .unwrap();
     let mut app = test_app(vec![track.clone()]);
     let mut invalid_track = track.clone();
+    invalid_track.media_item_id += 1_000;
     invalid_track.location_id += 1_000;
     app.current = Some(PlayingTrack {
         index: 0,
@@ -424,7 +445,7 @@ fn failed_record_play_during_stop_retains_current_for_retry() {
     assert!(app.current.is_some());
     assert_eq!(app.suspended_position_ms, Some(50_000));
 
-    app.current.as_mut().unwrap().track.location_id = track.location_id;
+    app.current.as_mut().unwrap().track = track;
     app.stop_current(&conn).unwrap();
 
     assert!(app.current.is_none());
@@ -446,6 +467,7 @@ fn failed_record_play_during_shutdown_retains_current_for_retry() {
         .unwrap();
     let mut app = test_app(vec![track.clone()]);
     let mut invalid_track = track.clone();
+    invalid_track.media_item_id += 1_000;
     invalid_track.location_id += 1_000;
     app.current = Some(PlayingTrack {
         index: 0,
@@ -460,11 +482,75 @@ fn failed_record_play_during_shutdown_retains_current_for_retry() {
     assert!(app.current.is_some());
     assert_eq!(app.suspended_position_ms, Some(50_000));
 
-    app.current.as_mut().unwrap().track.location_id = track.location_id;
+    app.current.as_mut().unwrap().track = track;
     app.shutdown(&conn).unwrap();
 
     assert!(app.current.is_none());
     assert_eq!(app.suspended_position_ms, None);
+}
+
+#[test]
+fn refresh_remaps_current_track_after_rename_reconciliation() {
+    let conn = test_conn();
+    let mut old = test_track_metadata("/tmp/music/old.flac", "first track", 1);
+    old.fs_device = Some(1);
+    old.fs_inode = Some(2);
+    let old_stored = db::upsert_track(&conn, &old).unwrap();
+    let old_track = db::library_tracks(&conn).unwrap().remove(0);
+    let mut app = test_app(vec![old_track.clone()]);
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: old_track,
+        last_position_ms: 10_000,
+        listened_ms: 10_000,
+    });
+    app.suspended_position_ms = Some(10_000);
+
+    db::mark_locations_missing_under_root(&conn, Path::new("/tmp/music")).unwrap();
+    let mut renamed = old;
+    renamed.path = "/tmp/music/renamed.flac".into();
+    let renamed_stored = db::upsert_track(&conn, &renamed).unwrap();
+    assert_eq!(db::reconcile_renamed_media_items(&conn).unwrap(), 1);
+    assert_ne!(old_stored.media_item_id, renamed_stored.media_item_id);
+
+    app.refresh(&conn).unwrap();
+
+    let current = app.current.as_ref().unwrap();
+    assert_eq!(current.track.media_item_id, renamed_stored.media_item_id);
+    assert_eq!(current.track.file_path, renamed.path);
+    app.stop_current(&conn).unwrap();
+    assert_eq!(db::stats(&conn).unwrap().play_events, 1);
+}
+
+#[test]
+fn playback_completion_survives_rename_before_refresh() {
+    let conn = test_conn();
+    let mut old = test_track_metadata("/tmp/music/old.flac", "first track", 1);
+    old.fs_device = Some(1);
+    old.fs_inode = Some(2);
+    db::upsert_track(&conn, &old).unwrap();
+    let old_track = db::library_tracks(&conn).unwrap().remove(0);
+    let mut app = test_app(vec![old_track.clone()]);
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: old_track,
+        last_position_ms: 10_000,
+        listened_ms: 10_000,
+    });
+    app.suspended_position_ms = Some(10_000);
+
+    db::mark_locations_missing_under_root(&conn, Path::new("/tmp/music")).unwrap();
+    let mut renamed = old;
+    renamed.path = "/tmp/music/renamed.flac".into();
+    db::upsert_track(&conn, &renamed).unwrap();
+    assert_eq!(db::reconcile_renamed_media_items(&conn).unwrap(), 1);
+
+    app.stop_current(&conn).unwrap();
+
+    assert!(app.current.is_none());
+    assert_eq!(db::stats(&conn).unwrap().play_events, 1);
 }
 
 #[test]

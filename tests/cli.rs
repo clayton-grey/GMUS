@@ -74,7 +74,7 @@ fn stats_accepts_db_override_and_initializes_empty_database() {
 
     let stdout = stdout(&output);
     assert!(db_path.is_file());
-    assert!(dir.path().join("art").is_dir());
+    assert!(dir.path().join("art").join("custom.sqlite3").is_dir());
     for expected in [
         "tracks: 0",
         "locations: 0",

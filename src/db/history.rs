@@ -1,5 +1,5 @@
-use anyhow::Result;
-use rusqlite::{params, Connection};
+use anyhow::{Context, Result};
+use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 
 use super::now_unix;
 
@@ -13,26 +13,37 @@ pub struct DbStats {
 
 pub fn record_play(
     conn: &Connection,
-    media_item_id: i64,
+    expected_media_item_id: i64,
     location_id: i64,
     duration_ms: i64,
     completed: bool,
-) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    let location_matches_media_item: bool = tx.query_row(
-        r#"
-        SELECT EXISTS(
-            SELECT 1
-            FROM locations
-            WHERE id = ?1 AND media_item_id = ?2
-        )
-        "#,
-        params![location_id, media_item_id],
+) -> Result<i64> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let expected_media_item_exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM media_items WHERE id = ?1)",
+        params![expected_media_item_id],
         |row| row.get(0),
     )?;
-    if !location_matches_media_item {
-        anyhow::bail!("location {location_id} does not belong to media item {media_item_id}");
-    }
+    let (media_item_id, event_location_id) = if expected_media_item_exists {
+        let location_matches: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM locations WHERE id = ?1 AND media_item_id = ?2)",
+            params![location_id, expected_media_item_id],
+            |row| row.get(0),
+        )?;
+        (
+            expected_media_item_id,
+            location_matches.then_some(location_id),
+        )
+    } else {
+        let media_item_id = tx
+            .query_row(
+                "SELECT media_item_id FROM locations WHERE id = ?1",
+                params![location_id],
+                |row| row.get(0),
+            )
+            .with_context(|| format!("resolving media item for location {location_id}"))?;
+        (media_item_id, Some(location_id))
+    };
 
     let now = now_unix();
     let completed_i64 = i64::from(completed);
@@ -44,7 +55,7 @@ pub fn record_play(
         "#,
         params![
             media_item_id,
-            location_id,
+            event_location_id,
             now,
             duration_ms.max(0),
             completed_i64
@@ -71,7 +82,7 @@ pub fn record_play(
     )?;
 
     tx.commit()?;
-    Ok(())
+    Ok(media_item_id)
 }
 
 pub fn stats(conn: &Connection) -> Result<DbStats> {

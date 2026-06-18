@@ -321,11 +321,17 @@ impl App {
 
     pub(super) fn seek_to(&mut self, position_ms: i64) -> Result<bool> {
         let position_ms = position_ms.max(0);
+        let reaches_end = self
+            .current
+            .as_ref()
+            .and_then(|current| current.track.duration_ms)
+            .is_some_and(|duration_ms| position_ms >= duration_ms);
         if self.suspended_position_ms.is_some() {
             self.suspended_position_ms = Some(position_ms);
             if let Some(current) = &mut self.current {
                 current.align_position(position_ms);
             }
+            self.explicit_seek_to_end = reaches_end;
             self.sync_integration_playback(true);
             return Ok(true);
         }
@@ -339,6 +345,7 @@ impl App {
         if let Some(current) = &mut self.current {
             current.align_position(position_ms);
         }
+        self.explicit_seek_to_end = reaches_end;
         self.sync_integration_playback(true);
         Ok(true)
     }
@@ -486,6 +493,7 @@ impl App {
         match self.player.load_and_play(&track.file_path) {
             Ok(()) => {
                 self.suspended_position_ms = None;
+                self.explicit_seek_to_end = false;
                 self.message = format!("playing {}", track.display_title());
                 self.current = Some(PlayingTrack {
                     index: entry.track_index,
@@ -536,17 +544,18 @@ impl App {
         } else {
             current.tick_position(self.player.position(), self.player.state());
         }
+        let natural_completion = natural_end && !self.explicit_seek_to_end;
         let mut played_ms = current.listened_ms;
-        if natural_end {
+        if natural_completion {
             if let Some(duration_ms) = current.track.duration_ms {
                 played_ms = played_ms.max(duration_ms);
             }
         }
-        let completed = natural_end
+        let completed = natural_completion
             || player::play_count_threshold_met(current.track.duration_ms, current.listened_ms);
 
-        if played_ms > 0 || natural_end {
-            db::record_play(
+        if played_ms > 0 || natural_completion {
+            let media_item_id = db::record_play(
                 conn,
                 current.track.media_item_id,
                 current.track.location_id,
@@ -562,11 +571,12 @@ impl App {
                 )
             };
             if completed {
-                self.increment_cached_play_count(current.track.media_item_id);
+                self.increment_cached_play_count(media_item_id);
             }
         }
         self.current = None;
         self.suspended_position_ms = None;
+        self.explicit_seek_to_end = false;
         Ok(())
     }
 
@@ -794,19 +804,35 @@ impl App {
         }
     }
 
-    pub(super) fn sync_current_track_index(&mut self) {
-        let Some(index) = self
+    pub(super) fn sync_current_track_index(&mut self, conn: &Connection) -> Result<()> {
+        let Some((current_media_item_id, current_location_id)) = self
             .current
             .as_ref()
-            .and_then(|current| self.track_index_for_media_item_id(current.track.media_item_id))
+            .map(|current| (current.track.media_item_id, current.track.location_id))
         else {
-            return;
+            return Ok(());
+        };
+        let media_item_id = match self.track_index_for_media_item_id(current_media_item_id) {
+            Some(index) => {
+                let track = self.tracks[index].clone();
+                if let Some(current) = &mut self.current {
+                    current.index = index;
+                    current.track = track;
+                }
+                return Ok(());
+            }
+            None => db::media_item_id_for_location(conn, current_location_id)?
+                .unwrap_or(current_media_item_id),
+        };
+        let Some(index) = self.track_index_for_media_item_id(media_item_id) else {
+            return Ok(());
         };
         let track = self.tracks[index].clone();
         if let Some(current) = &mut self.current {
             current.index = index;
             current.track = track;
         }
+        Ok(())
     }
 
     fn library_playback_entries(&self) -> Vec<PlaybackEntry> {

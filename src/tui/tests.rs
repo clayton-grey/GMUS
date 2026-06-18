@@ -68,6 +68,7 @@ fn test_app(tracks: Vec<LibraryTrack>) -> App {
         integration: IntegrationState::new(Box::new(NoopIntegration)),
         current: None,
         suspended_position_ms: None,
+        explicit_seek_to_end: false,
         transient_status: None,
         message: String::new(),
     };

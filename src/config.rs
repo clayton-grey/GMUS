@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -28,10 +29,11 @@ impl AppPaths {
             None => default_data_dir()?,
         };
         let db_path = db_override.unwrap_or_else(|| data_dir.join("gmus.sqlite3"));
-        let art_dir = db_path
-            .parent()
-            .map(|parent| parent.join("art"))
-            .unwrap_or_else(|| data_dir.join("art"));
+        let db_name = db_path
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| OsStr::new("gmus.sqlite3"));
+        let art_dir = data_dir.join("art").join(db_name);
 
         Ok(Self {
             data_dir,
@@ -88,7 +90,10 @@ mod tests {
 
         assert_eq!(paths.db_path, db_path);
         assert_eq!(paths.data_dir, dir.path().join("nested"));
-        assert_eq!(paths.art_dir, dir.path().join("nested").join("art"));
+        assert_eq!(
+            paths.art_dir,
+            dir.path().join("nested").join("art").join("gmus.sqlite3")
+        );
         assert!(!dir.path().join("nested").exists());
     }
 
@@ -112,6 +117,24 @@ mod tests {
             AppPaths::resolve_without_creating_dirs(Some(PathBuf::from("gmus.sqlite3"))).unwrap();
 
         assert_eq!(paths.data_dir, PathBuf::from("."));
-        assert_eq!(paths.art_dir, PathBuf::from("art"));
+        assert_eq!(paths.art_dir, PathBuf::from("./art/gmus.sqlite3"));
+    }
+
+    #[test]
+    fn sibling_database_overrides_use_distinct_art_caches() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let first = AppPaths::resolve_without_creating_dirs(Some(dir.path().join("first.sqlite3")))
+            .unwrap();
+        let second =
+            AppPaths::resolve_without_creating_dirs(Some(dir.path().join("second.sqlite3")))
+                .unwrap();
+
+        assert_ne!(first.art_dir, second.art_dir);
+        assert_eq!(first.art_dir, dir.path().join("art").join("first.sqlite3"));
+        assert_eq!(
+            second.art_dir,
+            dir.path().join("art").join("second.sqlite3")
+        );
     }
 }

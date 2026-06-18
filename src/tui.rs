@@ -95,6 +95,7 @@ struct App {
     integration: IntegrationState,
     current: Option<PlayingTrack>,
     suspended_position_ms: Option<i64>,
+    explicit_seek_to_end: bool,
     transient_status: Option<TransientStatus>,
     message: String,
 }
@@ -140,6 +141,7 @@ impl App {
             integration: IntegrationState::default(),
             current: None,
             suspended_position_ms: None,
+            explicit_seek_to_end: false,
             transient_status: None,
             message: String::from(
                 "Tab pane  Enter select/play  k keymap  x play  c play/pause  p playlists  v stop",
@@ -177,7 +179,7 @@ impl App {
         self.refresh_playlist_tracks(conn)?;
         self.rebuild_search_cache();
         self.reset_shuffle_order();
-        self.sync_current_track_index();
+        self.sync_current_track_index(conn)?;
         self.sync_selection_preserving_browser_anchors(
             selected_tree_entry.as_ref(),
             selected_media_item_id,
