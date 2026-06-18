@@ -4,7 +4,7 @@ use rusqlite::Connection;
 use crate::db::{self, LibraryTrack};
 
 use super::browser::track_root_label;
-use super::{App, FocusPane};
+use super::{App, FocusPane, InputState};
 
 pub(super) fn track_search_text(track: &LibraryTrack) -> String {
     format!(
@@ -416,6 +416,16 @@ fn optional_text_matches(value: Option<&str>, needle: &str) -> bool {
 }
 
 impl App {
+    pub(super) fn edit_filter(&mut self, edit: impl FnOnce(&mut InputState)) {
+        let selected_tree_entry = self.selected_tree_entry().cloned();
+        let selected_media_item_id = self.selected_playable_media_item_id();
+        edit(&mut self.input);
+        self.sync_selection_preserving_browser_anchors(
+            selected_tree_entry.as_ref(),
+            selected_media_item_id,
+        );
+    }
+
     pub(super) fn filter_display(&self) -> &str {
         if self.input.filter().is_empty() {
             "none"
@@ -428,11 +438,15 @@ impl App {
         let warning = FilterQuery::parse(self.input.filter())
             .warning()
             .map(str::to_string);
+        let selected_tree_entry = self.selected_tree_entry().cloned();
+        let selected_media_item_id = self.selected_playable_media_item_id();
         self.input.finish_filter();
         self.focus = FocusPane::Tree;
-        self.browser.reset_selection();
         self.reset_shuffle_order();
-        self.sync_selection();
+        self.sync_selection_preserving_browser_anchors(
+            selected_tree_entry.as_ref(),
+            selected_media_item_id,
+        );
         self.message = warning.unwrap_or_else(|| format!("filter: {}", self.filter_display()));
         self.save_filter_state(conn)?;
         Ok(())

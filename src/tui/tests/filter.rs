@@ -151,6 +151,59 @@ fn typed_filter_updates_visible_tracks_before_confirmation() {
 }
 
 #[test]
+fn typing_and_confirming_filter_preserves_a_visible_selection() {
+    let conn = test_conn();
+    let mut app = test_app(vec![
+        test_track(1, "first track"),
+        test_track(2, "second track"),
+    ]);
+    app.focus = FocusPane::Tracks;
+    app.browser.select_track_row(2);
+    app.apply_selection_state();
+    assert_eq!(app.selected_playable_media_item_id(), Some(2));
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+        .unwrap();
+    for key in "track".chars() {
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE))
+            .unwrap();
+    }
+
+    assert_eq!(app.selected_playable_media_item_id(), Some(2));
+    assert_eq!(app.browser.selected_track_row(), 2);
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+
+    assert_eq!(app.selected_playable_media_item_id(), Some(2));
+    assert_eq!(app.browser.selected_track_row(), 2);
+}
+
+#[test]
+fn typing_filter_falls_back_when_the_selection_is_removed() {
+    let conn = test_conn();
+    let mut app = test_app(vec![
+        test_track(1, "first track"),
+        test_track(2, "second track"),
+    ]);
+    app.focus = FocusPane::Tracks;
+    app.browser.select_track_row(2);
+    app.apply_selection_state();
+    assert_eq!(app.selected_playable_media_item_id(), Some(2));
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+        .unwrap();
+    for key in "title:first".chars() {
+        app.handle_key(&conn, KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE))
+            .unwrap();
+    }
+
+    assert_eq!(app.playback_sequence_indices(), &[0]);
+    assert_eq!(app.selected_playable_media_item_id(), Some(1));
+    assert_eq!(app.browser.selected_track_row(), 1);
+}
+
+#[test]
 fn slash_reopens_filter_with_the_active_filter_cleared() {
     let conn = test_conn();
     let mut app = test_app(vec![test_track(1, "keep one"), test_track(2, "skip this")]);

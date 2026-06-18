@@ -212,16 +212,8 @@ impl App {
                     self.clear_filter(conn)?;
                 }
                 KeyCode::Enter | KeyCode::Tab => self.confirm_filter(conn)?,
-                KeyCode::Backspace => {
-                    self.input.pop_filter();
-                    self.browser.reset_selection();
-                    self.sync_selection();
-                }
-                KeyCode::Char(char) => {
-                    self.input.push_filter(char);
-                    self.browser.reset_selection();
-                    self.sync_selection();
-                }
+                KeyCode::Backspace => self.edit_filter(|input| input.pop_filter()),
+                KeyCode::Char(char) => self.edit_filter(|input| input.push_filter(char)),
                 _ => {}
             }
             return Ok(false);
