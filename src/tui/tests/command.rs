@@ -480,7 +480,6 @@ fn library_output_renders_in_info_pane() {
 fn command_help_lists_available_commands() {
     let mut app = test_app(vec![test_track(1, "first track")]);
     app.input.enter_command();
-    set_command_input(&mut app, String::from("library"));
 
     let text = lines_text(&command_info_lines(&app, 120, 10));
 
@@ -504,6 +503,42 @@ fn command_help_lists_available_commands() {
             .bg(Color::Blue)
             .add_modifier(Modifier::BOLD)
     );
+}
+
+#[test]
+fn recognized_command_shows_description_usage_and_example() {
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    app.input.enter_command();
+    set_command_input(&mut app, String::from("add ~/Music"));
+
+    let lines = command_info_lines(&app, 120, 10);
+    let text = lines_text(&lines);
+
+    assert!(text.contains(":add"));
+    assert!(text.contains("Scan a file or directory and add it as a library root."));
+    assert!(text.contains("usage: :add PATH"));
+    assert!(text.contains("example: :add ~/Music"));
+    assert!(!text.contains("commands:"));
+    assert_eq!(
+        lines[0].spans[0].style,
+        Style::default()
+            .fg(Color::White)
+            .bg(Color::Blue)
+            .add_modifier(Modifier::BOLD)
+    );
+}
+
+#[test]
+fn command_alias_shows_canonical_help() {
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    app.input.enter_command();
+    set_command_input(&mut app, String::from("rm /tmp/music"));
+
+    let text = lines_text(&command_info_lines(&app, 120, 10));
+
+    assert!(text.contains(":remove"));
+    assert!(text.contains("usage: :remove PATH"));
+    assert!(text.contains("example: :remove ~/Music"));
 }
 
 #[test]

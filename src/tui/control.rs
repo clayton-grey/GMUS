@@ -274,7 +274,7 @@ impl App {
             KeyAction::ShrinkPane => self.resize_focused_pane(conn, false)?,
             KeyAction::GrowPane => self.resize_focused_pane(conn, true)?,
             KeyAction::CommandMode => self.enter_command_mode(),
-            KeyAction::FilterMode => self.enter_filter_mode(),
+            KeyAction::FilterMode => self.enter_filter_mode(conn)?,
             KeyAction::RateMode => self.enter_rate_mode(),
             KeyAction::PlaySelected => self.play_from_controls(conn)?,
             KeyAction::TogglePause => self.toggle_pause(conn)?,
@@ -322,7 +322,7 @@ impl App {
                 self.apply_selection_state();
             }
             KeyCode::Char(':') => self.enter_command_mode(),
-            KeyCode::Char('/') => self.enter_filter_mode(),
+            KeyCode::Char('/') => self.enter_filter_mode(conn)?,
             KeyCode::Char('r') => self.enter_rate_mode(),
             _ => {}
         }
@@ -335,10 +335,14 @@ impl App {
         self.message = String::from("typing command");
     }
 
-    fn enter_filter_mode(&mut self) {
+    fn enter_filter_mode(&mut self, conn: &Connection) -> Result<()> {
+        if !self.input.filter().is_empty() {
+            self.clear_filter(conn)?;
+        }
         self.input.enter_filter();
         self.clear_command_output();
         self.message = String::from("typing filter");
+        Ok(())
     }
 
     fn enter_rate_mode(&mut self) {

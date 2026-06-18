@@ -151,6 +151,25 @@ fn typed_filter_updates_visible_tracks_before_confirmation() {
 }
 
 #[test]
+fn slash_reopens_filter_with_the_active_filter_cleared() {
+    let conn = test_conn();
+    let mut app = test_app(vec![test_track(1, "keep one"), test_track(2, "skip this")]);
+    app.input.set_filter("keep".to_string());
+    app.sync_selection();
+    db::save_filter(&conn, "keep").unwrap();
+    assert_eq!(app.playback_sequence_indices(), &[0]);
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+        .unwrap();
+
+    assert_eq!(app.input.kind(), InputKind::Filter);
+    assert!(app.input.filter().is_empty());
+    assert_eq!(app.playback_sequence_indices(), &[0, 1]);
+    assert_eq!(db::saved_filter(&conn).unwrap().as_deref(), Some(""));
+    assert_eq!(app.message, "typing filter");
+}
+
+#[test]
 fn tab_confirms_filter_and_focuses_library() {
     let mut app = test_app(vec![test_track(1, "keep one"), test_track(2, "skip this")]);
     let conn = test_conn();

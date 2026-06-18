@@ -5,7 +5,7 @@ use ratatui::widgets::ListItem;
 use crate::db::{self, LibraryTrack};
 use crate::player::PlaybackState;
 
-use super::command::{parse_playback_rate, COMMAND_NAMES};
+use super::command::{command_help, parse_playback_rate, COMMAND_NAMES};
 use super::filter::FilterQuery;
 use super::formatting::{
     album_divider, display_width, fit_to_width, push_limited_span, right_aligned_line, spans_width,
@@ -483,6 +483,8 @@ pub(super) fn command_info_lines(app: &App, width: usize, height: u16) -> Vec<Li
         library_root_lines(app, width, height, style)
     } else if app.command_output_visible() {
         command_output_lines(app, width, height.min(app.command_output_height()), style)
+    } else if let Some(help) = command_help(app.input.command()) {
+        contextual_command_help_lines(help, width, height, style)
     } else {
         command_help_lines(width, style)
     }
@@ -639,6 +641,38 @@ pub(super) fn command_help_lines(width: usize, style: Style) -> Vec<Line<'static
         style,
     )));
     lines.push(Line::from(Span::styled(" Enter runs  Esc cancels", style)));
+    lines
+}
+
+fn contextual_command_help_lines(
+    help: super::command::CommandHelp,
+    width: usize,
+    height: u16,
+    style: Style,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!(" :{}", help.command),
+            style.add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            truncate_to_width(&format!(" {}", help.description), width),
+            style,
+        )),
+        Line::from(Span::styled(
+            truncate_to_width(&format!(" usage: {}", help.usage), width),
+            style,
+        )),
+        Line::from(Span::styled(
+            truncate_to_width(&format!(" example: {}", help.example), width),
+            style,
+        )),
+        Line::from(Span::styled(
+            " Enter runs  Tab completes  Esc cancels",
+            style,
+        )),
+    ];
+    lines.truncate(usize::from(height));
     lines
 }
 

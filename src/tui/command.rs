@@ -17,6 +17,132 @@ pub(super) const COLUMN_LAYOUT_WIDTH_USAGE: &str =
     "usage: :column-layout-width [WIDTH | reset | status]";
 pub(super) const RATE_USAGE: &str = "usage: :rate [0.25..4.0 | 25..400 | 25%..400% | reset]";
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CommandHelp {
+    pub(super) command: &'static str,
+    pub(super) description: &'static str,
+    pub(super) usage: &'static str,
+    pub(super) example: &'static str,
+}
+
+pub(super) fn command_help(input: &str) -> Option<CommandHelp> {
+    let command = input
+        .trim_start()
+        .strip_prefix(':')
+        .unwrap_or(input.trim_start())
+        .split_whitespace()
+        .next()?
+        .to_ascii_lowercase();
+
+    let help = match command.as_str() {
+        "add" => CommandHelp {
+            command: "add",
+            description: "Scan a file or directory and add it as a library root.",
+            usage: ":add PATH",
+            example: ":add ~/Music",
+        },
+        "remove" | "rm" => CommandHelp {
+            command: "remove",
+            description: "Remove a library root while preserving its tracks and history.",
+            usage: ":remove PATH",
+            example: ":remove ~/Music",
+        },
+        "update" | "u" => CommandHelp {
+            command: "update",
+            description: "Rescan every active library root, or only the supplied path.",
+            usage: ":update [PATH]",
+            example: ":update ~/Music",
+        },
+        "library" | "roots" => CommandHelp {
+            command: "library",
+            description: "Show library roots and enable or disable them interactively.",
+            usage: ":library",
+            example: ":library",
+        },
+        "playlist" | "pl" => CommandHelp {
+            command: "playlist",
+            description: "Open the playlist panel and select or create a playlist.",
+            usage: ":playlist [NAME]",
+            example: ":playlist Road Trip",
+        },
+        "playlist-clear" | "pl-clear" => CommandHelp {
+            command: "playlist-clear",
+            description: "Remove every track from the named or active playlist.",
+            usage: ":playlist-clear [NAME]",
+            example: ":playlist-clear Road Trip",
+        },
+        "playlist-delete" | "pl-delete" | "playlist-rm" | "pl-rm" => CommandHelp {
+            command: "playlist-delete",
+            description: "Delete the named or active playlist.",
+            usage: ":playlist-delete [NAME]",
+            example: ":playlist-delete Road Trip",
+        },
+        "keymap" | "keys" => CommandHelp {
+            command: "keymap",
+            description: "Open or close the editable key binding panel.",
+            usage: ":keymap",
+            example: ":keymap",
+        },
+        "keymap-reset" | "keys-reset" => CommandHelp {
+            command: "keymap-reset",
+            description: "Restore every key binding to its default.",
+            usage: ":keymap-reset",
+            example: ":keymap-reset",
+        },
+        "column-layout-width" => CommandHelp {
+            command: "column-layout-width",
+            description: "Choose the terminal width where the layout switches to columns.",
+            usage: ":column-layout-width [WIDTH|reset|status]",
+            example: ":column-layout-width 100",
+        },
+        "rate" => CommandHelp {
+            command: "rate",
+            description: "Show or change playback speed.",
+            usage: ":rate [0.25..4.0|25%..400%|reset]",
+            example: ":rate 75%",
+        },
+        "restore-filter" => CommandHelp {
+            command: "restore-filter",
+            description: "Control whether the active filter is restored at startup.",
+            usage: ":restore-filter [on|off|toggle|status]",
+            example: ":restore-filter on",
+        },
+        "restore-track" => CommandHelp {
+            command: "restore-track",
+            description: "Control whether the last played track is restored at startup.",
+            usage: ":restore-track [on|off|toggle|status]",
+            example: ":restore-track on",
+        },
+        "filter" | "f" => CommandHelp {
+            command: "filter",
+            description: "Apply a filter query without opening filter input.",
+            usage: ":filter QUERY",
+            example: ":filter genre:ambient year:2020..",
+        },
+        "clear" | "clear-filter" => CommandHelp {
+            command: "clear",
+            description: "Clear the active library filter.",
+            usage: ":clear",
+            example: ":clear",
+        },
+        "clear-output" | "close" | "hide" => CommandHelp {
+            command: "clear-output",
+            description: "Close command output currently shown in the info pane.",
+            usage: ":clear-output",
+            example: ":clear-output",
+        },
+        #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
+        "notifications" | "notify" => CommandHelp {
+            command: "notifications",
+            description: "Control macOS track-change notifications.",
+            usage: ":notifications [on|off|toggle|status]",
+            example: ":notifications off",
+        },
+        _ => return None,
+    };
+    Some(help)
+}
+
 pub(super) struct CommandOutputState {
     lines: Vec<String>,
     kind: CommandOutputKind,
