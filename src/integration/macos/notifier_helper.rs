@@ -3,18 +3,22 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
 use cocoa::appkit::{
     NSApp, NSApplication, NSApplicationActivationPolicyAccessory, NSBackingStoreBuffered, NSColor,
-    NSEventMask, NSImage, NSImageView, NSMainMenuWindowLevel, NSScreen, NSTextField, NSView,
-    NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSEvent, NSEventMask, NSEventType, NSImage, NSImageView, NSMainMenuWindowLevel, NSScreen,
+    NSTextField, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use cocoa::base::{id, nil, NO, YES};
 use cocoa::foundation::{
     NSAutoreleasePool, NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString,
 };
+use objc::declare::ClassDecl;
+use objc::runtime::{Class, Object, Sel, BOOL as ObjcBool, YES as OBJC_YES};
 use objc::{class, msg_send, sel, sel_impl};
 
 pub(super) const HELPER_MODE_ARG: &str = "--gmus-notifier";
@@ -28,6 +32,7 @@ const OVERLAY_VISIBLE_FOR: Duration = Duration::from_millis(2_800);
 const OVERLAY_FADE_IN: Duration = Duration::from_millis(120);
 const OVERLAY_FADE_OUT: Duration = Duration::from_millis(180);
 const OVERLAY_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+static OVERLAY_DISMISS_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 pub(super) fn run_if_requested() -> Result<bool> {
     let args: Vec<_> = env::args_os().skip(1).collect();
@@ -99,12 +104,15 @@ fn show_overlay(payload: &HelperPayload) -> Result<()> {
 }
 
 unsafe fn show_overlay_with_pool(payload: &HelperPayload) -> Result<()> {
+    OVERLAY_DISMISS_REQUESTED.store(false, Ordering::Relaxed);
     let app = prepare_accessory_app();
     let overlay = OverlayWindow::new(payload)?;
     overlay.show();
-    fade_window(overlay.window, 0.0, 1.0, OVERLAY_FADE_IN, app);
-    pump_app_for(OVERLAY_VISIBLE_FOR, app);
-    fade_window(overlay.window, 1.0, 0.0, OVERLAY_FADE_OUT, app);
+    if !fade_window(overlay.window, 0.0, 1.0, OVERLAY_FADE_IN, app)
+        && !pump_app_for(OVERLAY_VISIBLE_FOR, app, overlay.window)
+    {
+        fade_window(overlay.window, 1.0, 0.0, OVERLAY_FADE_OUT, app);
+    }
     overlay.close();
     Ok(())
 }
@@ -144,9 +152,9 @@ impl OverlayWindow {
                 | NSWindowCollectionBehavior::NSWindowCollectionBehaviorTransient
                 | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary,
         );
-        let _: () = msg_send![window, setIgnoresMouseEvents: YES];
+        let _: () = msg_send![window, setIgnoresMouseEvents: NO];
 
-        let content = NSView::initWithFrame_(NSView::alloc(nil), layout.content_frame());
+        let content = overlay_content_view(layout.content_frame());
         configure_rounded_layer(
             content,
             NSColor::colorWithSRGBRed_green_blue_alpha_(nil, 0.05, 0.055, 0.06, 0.92),
@@ -239,6 +247,57 @@ unsafe fn prepare_accessory_app() -> id {
     app
 }
 
+unsafe fn overlay_content_view(frame: NSRect) -> id {
+    let view: id = msg_send![overlay_content_view_class(), alloc];
+    let view: id = msg_send![view, initWithFrame: frame];
+    view
+}
+
+fn overlay_content_view_class() -> &'static Class {
+    static CLASS: OnceLock<&'static Class> = OnceLock::new();
+    CLASS.get_or_init(|| {
+        let superclass = class!(NSView);
+        let mut decl = ClassDecl::new("GMUSOverlayContentView", superclass)
+            .expect("registering GMUS overlay content view class");
+        unsafe {
+            decl.add_method(
+                sel!(acceptsFirstMouse:),
+                overlay_accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> ObjcBool,
+            );
+            decl.add_method(
+                sel!(mouseDown:),
+                overlay_mouse_down as extern "C" fn(&Object, Sel, id),
+            );
+            decl.add_method(
+                sel!(rightMouseDown:),
+                overlay_mouse_down as extern "C" fn(&Object, Sel, id),
+            );
+            decl.add_method(
+                sel!(otherMouseDown:),
+                overlay_mouse_down as extern "C" fn(&Object, Sel, id),
+            );
+        }
+        decl.register()
+    })
+}
+
+// AppKit normally uses the first click on an inactive app only to activate it.
+extern "C" fn overlay_accepts_first_mouse(_: &Object, _: Sel, _: id) -> ObjcBool {
+    OBJC_YES
+}
+
+extern "C" fn overlay_mouse_down(_: &Object, _: Sel, _: id) {
+    request_overlay_dismissal();
+}
+
+fn request_overlay_dismissal() {
+    OVERLAY_DISMISS_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+fn overlay_dismissal_requested() -> bool {
+    OVERLAY_DISMISS_REQUESTED.load(Ordering::Relaxed)
+}
+
 unsafe fn add_label(parent: id, frame: NSRect, text: &str, font_size: f64, bold: bool, alpha: f64) {
     let field = NSTextField::initWithFrame_(NSTextField::alloc(nil), frame);
     field.setEditable_(NO);
@@ -284,31 +343,36 @@ fn overlay_artwork_path(artwork_path: Option<&Path>) -> Option<&Path> {
     artwork_path.filter(|path| path.is_file())
 }
 
-unsafe fn fade_window(window: id, from: f64, to: f64, duration: Duration, app: id) {
+unsafe fn fade_window(window: id, from: f64, to: f64, duration: Duration, app: id) -> bool {
     if duration.is_zero() {
         window.setAlphaValue_(to);
-        return;
+        return false;
     }
 
     let started = Instant::now();
     while started.elapsed() < duration {
         let progress = (started.elapsed().as_secs_f64() / duration.as_secs_f64()).min(1.0);
         window.setAlphaValue_(from + (to - from) * progress);
-        pump_app_for(OVERLAY_FRAME_INTERVAL, app);
+        if pump_app_for(OVERLAY_FRAME_INTERVAL, app, window) {
+            return true;
+        }
     }
     window.setAlphaValue_(to);
+    false
 }
 
-unsafe fn pump_app_for(duration: Duration, app: id) {
+unsafe fn pump_app_for(duration: Duration, app: id, overlay_window: id) -> bool {
     let started = Instant::now();
     while started.elapsed() < duration {
-        pump_pending_app_events(app);
+        if pump_pending_app_events(app, overlay_window) {
+            return true;
+        }
         std::thread::sleep(OVERLAY_FRAME_INTERVAL.min(duration.saturating_sub(started.elapsed())));
     }
-    pump_pending_app_events(app);
+    pump_pending_app_events(app, overlay_window)
 }
 
-unsafe fn pump_pending_app_events(app: id) {
+unsafe fn pump_pending_app_events(app: id, overlay_window: id) -> bool {
     let until = NSDate::distantPast(nil);
     loop {
         let event = app.nextEventMatchingMask_untilDate_inMode_dequeue_(
@@ -320,8 +384,28 @@ unsafe fn pump_pending_app_events(app: id) {
         if event == nil {
             break;
         }
+        if event_dismisses_overlay(event, overlay_window) {
+            return true;
+        }
         app.sendEvent_(event);
+        if overlay_dismissal_requested() {
+            return true;
+        }
     }
+    false
+}
+
+unsafe fn event_dismisses_overlay(event: id, overlay_window: id) -> bool {
+    if event.window() != overlay_window {
+        return false;
+    }
+
+    matches!(
+        event.eventType(),
+        NSEventType::NSLeftMouseDown
+            | NSEventType::NSRightMouseDown
+            | NSEventType::NSOtherMouseDown
+    )
 }
 
 fn log_helper_error(error: &anyhow::Error) {

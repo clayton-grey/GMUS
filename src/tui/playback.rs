@@ -420,6 +420,7 @@ impl App {
             current.align_position(position_ms);
         }
         self.message = String::from("playing");
+        self.publish_track_changed();
         self.sync_integration_playback(true);
         Ok(())
     }

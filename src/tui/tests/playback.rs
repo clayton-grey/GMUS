@@ -281,6 +281,42 @@ fn pause_suspends_player_until_resume() {
 }
 
 #[test]
+fn resume_from_pause_publishes_track_changed_notification() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    app.integration.backend = Box::new(RecordingIntegration {
+        events: Rc::clone(&events),
+    });
+    app.current = Some(PlayingTrack {
+        index: 0,
+        source: None,
+        track: app.tracks[0].clone(),
+        last_position_ms: 50_000,
+        listened_ms: 50_000,
+    });
+    app.suspended_position_ms = Some(50_000);
+
+    app.resume_current().unwrap();
+
+    assert_eq!(
+        events.borrow().as_slice(),
+        &[
+            IntegrationEvent::TrackChanged(TrackSnapshot {
+                title: Some(String::from("first track")),
+                artist: Some(String::from("Artist")),
+                album: Some(String::from("Album")),
+                duration_ms: Some(100_000),
+                artwork_path: None,
+            }),
+            IntegrationEvent::Playback(crate::integration::PlaybackSnapshot {
+                state: PlaybackState::Playing,
+                position_ms: 50_000,
+            }),
+        ]
+    );
+}
+
+#[test]
 fn failed_seek_during_resume_keeps_app_paused() {
     let mut app = test_app(vec![test_track(1, "first track")]);
     app.player = Box::new(FailingSeekPlayer);
