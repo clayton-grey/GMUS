@@ -85,6 +85,25 @@ pub(super) enum PlaylistPanelEntry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaylistSelectionAnchor {
+    Playlist {
+        playlist_id: i64,
+    },
+    Track {
+        playlist_id: i64,
+        playlist_track_id: i64,
+    },
+}
+
+impl PlaylistSelectionAnchor {
+    fn playlist_id(self) -> i64 {
+        match self {
+            Self::Playlist { playlist_id } | Self::Track { playlist_id, .. } => playlist_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PlaylistCacheEntry {
     pub(super) playlist_track_id: i64,
     pub(super) media_item_id: i64,
@@ -461,6 +480,65 @@ impl App {
             .set_active_playlist_id(Some(playlist_id));
     }
 
+    fn selected_playlist_entry_anchor(&self) -> Option<PlaylistSelectionAnchor> {
+        self.view
+            .playlist_entries
+            .get(self.management_panel.playlist.selected_row())
+            .map(|entry| match entry {
+                PlaylistPanelEntry::Playlist { playlist_id, .. } => {
+                    PlaylistSelectionAnchor::Playlist {
+                        playlist_id: *playlist_id,
+                    }
+                }
+                PlaylistPanelEntry::Track {
+                    playlist_id,
+                    playlist_track_id,
+                    ..
+                } => PlaylistSelectionAnchor::Track {
+                    playlist_id: *playlist_id,
+                    playlist_track_id: *playlist_track_id,
+                },
+            })
+    }
+
+    fn select_playlist_entry_anchor(&mut self, anchor: PlaylistSelectionAnchor) -> bool {
+        let Some(position) =
+            self.view
+                .playlist_entries
+                .iter()
+                .position(|entry| match (entry, anchor) {
+                    (
+                        PlaylistPanelEntry::Playlist { playlist_id, .. },
+                        PlaylistSelectionAnchor::Playlist {
+                            playlist_id: anchor_id,
+                        },
+                    ) => *playlist_id == anchor_id,
+                    (
+                        PlaylistPanelEntry::Track {
+                            playlist_id,
+                            playlist_track_id,
+                            ..
+                        },
+                        PlaylistSelectionAnchor::Track {
+                            playlist_id: anchor_playlist_id,
+                            playlist_track_id: anchor_track_id,
+                        },
+                    ) => {
+                        *playlist_id == anchor_playlist_id && *playlist_track_id == anchor_track_id
+                    }
+                    _ => false,
+                })
+        else {
+            return false;
+        };
+
+        self.management_panel.playlist.select_row(position);
+        self.management_panel
+            .playlist
+            .set_active_playlist_id(Some(anchor.playlist_id()));
+        true
+    }
+
     pub(super) fn toggle_selected_playlist_expansion(&mut self) {
         let Some(playlist_id) = self.selected_playlist_entry_playlist_id() else {
             self.message = String::from("no playlist selected");
@@ -491,6 +569,9 @@ impl App {
             self.show_transient_status(self.message.clone());
             return Ok(());
         }
+        let playlist_selection_anchor = (self.focus == FocusPane::Playlist)
+            .then(|| self.selected_playlist_entry_anchor())
+            .flatten();
         let playlist_id = self.ensure_active_playlist(conn)?;
         let media_item_ids = if self.focus == FocusPane::Playlist {
             self.selected_playlist_track_media_item_id()
@@ -512,7 +593,13 @@ impl App {
             .playlist
             .activate_and_expand(playlist_id);
         self.sync_selection_preserving_browser_selection();
-        self.select_playlist_row_for_id(playlist_id);
+        let restored_selection = playlist_selection_anchor
+            .map(|anchor| self.select_playlist_entry_anchor(anchor))
+            .unwrap_or(false);
+        if !restored_selection {
+            self.select_playlist_row_for_id(playlist_id);
+        }
+        self.apply_selection_state();
         self.message = format!(
             "added {added} tracks to {}",
             self.playlist_name(playlist_id)

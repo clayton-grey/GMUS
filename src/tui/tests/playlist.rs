@@ -255,6 +255,74 @@ fn playlist_panel_removes_selected_playlist_track() {
 }
 
 #[test]
+fn playlist_duplicate_keeps_playlist_track_selected_for_repeated_edits() {
+    let data_dir = tempdir().unwrap();
+    let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
+    db::upsert_track(
+        &conn,
+        &test_track_metadata("/tmp/first.flac", "first track", 1),
+    )
+    .unwrap();
+    db::upsert_track(
+        &conn,
+        &test_track_metadata("/tmp/second.flac", "second track", 2),
+    )
+    .unwrap();
+    let playlist = db::create_playlist(&conn, "Mix").unwrap();
+    db::add_tracks_to_playlist(&conn, playlist.id, &[1, 2]).unwrap();
+    let mut app = test_app(vec![
+        test_track(1, "first track"),
+        test_track(2, "second track"),
+    ]);
+    app.playlists = db::playlists(&conn).unwrap();
+    app.refresh_playlist_tracks(&conn).unwrap();
+    app.management_panel
+        .playlist
+        .set_active_playlist_id(Some(playlist.id));
+    app.management_panel.playlist.expand_playlist(playlist.id);
+    app.management_panel.show_playlist();
+    app.focus = FocusPane::Playlist;
+    app.sync_selection();
+    app.management_panel.playlist.select_row(2);
+    assert_eq!(
+        app.selected_playlist_track()
+            .map(|(_playlist_id, _entry_id, media_item_id)| media_item_id),
+        Some(2)
+    );
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('='), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        db::playlist_track_ids(&conn, playlist.id).unwrap(),
+        vec![1, 2, 2]
+    );
+    assert_eq!(
+        app.selected_playlist_track()
+            .map(|(_playlist_id, _entry_id, media_item_id)| media_item_id),
+        Some(2)
+    );
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('='), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        db::playlist_track_ids(&conn, playlist.id).unwrap(),
+        vec![1, 2, 2, 2]
+    );
+
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        db::playlist_track_ids(&conn, playlist.id).unwrap(),
+        vec![1, 2, 2]
+    );
+    assert_eq!(
+        app.selected_playlist_track()
+            .map(|(_playlist_id, _entry_id, media_item_id)| media_item_id),
+        Some(2)
+    );
+}
+
+#[test]
 fn playlist_track_numbers_are_playlist_relative() {
     let mut first = test_track(1, "first track");
     first.track_number = Some(7);
