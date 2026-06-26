@@ -15,7 +15,8 @@ use super::{App, CommandOutputKind};
 
 pub(super) const COLUMN_LAYOUT_WIDTH_USAGE: &str =
     "usage: :column-layout-width [WIDTH | reset | status]";
-pub(super) const RATE_USAGE: &str = "usage: :rate [0.25..4.0 | 25..400 | 25%..400% | reset]";
+pub(super) const RATE_USAGE: &str =
+    "usage: :rate [0.25..4.0 | 25..400 | 25%..400% | -24n..+24n | -2o..+2o | reset]";
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CommandHelp {
@@ -97,9 +98,9 @@ pub(super) fn command_help(input: &str) -> Option<CommandHelp> {
         },
         "rate" => CommandHelp {
             command: "rate",
-            description: "Show or change playback speed.",
-            usage: ":rate [0.25..4.0|25%..400%|reset]",
-            example: ":rate 75%",
+            description: "Show or change playback speed and pitch.",
+            usage: ":rate [0.25..4.0|25%..400%|-24n..+24n|-2o..+2o|reset]",
+            example: ":rate -1n",
         },
         "restore-filter" => CommandHelp {
             command: "restore-filter",
@@ -577,8 +578,13 @@ fn on_off(enabled: bool) -> &'static str {
 }
 
 pub(super) fn parse_playback_rate(value: &str) -> Option<f32> {
+    let value = value.trim();
     let rate = if value.eq_ignore_ascii_case("reset") || value.eq_ignore_ascii_case("normal") {
         1.0
+    } else if let Some(octaves) = parse_octave_shift(value) {
+        2.0_f32.powf(octaves)
+    } else if let Some(notes) = parse_note_shift(value) {
+        2.0_f32.powf(notes / 12.0)
     } else if let Some(percent) = value.strip_suffix('%') {
         percent.trim().parse::<f32>().ok()? / 100.0
     } else {
@@ -590,6 +596,33 @@ pub(super) fn parse_playback_rate(value: &str) -> Option<f32> {
         }
     };
     (rate.is_finite() && (0.25..=4.0).contains(&rate)).then_some(rate)
+}
+
+fn parse_octave_shift(value: &str) -> Option<f32> {
+    parse_shift(value, &["octaves", "octave", "oct", "o"])
+}
+
+fn parse_note_shift(value: &str) -> Option<f32> {
+    parse_shift(
+        value,
+        &[
+            "semitones",
+            "semitone",
+            "notes",
+            "note",
+            "steps",
+            "step",
+            "st",
+            "n",
+        ],
+    )
+}
+
+fn parse_shift(value: &str, suffixes: &[&str]) -> Option<f32> {
+    let value = value.trim().to_ascii_lowercase();
+    suffixes
+        .iter()
+        .find_map(|suffix| value.strip_suffix(suffix)?.trim().parse::<f32>().ok())
 }
 
 pub(super) fn playback_rate_message(rate: f32) -> String {

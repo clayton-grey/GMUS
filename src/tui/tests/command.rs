@@ -172,6 +172,43 @@ fn rate_command_accepts_percent_and_reset() {
 }
 
 #[test]
+fn rate_command_accepts_octave_shift_notation() {
+    let conn = test_conn();
+    let mut app = test_app(Vec::new());
+
+    for (value, expected_rate, expected_message) in [
+        ("-1o", 0.5, "playback rate 0.50x"),
+        ("+1 octave", 2.0, "playback rate 2.00x"),
+        ("-0.5oct", 2.0_f32.powf(-0.5), "playback rate 0.71x"),
+    ] {
+        set_command_input(&mut app, format!("rate {value}"));
+        app.execute_command(&conn);
+
+        assert!((app.player.rate() - expected_rate).abs() < f32::EPSILON);
+        assert_eq!(app.message, expected_message);
+    }
+}
+
+#[test]
+fn rate_command_accepts_note_step_notation() {
+    let conn = test_conn();
+    let mut app = test_app(Vec::new());
+
+    for (value, expected_rate, expected_message) in [
+        ("-1n", 2.0_f32.powf(-1.0 / 12.0), "playback rate 0.94x"),
+        ("+1 note", 2.0_f32.powf(1.0 / 12.0), "playback rate 1.06x"),
+        ("-12 semitones", 0.5, "playback rate 0.50x"),
+        ("+12st", 2.0, "playback rate 2.00x"),
+    ] {
+        set_command_input(&mut app, format!("rate {value}"));
+        app.execute_command(&conn);
+
+        assert!((app.player.rate() - expected_rate).abs() < f32::EPSILON);
+        assert_eq!(app.message, expected_message);
+    }
+}
+
+#[test]
 fn column_layout_width_command_persists_and_resets_layout_threshold() {
     let conn = test_conn();
     let mut app = test_app(Vec::new());
@@ -238,14 +275,24 @@ fn rate_command_rejects_invalid_values_without_changing_rate() {
     let mut app = test_app(Vec::new());
     app.player.set_rate(0.75).unwrap();
 
-    for command in ["rate 0", "rate 10", "rate 401", "rate NaN", "rate fast"] {
+    for command in [
+        "rate 0",
+        "rate 10",
+        "rate 401",
+        "rate -25n",
+        "rate +25 notes",
+        "rate -3o",
+        "rate +3 octaves",
+        "rate NaN",
+        "rate fast",
+    ] {
         set_command_input(&mut app, command.to_string());
         app.execute_command(&conn);
 
         assert_eq!(app.player.rate(), 0.75);
         assert_eq!(
             app.message,
-            "usage: :rate [0.25..4.0 | 25..400 | 25%..400% | reset]"
+            "usage: :rate [0.25..4.0 | 25..400 | 25%..400% | -24n..+24n | -2o..+2o | reset]"
         );
     }
 }
@@ -262,8 +309,10 @@ fn rate_hotkey_opens_rate_input_and_applies_percentage() {
     assert!(app.input_bar_visible());
     assert!(app.info_area_visible());
     assert_eq!(command_info_title(&app), "Rate");
-    assert_eq!(line_text(&rate_line(&app, 30)), " rate: 0.75 or 75_");
+    assert_eq!(line_text(&rate_line(&app, 30)), " rate: 0.75, -1o, or -1n_");
     assert!(lines_text(&rate_info_lines(&app, 80, 8)).contains("75 means 75%"));
+    assert!(lines_text(&rate_info_lines(&app, 80, 8)).contains("-1 octave means 0.5x"));
+    assert!(lines_text(&rate_info_lines(&app, 80, 8)).contains("-1 semitone lowers one note"));
 
     for key in ['7', '5'] {
         app.handle_key(&conn, KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE))

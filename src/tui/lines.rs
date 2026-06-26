@@ -723,7 +723,10 @@ pub(super) fn rate_info_lines(app: &App, width: usize, height: u16) -> Vec<Line<
     ))];
     if !app.input.rate().is_empty() && parse_playback_rate(app.input.rate()).is_none() {
         lines.push(Line::from(Span::styled(
-            truncate_to_width(" invalid rate; use 0.25..4.0 or 25..400", width),
+            truncate_to_width(
+                " invalid rate; use 0.25..4.0, -24n..+24n, or -2o..+2o",
+                width,
+            ),
             Style::default().fg(Color::LightRed),
         )));
     }
@@ -734,6 +737,14 @@ pub(super) fn rate_info_lines(app: &App, width: usize, height: u16) -> Vec<Line<
         ),
         (
             " values above 4 are percentages: 75 means 75%",
+            Style::default().fg(Color::Gray),
+        ),
+        (
+            " octave shifts: -1o or -1 octave means 0.5x",
+            Style::default().fg(Color::Gray),
+        ),
+        (
+            " note steps: -1n or -1 semitone lowers one note",
             Style::default().fg(Color::Gray),
         ),
         (
@@ -970,7 +981,7 @@ pub(super) fn rate_line(app: &App, width: usize) -> Line<'static> {
     let rate = if app.input.rate().is_empty() {
         Span::styled(
             truncate_to_width(
-                "0.75 or 75_",
+                "0.75, -1o, or -1n_",
                 text_width.saturating_sub(display_width("rate: ")),
             ),
             placeholder_input_style(app),

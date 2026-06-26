@@ -153,7 +153,7 @@ The TUI is organized around a cmus-style browser:
 - `Ctrl-R`: refresh the library from the local database
 - `i`: show/hide the info pane
 - `I`: move the browser selection to the current track
-- `r`: type a playback rate, then `Enter` or `Tab` to apply, or `Esc` to cancel
+- `r`: type a playback rate, note step, or octave shift, then `Enter` or `Tab` to apply, or `Esc` to cancel
 - `/`: type a library filter, then `Enter` or `Tab` to apply, or `Esc` to clear
 - `:`: type a command, then `Enter` to run it; `Tab` completes commands and paths
 - `q` or `Ctrl-C`: quit
@@ -212,7 +212,7 @@ Both are on by default and can be toggled from the command bar.
 - `:keymap`: show the keymap pane
 - `:keymap-reset`: reset custom key mappings to defaults
 - `:column-layout-width [WIDTH|reset|status]`: set the widest terminal width that uses stacked browser panes; columns begin one column above it, and the default is `75`
-- `:rate [RATE|PERCENT|reset]`: show or change playback rate, for example `:rate 0.75`, `:rate 75`, or `:rate 75%`
+- `:rate [RATE|PERCENT|NOTES|OCTAVES|reset]`: show or change playback rate and pitch, for example `:rate 75%`, `:rate -1n`, `:rate -1 semitone`, or `:rate -1o`
 - `:restore-filter [on|off|toggle|status]`: toggle whether the last filter is restored on startup
 - `:restore-track [on|off|toggle|status]`: toggle whether the last played
   track is restored on startup
@@ -229,6 +229,12 @@ Playback rates range from `0.25x` to `4.0x` and remain active across tracks.
 Rodio changes pitch along with playback speed; it does not perform pitch-preserving
 time stretching. A non-default rate is shown beside the track time in the
 playback status row. Unmarked values above `4` are interpreted as percentages.
+Octave shifts from `-2o` to `+2o` map to powers of two, so `-1o` is `0.5x`,
+`+1o` is `2.0x`, and fractional shifts such as `-0.5o` are supported.
+Chromatic note steps from `-24n` to `+24n` use equal-tempered semitones:
+`-1n` lowers playback by one note, `+1n` raises it by one note, and twelve
+steps equal one octave. The words `note`, `step`, and `semitone` are also
+accepted, as is the conventional `st` abbreviation.
 
 `Esc` closes command output before falling through to filter clearing. Normal
 navigation/actions also return the info pane to selected-track metadata.
