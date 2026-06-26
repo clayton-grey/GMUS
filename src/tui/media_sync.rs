@@ -1,6 +1,11 @@
+#[cfg(all(target_os = "macos", feature = "macos-media-session"))]
+use std::time::Instant;
+
 use anyhow::Result;
 use rusqlite::Connection;
 
+#[cfg(all(target_os = "macos", feature = "macos-media-session"))]
+use crate::art::{self, ArtworkMode};
 use crate::integration::{
     self, Integration, IntegrationCommand, IntegrationEvent, PlaybackSnapshot, TrackSnapshot,
 };
@@ -77,7 +82,7 @@ impl App {
             artist: current.track.artist.clone(),
             album: current.track.album.clone(),
             duration_ms: current.track.duration_ms,
-            artwork_path: current.track.cover_path.clone(),
+            artwork_path: self.integration_artwork_path(&current.track),
         };
         match self
             .integration
@@ -89,6 +94,58 @@ impl App {
                 self.report_integration_error(format!("track integration unavailable: {error:#}"));
             }
         }
+    }
+
+    #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
+    fn integration_artwork_path(
+        &self,
+        track: &crate::db::LibraryTrack,
+    ) -> Option<std::path::PathBuf> {
+        match ArtworkMode::from_env() {
+            ArtworkMode::Cached => track.cover_path.clone(),
+            ArtworkMode::OnDemand => {
+                // Only the macOS media-session backend consumes artwork paths; no-op
+                // integrations should not create cache files during track changes.
+                let start = Instant::now();
+                let result = art::materialize_cover_for_audio_path(
+                    &track.file_path,
+                    &self.paths.art_dir,
+                    track.media_item_id,
+                );
+                let elapsed = start.elapsed();
+                match result {
+                    Ok(path) => {
+                        if art::trace_enabled() {
+                            eprintln!(
+                                "gmus artwork: on-demand resolved={} elapsed_ms={} path={}",
+                                path.is_some(),
+                                elapsed.as_millis(),
+                                track.file_path.display()
+                            );
+                        }
+                        path
+                    }
+                    Err(error) => {
+                        if art::trace_enabled() {
+                            eprintln!(
+                                "gmus artwork: on-demand failed elapsed_ms={} path={} error={error:#}",
+                                elapsed.as_millis(),
+                                track.file_path.display()
+                            );
+                        }
+                        None
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(all(target_os = "macos", feature = "macos-media-session")))]
+    fn integration_artwork_path(
+        &self,
+        _track: &crate::db::LibraryTrack,
+    ) -> Option<std::path::PathBuf> {
+        None
     }
 
     pub(super) fn sync_integration_playback(&mut self, force: bool) {

@@ -1,3 +1,4 @@
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -17,22 +18,65 @@ const FOLDER_ART_NAMES: &[&str] = &[
     "front.png",
 ];
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ArtworkMode {
+    Cached,
+    OnDemand,
+}
+
+impl ArtworkMode {
+    pub fn from_env() -> Self {
+        Self::from_value(env::var("GMUS_ARTWORK_MODE").ok().as_deref())
+    }
+
+    fn from_value(value: Option<&str>) -> Self {
+        match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            Some("cached" | "cache" | "eager" | "scan") => Self::Cached,
+            Some("ondemand" | "on-demand" | "lazy" | "file") => Self::OnDemand,
+            _ => Self::OnDemand,
+        }
+    }
+
+    pub fn scan_version(self) -> i64 {
+        match self {
+            Self::Cached => media::SCAN_VERSION,
+            Self::OnDemand => media::SCAN_VERSION + 100,
+        }
+    }
+
+    pub fn caches_during_scan(self) -> bool {
+        self == Self::Cached
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "macos-media-session"))]
+pub fn trace_enabled() -> bool {
+    matches!(
+        env::var("GMUS_ARTWORK_TRACE").ok().as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
 pub fn cache_cover_for_track(
     track: &TrackMetadata,
     embedded_art: Option<&EmbeddedArt>,
     art_dir: &Path,
     media_item_id: i64,
 ) -> Result<Option<PathBuf>> {
+    cache_cover_for_audio_path(&track.path, embedded_art, art_dir, media_item_id)
+}
+
+pub fn cache_cover_for_audio_path(
+    audio_path: &Path,
+    embedded_art: Option<&EmbeddedArt>,
+    art_dir: &Path,
+    media_item_id: i64,
+) -> Result<Option<PathBuf>> {
     if let Some(embedded) = embedded_art {
-        fs::create_dir_all(art_dir)
-            .with_context(|| format!("creating art cache {}", art_dir.display()))?;
-        let path = art_dir.join(format!("{media_item_id}.{}", embedded.extension));
-        write_cover_bytes_if_changed(&path, &embedded.bytes)
-            .with_context(|| format!("writing embedded cover art to {}", path.display()))?;
-        return Ok(Some(path));
+        return cache_embedded_cover(embedded, art_dir, media_item_id).map(Some);
     }
 
-    if let Some(folder_art) = find_folder_art(&track.path) {
+    if let Some(folder_art) = find_folder_art(audio_path) {
         fs::create_dir_all(art_dir)
             .with_context(|| format!("creating art cache {}", art_dir.display()))?;
         let extension = folder_art
@@ -51,6 +95,31 @@ pub fn cache_cover_for_track(
     }
 
     Ok(None)
+}
+
+pub fn materialize_cover_for_audio_path(
+    audio_path: &Path,
+    art_dir: &Path,
+    media_item_id: i64,
+) -> Result<Option<PathBuf>> {
+    if let Some(embedded) = media::read_embedded_art(audio_path)? {
+        return cache_embedded_cover(&embedded, art_dir, media_item_id).map(Some);
+    }
+
+    Ok(find_folder_art(audio_path))
+}
+
+fn cache_embedded_cover(
+    embedded: &EmbeddedArt,
+    art_dir: &Path,
+    media_item_id: i64,
+) -> Result<PathBuf> {
+    fs::create_dir_all(art_dir)
+        .with_context(|| format!("creating art cache {}", art_dir.display()))?;
+    let path = art_dir.join(format!("{media_item_id}.{}", embedded.extension));
+    write_cover_bytes_if_changed(&path, &embedded.bytes)
+        .with_context(|| format!("writing embedded cover art to {}", path.display()))?;
+    Ok(path)
 }
 
 pub fn find_folder_art(audio_path: &Path) -> Option<PathBuf> {
@@ -134,7 +203,31 @@ fn write_cover_bytes_if_changed(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{copy_cover_if_changed, folder_art_signature, write_cover_bytes_if_changed};
+    use super::{
+        copy_cover_if_changed, folder_art_signature, write_cover_bytes_if_changed, ArtworkMode,
+    };
+
+    #[test]
+    fn artwork_mode_accepts_on_demand_aliases() {
+        assert_eq!(ArtworkMode::from_value(None), ArtworkMode::OnDemand);
+        assert_eq!(ArtworkMode::from_value(Some("cached")), ArtworkMode::Cached);
+        assert_eq!(ArtworkMode::from_value(Some("cache")), ArtworkMode::Cached);
+        assert_eq!(ArtworkMode::from_value(Some("eager")), ArtworkMode::Cached);
+        assert_eq!(ArtworkMode::from_value(Some("scan")), ArtworkMode::Cached);
+        assert_eq!(
+            ArtworkMode::from_value(Some("ondemand")),
+            ArtworkMode::OnDemand
+        );
+        assert_eq!(
+            ArtworkMode::from_value(Some("on-demand")),
+            ArtworkMode::OnDemand
+        );
+        assert_eq!(ArtworkMode::from_value(Some("lazy")), ArtworkMode::OnDemand);
+        assert_eq!(
+            ArtworkMode::from_value(Some(" file ")),
+            ArtworkMode::OnDemand
+        );
+    }
 
     #[test]
     fn cover_cache_writes_only_when_content_differs() {
@@ -152,6 +245,21 @@ mod tests {
         std::fs::write(&source, b"second").unwrap();
         copy_cover_if_changed(&source, &cached).unwrap();
         assert_eq!(std::fs::read(&cached).unwrap(), b"second");
+    }
+
+    #[test]
+    fn on_demand_materialization_reuses_folder_art_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("song.wav");
+        let cover = dir.path().join("cover.jpg");
+        let art_dir = dir.path().join("art-cache");
+        write_test_wav(&audio);
+        std::fs::write(&cover, b"folder art").unwrap();
+
+        let path = super::materialize_cover_for_audio_path(&audio, &art_dir, 42).unwrap();
+
+        assert_eq!(path.as_deref(), Some(cover.as_path()));
+        assert!(!art_dir.exists());
     }
 
     #[test]
@@ -191,5 +299,23 @@ mod tests {
         std::fs::write(&cover, b"cover").unwrap();
 
         assert_eq!(super::find_folder_art(&audio), Some(cover));
+    }
+
+    fn write_test_wav(path: &std::path::Path) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&38_u32.to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&8_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&16_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&2_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_i16.to_le_bytes());
+        std::fs::write(path, bytes).unwrap();
     }
 }

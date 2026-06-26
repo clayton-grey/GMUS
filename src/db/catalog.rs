@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::media::{FileStamp, TrackMetadata, SCAN_VERSION};
+use crate::art::ArtworkMode;
+use crate::media::{FileStamp, TrackMetadata};
 
 use super::now_unix;
 use super::path;
@@ -30,6 +31,10 @@ pub struct LibraryTrack {
     pub release_date: Option<String>,
     pub composer: Option<String>,
     pub genre: Option<String>,
+    #[cfg_attr(
+        not(all(target_os = "macos", feature = "macos-media-session")),
+        allow(dead_code)
+    )]
     pub cover_path: Option<PathBuf>,
     pub track_number: Option<i64>,
     pub track_total: Option<i64>,
@@ -131,12 +136,30 @@ pub fn upsert_track(conn: &Connection, track: &TrackMetadata) -> Result<StoredTr
     })
 }
 
+#[cfg(test)]
 pub fn location_scan_is_current(
     conn: &Connection,
     path: &Path,
     stamp: FileStamp,
     folder_art_signature: Option<&str>,
 ) -> Result<bool> {
+    location_scan_is_current_for_mode(
+        conn,
+        path,
+        stamp,
+        folder_art_signature,
+        ArtworkMode::from_env(),
+    )
+}
+
+pub(crate) fn location_scan_is_current_for_mode(
+    conn: &Connection,
+    path: &Path,
+    stamp: FileStamp,
+    folder_art_signature: Option<&str>,
+    artwork_mode: ArtworkMode,
+) -> Result<bool> {
+    let scan_version = artwork_mode.scan_version();
     conn.query_row(
         r#"
         SELECT EXISTS(
@@ -158,7 +181,7 @@ pub fn location_scan_is_current(
             stamp.modified_at_ns,
             stamp.fs_device,
             stamp.fs_inode,
-            SCAN_VERSION,
+            scan_version,
             folder_art_signature
         ],
         |row| row.get(0),
@@ -166,14 +189,16 @@ pub fn location_scan_is_current(
     .map_err(Into::into)
 }
 
-pub fn mark_location_scan_current(
+pub(crate) fn mark_location_scan_current_for_mode(
     conn: &Connection,
     path: &Path,
     folder_art_signature: Option<&str>,
+    artwork_mode: ArtworkMode,
 ) -> Result<()> {
+    let scan_version = artwork_mode.scan_version();
     conn.execute(
         "UPDATE locations SET scan_version = ?1, folder_art_signature = ?2 WHERE path = ?3 AND missing = 0",
-        params![SCAN_VERSION, folder_art_signature, path::encode(path)],
+        params![scan_version, folder_art_signature, path::encode(path)],
     )?;
     Ok(())
 }

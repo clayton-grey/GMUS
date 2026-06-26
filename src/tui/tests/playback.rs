@@ -653,9 +653,7 @@ fn repeated_integration_failures_do_not_keep_overwriting_messages() {
 #[test]
 fn track_changed_event_uses_owned_track_snapshot() {
     let events = Rc::new(RefCell::new(Vec::new()));
-    let mut track = test_track(1, "first track");
-    track.cover_path = Some(PathBuf::from("/tmp/cover.jpg"));
-    let mut app = test_app(vec![track]);
+    let mut app = test_app(vec![test_track(1, "first track")]);
     app.integration.backend = Box::new(RecordingIntegration {
         events: Rc::clone(&events),
     });
@@ -676,7 +674,7 @@ fn track_changed_event_uses_owned_track_snapshot() {
             artist: Some(String::from("Artist")),
             album: Some(String::from("Album")),
             duration_ms: Some(100_000),
-            artwork_path: Some(PathBuf::from("/tmp/cover.jpg")),
+            artwork_path: None,
         })]
     );
 }

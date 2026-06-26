@@ -18,8 +18,7 @@ library/history store.
   and pane-size adjustments
 - Rodio/Symphonia playback for common formats including MP3, FLAC, AAC/M4A,
   ALAC, AIFF, CAF, Ogg Vorbis, and WAV
-- Cover art extraction and caching for metadata, CLI inspection, and macOS
-  integrations
+- On-demand cover art resolution for CLI inspection and macOS integrations
 - macOS Now Playing metadata, media-key handling, and optional track-change
   artwork notifications
 - CLI commands for scanning, playback, cover-art lookup, play-history recording,
@@ -96,7 +95,8 @@ By default, GMUS stores data in:
 - other Unix-like systems: `$XDG_DATA_HOME/gmus/gmus.sqlite3` or
   `~/.local/share/gmus/gmus.sqlite3`
 
-Cover art is cached next to the database under `art/`.
+Embedded cover art that must be materialized as a standalone image is cached
+next to the database under `art/`.
 
 On macOS, GMUS may also create a hidden notification helper bundle at
 `~/Library/Application Support/GMUS/GMUS.app`. The helper gives macOS a real app
@@ -261,7 +261,9 @@ media key callbacks in terminal apps without opening a visible window.
 OS-specific integrations live behind this event boundary so the core playback,
 library, and TUI code can stay independent from platform APIs.
 
-Cover art is extracted and cached during scans with embedded artwork preferred
-over folder artwork. The macOS integration reuses that cached art for Now
-Playing metadata and track-change overlays. The terminal UI stays text-focused,
+Cover art is resolved on demand with embedded artwork preferred over folder
+artwork. Embedded artwork is written to a small cache only when a platform
+integration or CLI command needs a real image file; folder artwork reuses the
+existing image path. Set `GMUS_ARTWORK_MODE=cached` to restore scan-time cover
+copying for comparison or troubleshooting. The terminal UI stays text-focused,
 with artwork handled by CLI commands and platform integrations.

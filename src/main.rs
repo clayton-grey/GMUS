@@ -110,17 +110,16 @@ fn main() -> Result<()> {
             }
         }
         Command::Art { path } => {
-            let parsed = media::read_track_and_art(&path)?;
-            let stored = db::upsert_track(&conn, &parsed.metadata)?;
-            match art::cache_cover_for_track(
-                &parsed.metadata,
-                parsed.embedded_art.as_ref(),
+            let track = media::read_track(&path)?;
+            let stored = db::upsert_track(&conn, &track)?;
+            match art::materialize_cover_for_audio_path(
+                &track.path,
                 &paths.art_dir,
                 stored.media_item_id,
             )? {
-                Some(cached) => {
-                    db::set_cover_path(&conn, stored.media_item_id, &cached)?;
-                    println!("{}", cached.display());
+                Some(art_path) => {
+                    db::set_cover_path(&conn, stored.media_item_id, &art_path)?;
+                    println!("{}", art_path.display());
                 }
                 None => {
                     db::clear_cover_path(&conn, stored.media_item_id)?;

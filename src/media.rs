@@ -87,10 +87,11 @@ pub fn read_track(path: &Path) -> Result<TrackMetadata> {
     read_track_with_stamp(path, file_stamp(&metadata))
 }
 
-pub fn read_track_and_art(path: &Path) -> Result<ParsedTrack> {
-    let metadata = fs::metadata(path)
-        .with_context(|| format!("reading filesystem metadata for {}", path.display()))?;
-    read_track_and_art_with_stamp(path, file_stamp(&metadata))
+pub fn read_embedded_art(path: &Path) -> Result<Option<EmbeddedArt>> {
+    let tagged = lofty::read_from_path(path)
+        .with_context(|| format!("reading embedded cover art from {}", path.display()))?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
+    Ok(embedded_art_from_tag(tag))
 }
 
 pub fn read_track_with_stamp(path: &Path, stamp: FileStamp) -> Result<TrackMetadata> {

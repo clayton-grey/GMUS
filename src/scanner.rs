@@ -45,8 +45,17 @@ pub fn add_library_root(
     paths: &AppPaths,
     root: &Path,
 ) -> Result<(PathBuf, ScanReport)> {
+    add_library_root_with_artwork_mode(conn, paths, root, art::ArtworkMode::from_env())
+}
+
+fn add_library_root_with_artwork_mode(
+    conn: &Connection,
+    paths: &AppPaths,
+    root: &Path,
+    artwork_mode: art::ArtworkMode,
+) -> Result<(PathBuf, ScanReport)> {
     let root = canonical_root(root)?;
-    let report = rescan_canonical_path(conn, paths, &root)?;
+    let report = rescan_canonical_path(conn, paths, &root, artwork_mode)?;
     if report.outcome == ScanOutcome::Unavailable {
         anyhow::bail!(
             "scanning {}: {}",
@@ -67,11 +76,20 @@ pub fn update_library_root(
     paths: &AppPaths,
     root: &Path,
 ) -> Result<(PathBuf, ScanReport)> {
+    update_library_root_with_artwork_mode(conn, paths, root, art::ArtworkMode::from_env())
+}
+
+fn update_library_root_with_artwork_mode(
+    conn: &Connection,
+    paths: &AppPaths,
+    root: &Path,
+    artwork_mode: art::ArtworkMode,
+) -> Result<(PathBuf, ScanReport)> {
     let root = match canonical_root(root) {
         Ok(root) => root,
         Err(error) => return Ok((root.to_path_buf(), unavailable_report(root, error))),
     };
-    let report = rescan_canonical_path(conn, paths, &root)?;
+    let report = rescan_canonical_path(conn, paths, &root, artwork_mode)?;
     persist_scanned_root(conn, &root, &report)?;
     Ok((root, report))
 }
@@ -92,15 +110,29 @@ pub(crate) fn rescan_path_deferred_merge(
     paths: &AppPaths,
     root: &Path,
 ) -> Result<ScanReport> {
+    rescan_path_deferred_merge_with_artwork_mode(conn, paths, root, art::ArtworkMode::from_env())
+}
+
+fn rescan_path_deferred_merge_with_artwork_mode(
+    conn: &Connection,
+    paths: &AppPaths,
+    root: &Path,
+    artwork_mode: art::ArtworkMode,
+) -> Result<ScanReport> {
     let root = match canonical_root(root) {
         Ok(root) => root,
         Err(error) => return Ok(unavailable_report(root, error)),
     };
-    reconcile_canonical_path(conn, paths, &root)
+    reconcile_canonical_path(conn, paths, &root, artwork_mode)
 }
 
-fn rescan_canonical_path(conn: &Connection, paths: &AppPaths, root: &Path) -> Result<ScanReport> {
-    let mut report = reconcile_canonical_path(conn, paths, root)?;
+fn rescan_canonical_path(
+    conn: &Connection,
+    paths: &AppPaths,
+    root: &Path,
+    artwork_mode: art::ArtworkMode,
+) -> Result<ScanReport> {
+    let mut report = reconcile_canonical_path(conn, paths, root, artwork_mode)?;
     if report.outcome != ScanOutcome::Unavailable {
         report.duplicate_tracks_merged = db::reconcile_renamed_media_items(conn)?;
     }
@@ -111,10 +143,19 @@ fn reconcile_canonical_path(
     conn: &Connection,
     paths: &AppPaths,
     root: &Path,
+    artwork_mode: art::ArtworkMode,
 ) -> Result<ScanReport> {
     let mut report = ScanReport::default();
     let mut seen_paths = Vec::new();
-    scan_inner(conn, paths, root, &mut report, &mut seen_paths, false)?;
+    scan_inner(
+        conn,
+        paths,
+        root,
+        artwork_mode,
+        &mut report,
+        &mut seen_paths,
+        false,
+    )?;
     if report.outcome == ScanOutcome::Complete {
         report.files_marked_missing =
             db::mark_locations_missing_under_root_except(conn, root, &seen_paths)?;
@@ -139,6 +180,7 @@ fn scan_inner(
     conn: &Connection,
     paths: &AppPaths,
     path: &Path,
+    artwork_mode: art::ArtworkMode,
     report: &mut ScanReport,
     seen_paths: &mut Vec<PathBuf>,
     nested: bool,
@@ -187,7 +229,15 @@ fn scan_inner(
         };
         for entry in entries {
             match entry {
-                Ok(entry) => scan_inner(conn, paths, &entry.path(), report, seen_paths, true)?,
+                Ok(entry) => scan_inner(
+                    conn,
+                    paths,
+                    &entry.path(),
+                    artwork_mode,
+                    report,
+                    seen_paths,
+                    true,
+                )?,
                 Err(error) => {
                     report.outcome = ScanOutcome::Partial;
                     report.errors.push(format!(
@@ -223,29 +273,56 @@ fn scan_inner(
         }
     };
     if let Some(folder_art_signature) = &folder_art_signature {
-        if db::location_scan_is_current(conn, path, stamp, folder_art_signature.as_deref())? {
+        if db::location_scan_is_current_for_mode(
+            conn,
+            path,
+            stamp,
+            folder_art_signature.as_deref(),
+            artwork_mode,
+        )? {
             report.files_unchanged += 1;
             return Ok(());
         }
     }
 
-    match media::read_track_and_art_with_stamp(path, stamp) {
-        Ok(parsed) => {
-            let stored = db::upsert_track(conn, &parsed.metadata)?;
+    let parsed = if artwork_mode.caches_during_scan() {
+        media::read_track_and_art_with_stamp(path, stamp)
+            .map(|parsed| (parsed.metadata, parsed.embedded_art))
+    } else {
+        media::read_track_with_stamp(path, stamp).map(|metadata| (metadata, None))
+    };
+
+    match parsed {
+        Ok((metadata, embedded_art)) => {
+            let stored = db::upsert_track(conn, &metadata)?;
             report.tracks_stored += 1;
+            if !artwork_mode.caches_during_scan() {
+                db::clear_cover_path(conn, stored.media_item_id)?;
+                if let Some(folder_art_signature) = &folder_art_signature {
+                    db::mark_location_scan_current_for_mode(
+                        conn,
+                        path,
+                        folder_art_signature.as_deref(),
+                        artwork_mode,
+                    )?;
+                }
+                return Ok(());
+            }
+
             match art::cache_cover_for_track(
-                &parsed.metadata,
-                parsed.embedded_art.as_ref(),
+                &metadata,
+                embedded_art.as_ref(),
                 &paths.art_dir,
                 stored.media_item_id,
             ) {
                 Ok(Some(cover_path)) => {
                     db::set_cover_path(conn, stored.media_item_id, &cover_path)?;
                     if let Some(folder_art_signature) = &folder_art_signature {
-                        db::mark_location_scan_current(
+                        db::mark_location_scan_current_for_mode(
                             conn,
                             path,
                             folder_art_signature.as_deref(),
+                            artwork_mode,
                         )?;
                     }
                     report.art_cached += 1;
@@ -253,10 +330,11 @@ fn scan_inner(
                 Ok(None) => {
                     db::clear_cover_path(conn, stored.media_item_id)?;
                     if let Some(folder_art_signature) = &folder_art_signature {
-                        db::mark_location_scan_current(
+                        db::mark_location_scan_current_for_mode(
                             conn,
                             path,
                             folder_art_signature.as_deref(),
+                            artwork_mode,
                         )?;
                     }
                 }
@@ -297,7 +375,8 @@ mod tests {
         db::upsert_track(&conn, &test_track_metadata(audio_path.clone())).unwrap();
         let paths = test_paths(data_dir.path().join("art"));
 
-        let report = rescan_canonical_path(&conn, &paths, &root).unwrap();
+        let report =
+            rescan_canonical_path(&conn, &paths, &root, art::ArtworkMode::OnDemand).unwrap();
 
         assert_eq!(report.files_seen, 1);
         assert_eq!(report.files_marked_missing, 0);
@@ -373,11 +452,13 @@ mod tests {
         let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
         let paths = test_paths(data_dir.path().join("art"));
 
-        add_library_root(&conn, &paths, &root).unwrap();
+        add_library_root_with_artwork_mode(&conn, &paths, &root, art::ArtworkMode::Cached).unwrap();
         assert!(db::library_tracks(&conn).unwrap()[0].cover_path.is_none());
 
         fs::write(&folder_art, b"first cover").unwrap();
-        let (_, added) = update_library_root(&conn, &paths, &root).unwrap();
+        let (_, added) =
+            update_library_root_with_artwork_mode(&conn, &paths, &root, art::ArtworkMode::Cached)
+                .unwrap();
         let first_cached = db::library_tracks(&conn).unwrap()[0]
             .cover_path
             .clone()
@@ -386,7 +467,9 @@ mod tests {
         assert_eq!(fs::read(&first_cached).unwrap(), b"first cover");
 
         fs::write(&folder_art, b"longer replacement cover").unwrap();
-        let (_, replaced) = update_library_root(&conn, &paths, &root).unwrap();
+        let (_, replaced) =
+            update_library_root_with_artwork_mode(&conn, &paths, &root, art::ArtworkMode::Cached)
+                .unwrap();
         let replaced_cached = db::library_tracks(&conn).unwrap()[0]
             .cover_path
             .clone()
@@ -398,7 +481,9 @@ mod tests {
         );
 
         fs::remove_file(&folder_art).unwrap();
-        let (_, removed) = update_library_root(&conn, &paths, &root).unwrap();
+        let (_, removed) =
+            update_library_root_with_artwork_mode(&conn, &paths, &root, art::ArtworkMode::Cached)
+                .unwrap();
         assert_eq!(removed.files_unchanged, 0);
         assert!(db::library_tracks(&conn).unwrap()[0].cover_path.is_none());
     }
@@ -499,7 +584,9 @@ mod tests {
         let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
         let paths = test_paths(art_path);
 
-        let (_, report) = add_library_root(&conn, &paths, &root).unwrap();
+        let (_, report) =
+            add_library_root_with_artwork_mode(&conn, &paths, &root, art::ArtworkMode::Cached)
+                .unwrap();
 
         assert_eq!(report.tracks_stored, 1);
         assert_eq!(report.art_cached, 0);
@@ -507,7 +594,9 @@ mod tests {
         assert!(report.errors[0].contains("caching cover art"));
         assert_eq!(db::library_tracks(&conn).unwrap().len(), 1);
 
-        let (_, retry) = update_library_root(&conn, &paths, &root).unwrap();
+        let (_, retry) =
+            update_library_root_with_artwork_mode(&conn, &paths, &root, art::ArtworkMode::Cached)
+                .unwrap();
         assert_eq!(retry.files_unchanged, 0);
         assert_eq!(retry.tracks_stored, 1);
         assert_eq!(retry.errors.len(), 1);
@@ -531,6 +620,7 @@ mod tests {
             &conn,
             &paths,
             &missing_nested_path,
+            art::ArtworkMode::OnDemand,
             &mut report,
             &mut seen_paths,
             true,
@@ -540,6 +630,7 @@ mod tests {
             &conn,
             &paths,
             &existing_path,
+            art::ArtworkMode::OnDemand,
             &mut report,
             &mut seen_paths,
             true,
@@ -571,13 +662,15 @@ mod tests {
         let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
         let paths = test_paths(data_dir.path().join("art"));
 
-        let complete = reconcile_canonical_path(&conn, &paths, &root).unwrap();
+        let complete =
+            reconcile_canonical_path(&conn, &paths, &root, art::ArtworkMode::OnDemand).unwrap();
         assert_eq!(complete.outcome, ScanOutcome::Complete);
         assert_eq!(db::library_tracks(&conn).unwrap().len(), 2);
 
         fs::remove_file(&target_path).unwrap();
         write_test_wav(&sibling_path);
-        let partial = reconcile_canonical_path(&conn, &paths, &root).unwrap();
+        let partial =
+            reconcile_canonical_path(&conn, &paths, &root, art::ArtworkMode::OnDemand).unwrap();
 
         assert_eq!(partial.outcome, ScanOutcome::Partial);
         assert_eq!(partial.files_marked_missing, 0);
@@ -607,6 +700,7 @@ mod tests {
             &conn,
             &paths,
             &missing_root,
+            art::ArtworkMode::OnDemand,
             &mut report,
             &mut seen_paths,
             false,
@@ -697,7 +791,8 @@ mod tests {
         .unwrap();
         let paths = test_paths(data_dir.path().join("art"));
 
-        let error = reconcile_canonical_path(&conn, &paths, &root).unwrap_err();
+        let error =
+            reconcile_canonical_path(&conn, &paths, &root, art::ArtworkMode::OnDemand).unwrap_err();
 
         assert!(error.to_string().contains("location insert failed"));
     }
@@ -712,7 +807,8 @@ mod tests {
         let conn = db::open(&data_dir.path().join("gmus.sqlite3")).unwrap();
         let paths = test_paths(data_dir.path().join("art"));
 
-        let report = reconcile_canonical_path(&conn, &paths, &root).unwrap();
+        let report =
+            reconcile_canonical_path(&conn, &paths, &root, art::ArtworkMode::OnDemand).unwrap();
 
         assert_eq!(report.files_seen, 0);
         assert_eq!(report.files_skipped, 1);

@@ -5,6 +5,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
+use crate::art::ArtworkMode;
+
 mod catalog;
 mod history;
 mod migrations;
@@ -14,15 +16,18 @@ mod roots;
 mod settings;
 
 #[cfg(test)]
+pub use catalog::location_scan_is_current;
+#[cfg(test)]
 pub use catalog::mark_locations_missing_under_root;
 #[cfg(test)]
 use catalog::media_stats_row;
 #[allow(unused_imports)]
 pub use catalog::{
-    clear_cover_path, library_tracks, location_scan_is_current, mark_location_scan_current,
-    mark_locations_missing_under_root_except, media_item_id_for_location,
-    reconcile_renamed_media_items, set_cover_path, upsert_track, LibraryTrack, StoredTrack,
+    clear_cover_path, library_tracks, mark_locations_missing_under_root_except,
+    media_item_id_for_location, reconcile_renamed_media_items, set_cover_path, upsert_track,
+    LibraryTrack, StoredTrack,
 };
+pub(crate) use catalog::{location_scan_is_current_for_mode, mark_location_scan_current_for_mode};
 #[cfg(test)]
 use history::count;
 #[allow(unused_imports)]
@@ -60,6 +65,14 @@ pub fn open(path: &Path) -> Result<Connection> {
 }
 
 pub fn prepare_art_cache(conn: &Connection, art_dir: &Path) -> Result<()> {
+    prepare_art_cache_with_mode(conn, art_dir, ArtworkMode::from_env())
+}
+
+fn prepare_art_cache_with_mode(
+    conn: &Connection,
+    art_dir: &Path,
+    artwork_mode: ArtworkMode,
+) -> Result<()> {
     const NAMESPACE_KEY: &str = "art-cache-namespace";
 
     fs::create_dir_all(art_dir)
@@ -67,6 +80,12 @@ pub fn prepare_art_cache(conn: &Connection, art_dir: &Path) -> Result<()> {
     let art_dir = art_dir
         .canonicalize()
         .with_context(|| format!("resolving cover-art directory {}", art_dir.display()))?;
+
+    if !artwork_mode.caches_during_scan() {
+        clear_disabled_art_cache(conn, &art_dir)?;
+        return Ok(());
+    }
+
     let namespace = path::encode(&art_dir);
     let saved_namespace = conn
         .query_row(
@@ -115,6 +134,58 @@ pub fn prepare_art_cache(conn: &Connection, art_dir: &Path) -> Result<()> {
         params![NAMESPACE_KEY, namespace, now_unix()],
     )?;
     tx.commit()?;
+    Ok(())
+}
+
+fn clear_disabled_art_cache(conn: &Connection, art_dir: &Path) -> Result<()> {
+    let cached_cover_ids = {
+        let mut stmt =
+            conn.prepare("SELECT id, cover_path FROM media_items WHERE cover_path IS NOT NULL")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    let tx = conn.unchecked_transaction()?;
+    for (media_item_id, cover_path) in cached_cover_ids {
+        let cover_path = path::decode(&cover_path);
+        if path_is_inside(&cover_path, art_dir) {
+            tx.execute(
+                "UPDATE media_items SET cover_path = NULL WHERE id = ?1",
+                params![media_item_id],
+            )?;
+        }
+    }
+    tx.commit()?;
+
+    remove_art_cache_contents(art_dir)
+}
+
+fn path_is_inside(path: &Path, parent: &Path) -> bool {
+    path.starts_with(parent)
+        || path
+            .canonicalize()
+            .is_ok_and(|canonical| canonical.starts_with(parent))
+}
+
+fn remove_art_cache_contents(art_dir: &Path) -> Result<()> {
+    for entry in
+        fs::read_dir(art_dir).with_context(|| format!("reading art cache {}", art_dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("reading art cache {}", art_dir.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("reading art cache entry {}", path.display()))?;
+        if file_type.is_dir() {
+            fs::remove_dir_all(&path)
+                .with_context(|| format!("removing cached artwork directory {}", path.display()))?;
+        } else {
+            fs::remove_file(&path)
+                .with_context(|| format!("removing cached artwork {}", path.display()))?;
+        }
+    }
     Ok(())
 }
 
@@ -178,7 +249,8 @@ pub(super) fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::{TrackMetadata, SCAN_VERSION};
+    use crate::art::ArtworkMode;
+    use crate::media::TrackMetadata;
     use std::sync::{Arc, Barrier};
     use std::thread;
     use tempfile::tempdir;
@@ -546,9 +618,9 @@ mod tests {
         let track = test_track_metadata("/tmp/music/song.flac", "Song", 1, 120_000);
         let stored = upsert_track(&conn, &track).unwrap();
         set_cover_path(&conn, stored.media_item_id, &legacy_cover).unwrap();
-        mark_location_scan_current(&conn, &track.path, None).unwrap();
+        mark_location_scan_current_for_mode(&conn, &track.path, None, ArtworkMode::Cached).unwrap();
 
-        prepare_art_cache(&conn, &first_dir).unwrap();
+        prepare_art_cache_with_mode(&conn, &first_dir, ArtworkMode::Cached).unwrap();
 
         let first_cover = first_dir
             .canonicalize()
@@ -569,8 +641,8 @@ mod tests {
             None
         );
 
-        mark_location_scan_current(&conn, &track.path, None).unwrap();
-        prepare_art_cache(&conn, &first_dir).unwrap();
+        mark_location_scan_current_for_mode(&conn, &track.path, None, ArtworkMode::Cached).unwrap();
+        prepare_art_cache_with_mode(&conn, &first_dir, ArtworkMode::Cached).unwrap();
         assert_eq!(
             conn.query_row(
                 "SELECT scan_version FROM locations WHERE id = ?1",
@@ -578,10 +650,10 @@ mod tests {
                 |row| row.get::<_, Option<i64>>(0)
             )
             .unwrap(),
-            Some(SCAN_VERSION)
+            Some(ArtworkMode::Cached.scan_version())
         );
 
-        prepare_art_cache(&conn, &second_dir).unwrap();
+        prepare_art_cache_with_mode(&conn, &second_dir, ArtworkMode::Cached).unwrap();
         let second_cover = second_dir
             .canonicalize()
             .unwrap()
@@ -600,6 +672,56 @@ mod tests {
             .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn disabled_art_cache_clears_cached_paths_and_files() {
+        let dir = tempdir().unwrap();
+        let art_dir = dir.path().join("art");
+        let external_dir = dir.path().join("album");
+        fs::create_dir_all(&art_dir).unwrap();
+        fs::create_dir_all(&external_dir).unwrap();
+        let cached_cover = art_dir.join("1.jpg");
+        let stale_cover = art_dir.join("stale.png");
+        let nested_dir = art_dir.join("nested");
+        let nested_cover = nested_dir.join("old.jpg");
+        let external_cover = external_dir.join("cover.jpg");
+        fs::write(&cached_cover, b"cached").unwrap();
+        fs::write(&stale_cover, b"stale").unwrap();
+        fs::create_dir_all(&nested_dir).unwrap();
+        fs::write(&nested_cover, b"nested").unwrap();
+        fs::write(&external_cover, b"external").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let cached = test_track_metadata("/tmp/music/cached.flac", "Cached", 1, 120_000);
+        let external = test_track_metadata("/tmp/music/external.flac", "External", 2, 120_000);
+        let cached_stored = upsert_track(&conn, &cached).unwrap();
+        let external_stored = upsert_track(&conn, &external).unwrap();
+        set_cover_path(&conn, cached_stored.media_item_id, &cached_cover).unwrap();
+        set_cover_path(&conn, external_stored.media_item_id, &external_cover).unwrap();
+
+        prepare_art_cache_with_mode(&conn, &art_dir, ArtworkMode::OnDemand).unwrap();
+
+        assert!(!cached_cover.exists());
+        assert!(!stale_cover.exists());
+        assert!(!nested_dir.exists());
+        let tracks = library_tracks(&conn).unwrap();
+        assert!(tracks
+            .iter()
+            .find(|track| track.media_item_id == cached_stored.media_item_id)
+            .unwrap()
+            .cover_path
+            .is_none());
+        assert_eq!(
+            tracks
+                .iter()
+                .find(|track| track.media_item_id == external_stored.media_item_id)
+                .unwrap()
+                .cover_path
+                .as_deref(),
+            Some(external_cover.as_path())
+        );
+        assert_eq!(fs::read(&external_cover).unwrap(), b"external");
     }
 
     #[test]
