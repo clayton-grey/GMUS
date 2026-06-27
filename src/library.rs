@@ -130,7 +130,9 @@ pub fn job_status(result: &LibraryJobResult) -> String {
             report.duplicate_tracks_merged,
             report.errors.len()
         ),
-        LibraryJobResult::NoActiveRoots => String::from("no active library roots; use :add PATH"),
+        LibraryJobResult::NoActiveRoots => {
+            String::from("no active library roots; use :library-add PATH")
+        }
     }
 }
 

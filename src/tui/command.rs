@@ -36,23 +36,23 @@ pub(super) fn command_help(input: &str) -> Option<CommandHelp> {
         .to_ascii_lowercase();
 
     let help = match command.as_str() {
-        "add" => CommandHelp {
-            command: "add",
+        "library-add" | "add" => CommandHelp {
+            command: "library-add",
             description: "Scan a file or directory and add it as a library root.",
-            usage: ":add PATH",
-            example: ":add ~/Music",
+            usage: ":library-add PATH",
+            example: ":library-add ~/Music",
         },
-        "remove" | "rm" => CommandHelp {
-            command: "remove",
+        "library-remove" | "remove" | "rm" => CommandHelp {
+            command: "library-remove",
             description: "Remove a library root while preserving its tracks and history.",
-            usage: ":remove PATH",
-            example: ":remove ~/Music",
+            usage: ":library-remove PATH",
+            example: ":library-remove ~/Music",
         },
-        "update" | "u" => CommandHelp {
-            command: "update",
+        "library-update" | "update" | "u" => CommandHelp {
+            command: "library-update",
             description: "Rescan every active library root, or only the supplied path.",
-            usage: ":update [PATH]",
-            example: ":update ~/Music",
+            usage: ":library-update [PATH]",
+            example: ":library-update ~/Music",
         },
         "library" | "roots" => CommandHelp {
             command: "library",
@@ -96,6 +96,12 @@ pub(super) fn command_help(input: &str) -> Option<CommandHelp> {
             usage: ":column-layout-width [WIDTH|reset|status]",
             example: ":column-layout-width 100",
         },
+        "layout-reset" => CommandHelp {
+            command: "layout-reset",
+            description: "Reset adjusted pane boundaries to their default sizes.",
+            usage: ":layout-reset",
+            example: ":layout-reset",
+        },
         "rate" => CommandHelp {
             command: "rate",
             description: "Show or change playback speed and pitch.",
@@ -120,17 +126,11 @@ pub(super) fn command_help(input: &str) -> Option<CommandHelp> {
             usage: ":filter QUERY",
             example: ":filter genre:ambient year:2020..",
         },
-        "clear" | "clear-filter" => CommandHelp {
-            command: "clear",
+        "filter-clear" | "clear" | "clear-filter" => CommandHelp {
+            command: "filter-clear",
             description: "Clear the active library filter.",
-            usage: ":clear",
-            example: ":clear",
-        },
-        "clear-output" | "close" | "hide" => CommandHelp {
-            command: "clear-output",
-            description: "Close command output currently shown in the info pane.",
-            usage: ":clear-output",
-            example: ":clear-output",
+            usage: ":filter-clear",
+            example: ":filter-clear",
         },
         #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
         "notifications" | "notify" => CommandHelp {
@@ -253,9 +253,9 @@ pub(super) const COMMAND_NAMES: &[&str] = &BASE_COMMAND_NAMES;
 
 #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
 pub(super) const COMMAND_NAMES: &[&str] = &[
-    "add",
-    "remove",
-    "update",
+    "library-add",
+    "library-remove",
+    "library-update",
     "library",
     "playlist",
     "playlist-clear",
@@ -263,20 +263,20 @@ pub(super) const COMMAND_NAMES: &[&str] = &[
     "keymap",
     "keymap-reset",
     "column-layout-width",
+    "layout-reset",
     "rate",
     "restore-filter",
     "restore-track",
     "filter",
-    "clear",
-    "clear-output",
+    "filter-clear",
     "notifications",
 ];
 
 #[cfg(not(all(target_os = "macos", feature = "macos-media-session")))]
 const BASE_COMMAND_NAMES: [&str; 16] = [
-    "add",
-    "remove",
-    "update",
+    "library-add",
+    "library-remove",
+    "library-update",
     "library",
     "playlist",
     "playlist-clear",
@@ -284,12 +284,12 @@ const BASE_COMMAND_NAMES: [&str; 16] = [
     "keymap",
     "keymap-reset",
     "column-layout-width",
+    "layout-reset",
     "rate",
     "restore-filter",
     "restore-track",
     "filter",
-    "clear",
-    "clear-output",
+    "filter-clear",
 ];
 
 struct CompletionResult {
@@ -309,12 +309,12 @@ fn complete_command_input(conn: &Connection, input: &str) -> Result<CompletionRe
     };
 
     match command.to_ascii_lowercase().as_str() {
-        "add" | "update" | "u" => Ok(complete_path_arg(
+        "library-add" | "add" | "library-update" | "update" | "u" => Ok(complete_path_arg(
             before_arg,
             arg,
             filesystem_candidates(arg),
         )),
-        "remove" | "rm" => Ok(complete_path_arg(
+        "library-remove" | "remove" | "rm" => Ok(complete_path_arg(
             before_arg,
             arg,
             library_root_candidates(conn, arg)?,
@@ -638,12 +638,12 @@ fn library_job_for_command(
     let rest = parts.next().unwrap_or_default().trim();
 
     match command.as_str() {
-        "add" => Some(
+        "library-add" | "add" => Some(
             command_path(rest)
                 .map(library::LibraryJob::AddRoot)
-                .ok_or_else(|| String::from("usage: :add PATH")),
+                .ok_or_else(|| String::from("usage: :library-add PATH")),
         ),
-        "update" | "u" => Some(Ok(command_path(rest)
+        "library-update" | "update" | "u" => Some(Ok(command_path(rest)
             .map(library::LibraryJob::UpdateRoot)
             .unwrap_or(library::LibraryJob::UpdateAllRoots))),
         _ => None,
@@ -811,15 +811,15 @@ impl App {
         let rest = parts.next().unwrap_or_default().trim();
 
         match command.as_str() {
-            "add" => {
+            "library-add" | "add" => {
                 self.clear_command_output();
                 self.command_add(conn, rest)
             }
-            "remove" | "rm" => {
+            "library-remove" | "remove" | "rm" => {
                 self.clear_command_output();
                 self.command_remove(conn, rest)
             }
-            "update" | "u" => {
+            "library-update" | "update" | "u" => {
                 self.clear_command_output();
                 self.command_update(conn, rest)
             }
@@ -840,6 +840,7 @@ impl App {
                 Ok(String::from("keymap reset to defaults"))
             }
             "column-layout-width" => self.command_column_layout_width(conn, rest),
+            "layout-reset" => self.command_layout_reset(conn, rest),
             "rate" => self.command_rate(rest),
             "restore-filter" => self.command_restore_filter(conn, rest),
             "restore-track" => self.command_restore_track(conn, rest),
@@ -849,17 +850,10 @@ impl App {
                 self.confirm_filter(conn)?;
                 Ok(format!("filter: {}", self.filter_display()))
             }
-            "clear" | "clear-filter" => {
+            "filter-clear" | "clear" | "clear-filter" => {
                 self.clear_command_output();
                 self.clear_filter(conn)?;
                 Ok(String::from("filter cleared"))
-            }
-            "clear-output" | "close" | "hide" => {
-                if self.clear_command_output() {
-                    Ok(String::from("output cleared"))
-                } else {
-                    Ok(String::from("no output to clear"))
-                }
             }
             #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
             "notifications" | "notify" => self.command_notifications(rest),
@@ -905,6 +899,16 @@ impl App {
         self.layout.set_column_layout_width(width);
         db::save_column_layout_width(conn, width)?;
         Ok(column_layout_width_message(width))
+    }
+
+    fn command_layout_reset(&mut self, conn: &Connection, raw_value: &str) -> Result<String> {
+        if !raw_value.trim().is_empty() {
+            return Ok(String::from("usage: :layout-reset"));
+        }
+
+        self.layout.reset_pane_offsets();
+        db::save_pane_layout(conn, db::SavedPaneLayout::default())?;
+        Ok(String::from("layout boundaries reset"))
     }
 
     #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
@@ -974,7 +978,7 @@ impl App {
 
     fn command_add(&mut self, conn: &Connection, raw_path: &str) -> Result<String> {
         let Some(path) = command_path(raw_path) else {
-            return Ok(String::from("usage: :add PATH"));
+            return Ok(String::from("usage: :library-add PATH"));
         };
         let result = library::add_root(conn, &self.paths, &path)?;
         if result.refreshes_library() {
@@ -985,7 +989,7 @@ impl App {
 
     fn command_remove(&mut self, conn: &Connection, raw_path: &str) -> Result<String> {
         let Some(path) = command_path(raw_path) else {
-            return Ok(String::from("usage: :remove PATH"));
+            return Ok(String::from("usage: :library-remove PATH"));
         };
         let root = path.canonicalize().unwrap_or(path);
         if db::deactivate_library_root(conn, &root)? {

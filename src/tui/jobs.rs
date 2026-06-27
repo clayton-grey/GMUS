@@ -73,7 +73,7 @@ mod tests {
 
     fn runner(worker: JoinHandle<Result<library::LibraryJobResult>>) -> LibraryJobRunner {
         LibraryJobRunner {
-            command: String::from(":update"),
+            command: String::from(":library-update"),
             worker: Some(worker),
         }
     }

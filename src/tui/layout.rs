@@ -88,6 +88,11 @@ impl LayoutState {
         self.column_layout_width = width;
     }
 
+    pub(super) fn reset_pane_offsets(&mut self) {
+        self.library_pane_percent_offset = 0;
+        self.info_pane_height_offset = 0;
+    }
+
     pub(super) fn resize_library_pane(&mut self, delta: i16) -> (i16, i16) {
         let previous = self.library_pane_percent_offset;
         let next = clamp_library_pane_offset(previous.saturating_add(delta));

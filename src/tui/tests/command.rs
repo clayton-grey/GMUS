@@ -13,7 +13,10 @@ fn command_mode_executes_library_commands() {
         art_dir: data_dir.path().join("art"),
     };
 
-    set_command_input(&mut app, format!("add {}", library_dir.path().display()));
+    set_command_input(
+        &mut app,
+        format!("library-add {}", library_dir.path().display()),
+    );
     app.execute_command(&conn);
 
     let roots = db::active_library_roots(&conn).unwrap();
@@ -29,11 +32,38 @@ fn command_mode_executes_library_commands() {
     assert!(app.command_output.lines()[1].contains("[x]"));
     assert!(app.command_output.lines()[1].contains(library_dir.path().to_str().unwrap()));
 
-    set_command_input(&mut app, format!("remove {}", library_dir.path().display()));
+    set_command_input(
+        &mut app,
+        format!("library-remove {}", library_dir.path().display()),
+    );
     app.execute_command(&conn);
 
     assert!(db::active_library_roots(&conn).unwrap().is_empty());
     assert!(app.message.starts_with("removed "));
+}
+
+#[test]
+fn legacy_library_command_aliases_still_execute() {
+    let data_dir = tempdir().unwrap();
+    let library_dir = tempdir().unwrap();
+    let db_path = data_dir.path().join("gmus.sqlite3");
+    let conn = db::open(&db_path).unwrap();
+    let mut app = test_app(Vec::new());
+    app.paths = AppPaths {
+        data_dir: data_dir.path().to_path_buf(),
+        db_path,
+        art_dir: data_dir.path().join("art"),
+    };
+
+    set_command_input(&mut app, format!("add {}", library_dir.path().display()));
+    app.execute_command(&conn);
+
+    assert_eq!(db::active_library_roots(&conn).unwrap().len(), 1);
+
+    set_command_input(&mut app, format!("rm {}", library_dir.path().display()));
+    app.execute_command(&conn);
+
+    assert!(db::active_library_roots(&conn).unwrap().is_empty());
 }
 
 #[test]
@@ -232,6 +262,38 @@ fn column_layout_width_command_persists_and_resets_layout_threshold() {
 
     assert_eq!(app.layout.column_layout_width(), 75);
     assert_eq!(db::column_layout_width(&conn, 75).unwrap(), 75);
+}
+
+#[test]
+fn layout_reset_command_persists_default_pane_boundaries() {
+    let conn = test_conn();
+    let mut app = test_app(Vec::new());
+    app.layout.resize_library_pane(6);
+    app.layout.resize_info_pane(-3);
+    db::save_pane_layout(
+        &conn,
+        db::SavedPaneLayout {
+            library_percent_offset: app.layout.library_pane_percent_offset(),
+            info_height_offset: app.layout.info_pane_height_offset(),
+        },
+    )
+    .unwrap();
+
+    set_command_input(&mut app, String::from("layout-reset"));
+    app.execute_command(&conn);
+
+    assert_eq!(app.layout.library_pane_percent_offset(), 0);
+    assert_eq!(app.layout.info_pane_height_offset(), 0);
+    assert_eq!(
+        db::pane_layout(&conn).unwrap(),
+        db::SavedPaneLayout::default()
+    );
+    assert_eq!(app.message, "layout boundaries reset");
+
+    set_command_input(&mut app, String::from("layout-reset now"));
+    app.execute_command(&conn);
+
+    assert_eq!(app.message, "usage: :layout-reset");
 }
 
 #[test]
@@ -532,14 +594,16 @@ fn command_help_lists_available_commands() {
 
     let text = lines_text(&command_info_lines(&app, 120, 10));
 
-    assert!(text.contains("commands: add remove update library playlist"));
+    assert!(text.contains("commands: library-add library-remove library-update library"));
+    assert!(text.contains("playlist"));
     assert!(text.contains("playlist-clear playlist-delete keymap keymap-reset"));
     assert!(text.contains("column-layout-width"));
+    assert!(text.contains("layout-reset"));
     assert!(text.contains("restore-filter"));
     assert!(text.contains("restore-track"));
     assert!(text.contains("filter"));
-    assert!(text.contains("clear"));
-    assert!(text.contains("clear-output"));
+    assert!(text.contains("filter-clear"));
+    assert!(!text.contains("clear-output"));
     #[cfg(all(target_os = "macos", feature = "macos-media-session"))]
     assert!(text.contains("notifications"));
     #[cfg(not(all(target_os = "macos", feature = "macos-media-session")))]
@@ -558,15 +622,15 @@ fn command_help_lists_available_commands() {
 fn recognized_command_shows_description_usage_and_example() {
     let mut app = test_app(vec![test_track(1, "first track")]);
     app.input.enter_command();
-    set_command_input(&mut app, String::from("add ~/Music"));
+    set_command_input(&mut app, String::from("library-add ~/Music"));
 
     let lines = command_info_lines(&app, 120, 10);
     let text = lines_text(&lines);
 
-    assert!(text.contains(":add"));
+    assert!(text.contains(":library-add"));
     assert!(text.contains("Scan a file or directory and add it as a library root."));
-    assert!(text.contains("usage: :add PATH"));
-    assert!(text.contains("example: :add ~/Music"));
+    assert!(text.contains("usage: :library-add PATH"));
+    assert!(text.contains("example: :library-add ~/Music"));
     assert!(!text.contains("commands:"));
     assert_eq!(
         lines[0].spans[0].style,
@@ -585,9 +649,43 @@ fn command_alias_shows_canonical_help() {
 
     let text = lines_text(&command_info_lines(&app, 120, 10));
 
-    assert!(text.contains(":remove"));
-    assert!(text.contains("usage: :remove PATH"));
-    assert!(text.contains("example: :remove ~/Music"));
+    assert!(text.contains(":library-remove"));
+    assert!(text.contains("usage: :library-remove PATH"));
+    assert!(text.contains("example: :library-remove ~/Music"));
+
+    set_command_input(&mut app, String::from("update /tmp/music"));
+
+    let text = lines_text(&command_info_lines(&app, 120, 10));
+
+    assert!(text.contains(":library-update"));
+    assert!(text.contains("usage: :library-update [PATH]"));
+    assert!(text.contains("example: :library-update ~/Music"));
+}
+
+#[test]
+fn legacy_clear_filter_alias_shows_canonical_help() {
+    let mut app = test_app(vec![test_track(1, "first track")]);
+    app.input.enter_command();
+    set_command_input(&mut app, String::from("clear"));
+
+    let text = lines_text(&command_info_lines(&app, 120, 10));
+
+    assert!(text.contains(":filter-clear"));
+    assert!(text.contains("usage: :filter-clear"));
+    assert!(text.contains("example: :filter-clear"));
+}
+
+#[test]
+fn command_output_clear_aliases_are_not_commands() {
+    let conn = test_conn();
+    let mut app = test_app(Vec::new());
+
+    for command in ["clear-output", "close", "hide"] {
+        set_command_input(&mut app, command.to_string());
+        app.execute_command(&conn);
+
+        assert_eq!(app.message, format!("unknown command: {command}"));
+    }
 }
 
 #[test]
@@ -601,8 +699,8 @@ fn command_help_wraps_command_list() {
         .collect();
 
     assert!(command_lines.len() > 1);
-    assert!(text.contains("commands: add remove"));
-    assert!(text.contains("clear-output"));
+    assert!(text.contains("commands: library-add"));
+    assert!(!text.contains("clear-output"));
     assert!(command_lines.iter().all(|line| display_width(line) <= 28));
 }
 
@@ -681,14 +779,14 @@ fn scan_commands_start_background_job_before_finishing() {
         art_dir: data_dir.path().join("art"),
     };
     app.input.enter_command();
-    set_command_input(&mut app, String::from("update"));
+    set_command_input(&mut app, String::from("library-update"));
 
     app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
 
     assert_eq!(app.input.kind(), InputKind::None);
     assert!(app.library_job.is_some());
-    assert!(app.command_output.lines()[0].contains("working: :update"));
+    assert!(app.command_output.lines()[0].contains("working: :library-update"));
     assert!(app.command_output.lines()[1].contains("scanning files"));
 
     assert!(wait_for_library_job(&mut app, &conn));
@@ -706,14 +804,17 @@ fn background_scan_completion_returns_to_idle() {
         art_dir: data_dir.path().join("art"),
     };
     app.input.enter_command();
-    set_command_input(&mut app, String::from("update"));
+    set_command_input(&mut app, String::from("library-update"));
 
     app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
 
     assert!(wait_for_library_job(&mut app, &conn));
     assert!(app.library_job.is_none());
-    assert_eq!(app.message, "no active library roots; use :add PATH");
+    assert_eq!(
+        app.message,
+        "no active library roots; use :library-add PATH"
+    );
 }
 
 #[test]
@@ -728,7 +829,7 @@ fn shutdown_joins_active_background_scan() {
         art_dir: data_dir.path().join("art"),
     };
     app.input.enter_command();
-    set_command_input(&mut app, String::from("update"));
+    set_command_input(&mut app, String::from("library-update"));
 
     app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
@@ -751,7 +852,7 @@ fn playlist_commands_run_while_background_scan_is_active() {
         art_dir: data_dir.path().join("art"),
     };
     app.input.enter_command();
-    set_command_input(&mut app, String::from("update"));
+    set_command_input(&mut app, String::from("library-update"));
     app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert!(app.library_job.is_some());
@@ -781,17 +882,17 @@ fn second_scan_command_reports_active_background_scan() {
         art_dir: data_dir.path().join("art"),
     };
     app.input.enter_command();
-    set_command_input(&mut app, String::from("update"));
+    set_command_input(&mut app, String::from("library-update"));
     app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
 
     app.input.enter_command();
-    set_command_input(&mut app, String::from("update"));
+    set_command_input(&mut app, String::from("library-update"));
     app.handle_key(&conn, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
 
     assert!(app.library_job.is_some());
-    assert_eq!(app.message, "scan already running: :update");
+    assert_eq!(app.message, "scan already running: :library-update");
     assert!(wait_for_library_job(&mut app, &conn));
 }
 
@@ -805,7 +906,19 @@ fn tab_completes_command_names() {
     app.handle_key(&conn, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
         .unwrap();
 
-    assert_eq!(app.input.command(), "library ");
+    assert_eq!(app.input.command(), "library");
+
+    set_command_input(&mut app, String::from("library-u"));
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        .unwrap();
+
+    assert_eq!(app.input.command(), "library-update ");
+
+    set_command_input(&mut app, String::from("filter-c"));
+    app.handle_key(&conn, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        .unwrap();
+
+    assert_eq!(app.input.command(), "filter-clear ");
 }
 
 #[test]
@@ -816,14 +929,17 @@ fn tab_completes_filesystem_paths_for_add() {
     let mut app = test_app(vec![test_track(1, "first track")]);
     let conn = test_conn();
     app.input.enter_command();
-    set_command_input(&mut app, format!("add {}/Mu", parent.path().display()));
+    set_command_input(
+        &mut app,
+        format!("library-add {}/Mu", parent.path().display()),
+    );
 
     app.handle_key(&conn, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
         .unwrap();
 
     assert_eq!(
         app.input.command(),
-        format!("add {}/MusicRoot/", parent.path().display())
+        format!("library-add {}/MusicRoot/", parent.path().display())
     );
 }
 
@@ -837,10 +953,10 @@ fn tab_completes_active_roots_for_remove() {
     let prefix_len = root.len().saturating_sub(2);
     let mut app = test_app(vec![test_track(1, "first track")]);
     app.input.enter_command();
-    set_command_input(&mut app, format!("remove {}", &root[..prefix_len]));
+    set_command_input(&mut app, format!("library-remove {}", &root[..prefix_len]));
 
     app.handle_key(&conn, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
         .unwrap();
 
-    assert_eq!(app.input.command(), format!("remove {root} "));
+    assert_eq!(app.input.command(), format!("library-remove {root} "));
 }

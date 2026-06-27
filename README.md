@@ -201,10 +201,10 @@ Both are on by default and can be toggled from the command bar.
 
 ### Command Bar
 
-- `:add PATH`: scan a file or directory and add it as an active library root
-- `:remove PATH`: remove a root from the active library without deleting metadata or play history
-- `:update`: rescan active library roots
-- `:update PATH`: scan or rescan one path and keep it active
+- `:library-add PATH`: scan a file or directory and add it as an active library root
+- `:library-remove PATH`: remove a root from the active library without deleting metadata or play history
+- `:library-update`: rescan active library roots
+- `:library-update PATH`: scan or rescan one path and keep it active
 - `:library`: show active and inactive library roots in the info pane
 - `:playlist NAME`: create/select a playlist and open the playlist pane
 - `:playlist-clear NAME`: remove all tracks from a playlist
@@ -217,13 +217,13 @@ Both are on by default and can be toggled from the command bar.
 - `:restore-track [on|off|toggle|status]`: toggle whether the last played
   track is restored on startup
 - `:filter TEXT`: apply a filter from command mode
-- `:clear`: clear the active filter
-- `:clear-output`, `:close`, or `:hide`: close command output and return the info pane to metadata
+- `:filter-clear`: clear the active filter
 - `:notifications [on|off|toggle|status]`: show or hide macOS track-change overlays on macOS builds
 
-Common aliases include `:rm`, `:u`, `:roots`, `:pl`, `:pl-clear`,
-`:pl-delete`, `:playlist-rm`, `:pl-rm`, `:keys`, `:keys-reset`, `:f`,
-`:clear-filter`, and on macOS builds, `:notify`.
+Common aliases include `:add`, `:remove`, `:update`, `:rm`, `:u`,
+`:roots`, `:pl`, `:pl-clear`, `:pl-delete`, `:playlist-rm`, `:pl-rm`,
+`:keys`, `:keys-reset`, `:f`, `:clear`, `:clear-filter`, and on macOS
+builds, `:notify`.
 
 Playback rates range from `0.25x` to `4.0x` and remain active across tracks.
 Rodio changes pitch along with playback speed; it does not perform pitch-preserving
