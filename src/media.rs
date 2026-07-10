@@ -189,20 +189,7 @@ pub fn is_audio_path(path: &Path) -> bool {
 
     matches!(
         extension.to_ascii_lowercase().as_str(),
-        "aac"
-            | "aiff"
-            | "aif"
-            | "ape"
-            | "flac"
-            | "m4a"
-            | "mp3"
-            | "mp4"
-            | "mpc"
-            | "ogg"
-            | "opus"
-            | "speex"
-            | "wav"
-            | "wv"
+        "aac" | "aiff" | "aif" | "flac" | "m4a" | "mp3" | "mp4" | "ogg" | "wav"
     )
 }
 
@@ -332,7 +319,7 @@ fn native_path_bytes(path: &Path) -> &[u8] {
 
 #[cfg(test)]
 mod tests {
-    use super::{embedded_art_from_tag, parse_year, TrackMetadata};
+    use super::{embedded_art_from_tag, is_audio_path, parse_year, TrackMetadata};
     use lofty::picture::{MimeType, Picture, PictureType};
     use lofty::tag::{Tag, TagType};
     use std::path::PathBuf;
@@ -342,6 +329,25 @@ mod tests {
         assert_eq!(parse_year("2018-05-11"), Some(2018));
         assert_eq!(parse_year("released 1997"), Some(1997));
         assert_eq!(parse_year("97"), None);
+    }
+
+    #[test]
+    fn recognizes_only_formats_supported_by_the_default_backend() {
+        for extension in [
+            "aac", "aif", "aiff", "flac", "m4a", "mp3", "mp4", "ogg", "wav",
+        ] {
+            assert!(
+                is_audio_path(PathBuf::from(format!("track.{extension}")).as_path()),
+                "expected .{extension} to be supported"
+            );
+        }
+
+        for extension in ["ape", "caf", "mpc", "opus", "speex", "wv"] {
+            assert!(
+                !is_audio_path(PathBuf::from(format!("track.{extension}")).as_path()),
+                "expected .{extension} to be rejected"
+            );
+        }
     }
 
     #[test]

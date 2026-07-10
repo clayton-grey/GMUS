@@ -18,7 +18,7 @@ crossterm = "0.29"
 hex = "0.4"
 lofty = "0.24"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
-rodio = { version = "0.22", default-features = false, features = ["playback", "mp3", "flac", "mp4", "vorbis", "wav", "symphonia-aiff", "symphonia-alac", "symphonia-caf"], optional = true }
+rodio = { version = "0.22", default-features = false, features = ["playback", "mp3", "flac", "mp4", "vorbis", "wav", "symphonia-aiff", "symphonia-alac"], optional = true }
 rusqlite = { version = "0.39", default-features = false }
 sha2 = "0.10"
 unicode-width = "0.2"

@@ -65,19 +65,20 @@ pub fn record_play(
     tx.execute(
         r#"
         INSERT INTO media_stats (
-            media_item_id, play_count, last_played_at, total_play_ms
-        ) VALUES (?1, ?2, ?3, ?4)
+            media_item_id, play_count, last_played_at, total_play_ms, skip_count
+        ) VALUES (?1, ?2, ?3, ?4, ?5)
         ON CONFLICT(media_item_id) DO UPDATE SET
             play_count = media_stats.play_count + excluded.play_count,
             last_played_at = COALESCE(excluded.last_played_at, media_stats.last_played_at),
             total_play_ms = media_stats.total_play_ms + excluded.total_play_ms,
-            skip_count = media_stats.skip_count + CASE WHEN excluded.play_count = 0 THEN 1 ELSE 0 END
+            skip_count = media_stats.skip_count + excluded.skip_count
         "#,
         params![
             media_item_id,
             completed_i64,
             if completed { Some(now) } else { None },
-            duration_ms.max(0)
+            duration_ms.max(0),
+            i64::from(!completed)
         ],
     )?;
 

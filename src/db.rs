@@ -75,8 +75,10 @@ fn prepare_art_cache_with_mode(
 ) -> Result<()> {
     const NAMESPACE_KEY: &str = "art-cache-namespace";
 
+    refuse_symlinked_art_cache(art_dir)?;
     fs::create_dir_all(art_dir)
         .with_context(|| format!("creating cover-art directory {}", art_dir.display()))?;
+    refuse_symlinked_art_cache(art_dir)?;
     let art_dir = art_dir
         .canonicalize()
         .with_context(|| format!("resolving cover-art directory {}", art_dir.display()))?;
@@ -135,6 +137,24 @@ fn prepare_art_cache_with_mode(
     )?;
     tx.commit()?;
     Ok(())
+}
+
+fn refuse_symlinked_art_cache(art_dir: &Path) -> Result<()> {
+    match fs::symlink_metadata(art_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!(
+                "refusing symlinked cover-art directory {}",
+                art_dir.display()
+            );
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            anyhow::bail!("cover-art path is not a directory: {}", art_dir.display());
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("inspecting cover-art directory {}", art_dir.display())),
+    }
 }
 
 fn clear_disabled_art_cache(conn: &Connection, art_dir: &Path) -> Result<()> {
@@ -724,6 +744,32 @@ mod tests {
         assert_eq!(fs::read(&external_cover).unwrap(), b"external");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn disabled_art_cache_refuses_symlinked_directory_without_deleting_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let target_dir = dir.path().join("target");
+        let nested_dir = target_dir.join("nested");
+        let art_dir = dir.path().join("art");
+        fs::create_dir_all(&nested_dir).unwrap();
+        let target_file = target_dir.join("keep.txt");
+        let nested_file = nested_dir.join("keep-too.txt");
+        fs::write(&target_file, b"keep").unwrap();
+        fs::write(&nested_file, b"keep too").unwrap();
+        symlink(&target_dir, &art_dir).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        let error =
+            prepare_art_cache_with_mode(&conn, &art_dir, ArtworkMode::OnDemand).unwrap_err();
+
+        assert!(error.to_string().contains("symlinked cover-art directory"));
+        assert_eq!(fs::read(&target_file).unwrap(), b"keep");
+        assert_eq!(fs::read(&nested_file).unwrap(), b"keep too");
+    }
+
     #[test]
     fn browser_selection_round_trips() {
         let conn = Connection::open_in_memory().unwrap();
@@ -904,6 +950,35 @@ mod tests {
         assert_eq!(tracks[0].composer.as_deref(), Some("Composer"));
         assert_eq!(tracks[0].genre.as_deref(), Some("Ambient"));
         assert_eq!(tracks[0].track_total, Some(9));
+    }
+
+    #[test]
+    fn incomplete_play_recreates_missing_stats_with_skip_count() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let track = test_track_metadata("/tmp/song.flac", "Track", 1, 120_000);
+        let stored = upsert_track(&conn, &track).unwrap();
+        conn.execute(
+            "DELETE FROM media_stats WHERE media_item_id = ?1",
+            params![stored.media_item_id],
+        )
+        .unwrap();
+
+        record_play(
+            &conn,
+            stored.media_item_id,
+            stored.location_id,
+            30_000,
+            false,
+        )
+        .unwrap();
+
+        let stats = media_stats_row(&conn, stored.media_item_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stats.play_count, 0);
+        assert_eq!(stats.total_play_ms, 30_000);
+        assert_eq!(stats.skip_count, 1);
     }
 
     #[test]

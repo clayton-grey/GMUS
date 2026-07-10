@@ -17,7 +17,7 @@ library/history store.
 - Persistent restart state for the last played track, confirmed filter, keymap,
   and pane-size adjustments
 - Rodio/Symphonia playback for common formats including MP3, FLAC, AAC/M4A,
-  ALAC, AIFF, CAF, Ogg Vorbis, and WAV
+  ALAC, AIFF, Ogg Vorbis, and WAV
 - On-demand cover art resolution for CLI inspection and macOS integrations
 - macOS Now Playing metadata, media-key handling, and optional track-change
   artwork notifications
